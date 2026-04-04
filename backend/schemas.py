@@ -91,6 +91,15 @@ class FinanceResponse(BaseModel):
 
 # ── Chatters ──────────────────────────────────────────────────────────────────
 
+class ChatterModelBreakdown(BaseModel):
+    model: str
+    revenue: float
+    tier_pct: float        # e.g. 25.0
+    cut: float
+    plan_amount: float     # 0 = нет плана
+    plan_completion: float # 0 = нет плана
+
+
 class ChatterRow(BaseModel):
     name: str
     revenue: float
@@ -99,6 +108,7 @@ class ChatterRow(BaseModel):
     chatter_pct: float
     chatter_cut: float
     status: str  # "top" | "ok" | "risk" | "miss"
+    models: list[ChatterModelBreakdown] = []
 
 
 class ChattersResponse(BaseModel):

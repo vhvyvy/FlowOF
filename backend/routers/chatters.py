@@ -9,7 +9,7 @@ from sqlalchemy import select, func, and_
 from database import get_db
 from dependencies import get_current_tenant
 from models import Tenant, Transaction, Plan, AppSetting
-from schemas import ChattersResponse, ChatterRow
+from schemas import ChattersResponse, ChatterRow, ChatterModelBreakdown
 
 logger = logging.getLogger("skynet.chatters")
 router = APIRouter(prefix="/api/v1", tags=["chatters"])
@@ -116,12 +116,24 @@ async def get_chatters(
             txns = int(r.txn_count or 0)
             tier = max(0.20, model_tier.get(r.model, DEFAULT_TIER))
             cut = rev * tier
+            plan_amt = plan_rows.get(r.model, 0.0)
+            plan_comp = (model_revenue.get(r.model, 0) / plan_amt * 100) if plan_amt > 0 else 0.0
+
+            breakdown_entry = ChatterModelBreakdown(
+                model=r.model or "Unknown",
+                revenue=round(rev, 2),
+                tier_pct=round(tier * 100, 1),
+                cut=round(cut, 2),
+                plan_amount=round(plan_amt, 2),
+                plan_completion=round(plan_comp, 1),
+            )
 
             if name not in chatter_data:
-                chatter_data[name] = {"revenue": 0.0, "txn_count": 0, "chatter_cut": 0.0}
+                chatter_data[name] = {"revenue": 0.0, "txn_count": 0, "chatter_cut": 0.0, "models": []}
             chatter_data[name]["revenue"] += rev
             chatter_data[name]["txn_count"] += txns
             chatter_data[name]["chatter_cut"] += cut
+            chatter_data[name]["models"].append(breakdown_entry)
 
         total_revenue = sum(d["revenue"] for d in chatter_data.values())
 
@@ -147,6 +159,11 @@ async def get_chatters(
             else:
                 status = "miss"
 
+            model_breakdown = sorted(
+                chatter_data[name]["models"],
+                key=lambda m: -m.revenue,
+            )
+
             rows.append(
                 ChatterRow(
                     name=name,
@@ -156,6 +173,7 @@ async def get_chatters(
                     chatter_pct=effective_pct,
                     chatter_cut=round(cut, 2),
                     status=status,
+                    models=model_breakdown,
                 )
             )
 

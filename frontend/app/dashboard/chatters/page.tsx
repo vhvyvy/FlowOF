@@ -1,5 +1,6 @@
 'use client'
 
+import { useEffect, useRef, useState } from 'react'
 import { Header } from '@/components/layout/Header'
 import { MetricCard, MetricCardSkeleton } from '@/components/metrics/MetricCard'
 import { Badge } from '@/components/ui/badge'
@@ -7,8 +8,8 @@ import { Skeleton } from '@/components/ui/skeleton'
 import { useChatters } from '@/lib/hooks/useChatters'
 import { useMonthStore } from '@/lib/hooks/useMonth'
 import { formatCurrency } from '@/lib/utils'
-import type { ChatterStatus } from '@/types'
-import { DollarSign, Users, Target, TrendingUp } from 'lucide-react'
+import type { ChatterStatus, ChatterModelBreakdown } from '@/types'
+import { DollarSign, Users, Target, TrendingUp, X } from 'lucide-react'
 
 const STATUS_BADGE: Record<ChatterStatus, { label: string; variant: 'success' | 'default' | 'warning' | 'danger' }> = {
   top:  { label: 'Топ',    variant: 'success' },
@@ -23,7 +24,6 @@ function tierStyle(pct: number): { color: string; bg: string } {
   if (pct >= 23)  return { color: 'text-emerald-400', bg: 'bg-emerald-500/10 border-emerald-500/20' }
   if (pct >= 22)  return { color: 'text-sky-400',     bg: 'bg-sky-500/10 border-sky-500/20'         }
   if (pct >= 21)  return { color: 'text-sky-400',     bg: 'bg-sky-500/10 border-sky-500/20'         }
-  if (pct >= 20)  return { color: 'text-yellow-400',  bg: 'bg-yellow-500/10 border-yellow-500/20'   }
   return            { color: 'text-yellow-400',  bg: 'bg-yellow-500/10 border-yellow-500/20'   }
 }
 
@@ -34,13 +34,115 @@ function planCompletionColor(completion: number) {
   return 'text-red-400'
 }
 
+// ── Popover with model breakdown ──────────────────────────────────────────────
+
+interface ModelPopoverProps {
+  chatterName: string
+  models: ChatterModelBreakdown[]
+  onClose: () => void
+  anchorRef: React.RefObject<HTMLElement>
+}
+
+function ModelPopover({ chatterName, models, onClose, anchorRef }: ModelPopoverProps) {
+  const popRef = useRef<HTMLDivElement>(null)
+  const [pos, setPos] = useState({ top: 0, left: 0 })
+
+  useEffect(() => {
+    if (anchorRef.current && popRef.current) {
+      const rect = anchorRef.current.getBoundingClientRect()
+      const pop  = popRef.current.getBoundingClientRect()
+      let left = rect.left + rect.width / 2 - pop.width / 2
+      let top  = rect.bottom + 8 + window.scrollY
+      // keep within viewport
+      if (left + pop.width > window.innerWidth - 16) left = window.innerWidth - pop.width - 16
+      if (left < 16) left = 16
+      setPos({ top, left })
+    }
+  }, [anchorRef])
+
+  useEffect(() => {
+    const handler = (e: MouseEvent) => {
+      if (popRef.current && !popRef.current.contains(e.target as Node) &&
+          anchorRef.current && !anchorRef.current.contains(e.target as Node)) {
+        onClose()
+      }
+    }
+    document.addEventListener('mousedown', handler)
+    return () => document.removeEventListener('mousedown', handler)
+  }, [onClose, anchorRef])
+
+  return (
+    <div
+      ref={popRef}
+      style={{ position: 'fixed', top: pos.top, left: pos.left, zIndex: 9999 }}
+      className="w-80 bg-slate-800 border border-slate-600/60 rounded-xl shadow-2xl shadow-black/50"
+    >
+      {/* Header */}
+      <div className="flex items-center justify-between px-4 py-3 border-b border-slate-700/60">
+        <div>
+          <p className="text-xs text-slate-400 uppercase tracking-wide font-semibold">Анкеты</p>
+          <p className="text-sm font-semibold text-slate-100 mt-0.5">{chatterName}</p>
+        </div>
+        <button onClick={onClose} className="text-slate-500 hover:text-slate-300 transition-colors">
+          <X className="h-4 w-4" />
+        </button>
+      </div>
+
+      {/* Model rows */}
+      <div className="divide-y divide-slate-700/40 max-h-72 overflow-y-auto">
+        {models.map((m) => {
+          const ts = tierStyle(m.tier_pct)
+          const hasPlan = m.plan_amount > 0
+          return (
+            <div key={m.model} className="px-4 py-2.5 flex items-center gap-3">
+              <div className="flex-1 min-w-0">
+                <p className="text-xs font-medium text-slate-200 truncate">{m.model}</p>
+                <p className="text-xs text-slate-500 mt-0.5">
+                  {hasPlan
+                    ? `${m.plan_completion}% выполнения · план $${m.plan_amount.toLocaleString()}`
+                    : 'Нет плана → дефолт 25%'
+                  }
+                </p>
+              </div>
+              <div className="text-right shrink-0">
+                <span className={`inline-block text-xs font-bold px-2 py-0.5 rounded-lg border ${ts.bg} ${ts.color}`}>
+                  {m.tier_pct}%
+                </span>
+                <p className="text-xs text-slate-400 mt-0.5">{formatCurrency(m.cut)}</p>
+              </div>
+            </div>
+          )
+        })}
+      </div>
+
+      {/* Footer total */}
+      <div className="px-4 py-2.5 border-t border-slate-700/60 flex items-center justify-between bg-slate-700/20 rounded-b-xl">
+        <span className="text-xs text-slate-400">Итого выплата</span>
+        <span className="text-sm font-semibold text-emerald-400">
+          {formatCurrency(models.reduce((s, m) => s + m.cut, 0))}
+        </span>
+      </div>
+    </div>
+  )
+}
+
+// ── Page ──────────────────────────────────────────────────────────────────────
+
 export default function ChattersPage() {
   const { month, year } = useMonthStore()
   const { data, isLoading, error } = useChatters(month, year)
 
+  const [openPopover, setOpenPopover] = useState<string | null>(null)
+  const btnRefs = useRef<Record<string, HTMLButtonElement | null>>({})
+  const anchorRef = useRef<HTMLElement | null>(null)
+
   const completion  = data?.plan_completion ?? 0
   const totalPayout = data?.chatters.reduce((s, c) => s + c.chatter_cut, 0) ?? 0
   const tier        = tierStyle(completion >= 100 ? 25 : completion >= 90 ? 24 : completion >= 80 ? 23 : completion >= 70 ? 22 : completion >= 60 ? 21 : 20)
+
+  const activeChatter = openPopover
+    ? data?.chatters.find((c) => c.name === openPopover) ?? null
+    : null
 
   return (
     <div className="flex flex-col h-full">
@@ -109,6 +211,7 @@ export default function ChattersPage() {
                   {data.chatters.map((chatter) => {
                     const status = STATUS_BADGE[chatter.status]
                     const ts = tierStyle(chatter.chatter_pct)
+                    const isOpen = openPopover === chatter.name
                     return (
                       <tr key={chatter.name} className="hover:bg-slate-700/20 transition-colors">
                         <td className="px-5 py-3 text-sm font-medium text-slate-200">{chatter.name}</td>
@@ -116,9 +219,16 @@ export default function ChattersPage() {
                         <td className="px-5 py-3 text-sm text-slate-300 text-right">{chatter.transactions}</td>
                         <td className="px-5 py-3 text-sm text-slate-300 text-right">${chatter.rpc}</td>
                         <td className="px-5 py-3 text-right">
-                          <span className={`inline-flex items-center gap-1 text-sm font-bold px-2 py-0.5 rounded-lg border ${ts.bg} ${ts.color}`}>
+                          <button
+                            ref={(el) => { btnRefs.current[chatter.name] = el }}
+                            onClick={(e) => {
+                              anchorRef.current = e.currentTarget
+                              setOpenPopover(isOpen ? null : chatter.name)
+                            }}
+                            className={`inline-flex items-center gap-1 text-sm font-bold px-2 py-0.5 rounded-lg border transition-all cursor-pointer hover:brightness-125 active:scale-95 ${ts.bg} ${ts.color} ${isOpen ? 'ring-1 ring-offset-1 ring-offset-slate-800 ring-current' : ''}`}
+                          >
                             {chatter.chatter_pct}%
-                          </span>
+                          </button>
                         </td>
                         <td className="px-5 py-3 text-sm font-semibold text-right">
                           {chatter.chatter_cut > 0 ? (
@@ -143,6 +253,16 @@ export default function ChattersPage() {
           </div>
         ) : null}
       </div>
+
+      {/* Popover rendered outside table flow */}
+      {activeChatter && openPopover && (
+        <ModelPopover
+          chatterName={activeChatter.name}
+          models={activeChatter.models ?? []}
+          onClose={() => setOpenPopover(null)}
+          anchorRef={{ current: btnRefs.current[openPopover] } as React.RefObject<HTMLElement>}
+        />
+      )}
     </div>
   )
 }

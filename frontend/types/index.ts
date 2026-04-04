@@ -67,6 +67,15 @@ export interface FinanceResponse {
 
 export type ChatterStatus = 'top' | 'ok' | 'risk' | 'miss'
 
+export interface ChatterModelBreakdown {
+  model: string
+  revenue: number
+  tier_pct: number
+  cut: number
+  plan_amount: number
+  plan_completion: number
+}
+
 export interface ChatterRow {
   name: string
   revenue: number
@@ -75,6 +84,7 @@ export interface ChatterRow {
   chatter_pct: number
   chatter_cut: number
   status: ChatterStatus
+  models: ChatterModelBreakdown[]
 }
 
 export interface ChattersResponse {
