@@ -95,13 +95,12 @@ async def get_chatters(
         )
         model_revenue = {r.model: float(r.rev or 0) for r in model_rev_result.all()}
 
-        # Weighted plan completion across models
-        total_plan = sum(plan_rows.values())
+        # Weighted plan completion across models (skip zero-plan models)
+        nonzero_plans = {m: pa for m, pa in plan_rows.items() if pa > 0}
+        total_plan = sum(nonzero_plans.values())
         if total_plan > 0:
-            weighted = sum(
-                model_revenue.get(m, 0) / plan_amount * plan_amount
-                for m, plan_amount in plan_rows.items()
-            ) / total_plan
+            achieved = sum(model_revenue.get(m, 0) for m in nonzero_plans)
+            weighted = achieved / total_plan
         else:
             weighted = 0.0
 
