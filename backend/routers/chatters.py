@@ -133,6 +133,9 @@ async def get_chatters(
             cut = d["chatter_cut"]
             rpc = round(rev / txns, 2) if txns > 0 else 0.0
             # Effective % = actual payout / revenue (blended across models)
+            # If cut ended up at 0 (old data / no tier), recalculate with floor
+            if cut <= 0 and rev > 0:
+                cut = rev * DEFAULT_TIER
             effective_pct = round(cut / rev * 100, 1) if rev > 0 else 0.0
 
             if rev >= total_revenue * 0.20:
