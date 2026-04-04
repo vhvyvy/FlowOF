@@ -107,7 +107,7 @@ async def upsert_plan(
                 plan_amount=body.plan_amount,
             )
             .on_conflict_do_update(
-                constraint="uq_plans_tenant_period_model",
+                index_elements=["tenant_id", "year", "month", "model"],
                 set_={"plan_amount": body.plan_amount},
             )
         )
