@@ -40,7 +40,7 @@ export default function ChattersPage() {
 
   const completion  = data?.plan_completion ?? 0
   const totalPayout = data?.chatters.reduce((s, c) => s + c.chatter_cut, 0) ?? 0
-  const tier        = tierStyle(completion >= 100 ? 25 : completion >= 90 ? 24 : completion >= 80 ? 23 : completion >= 70 ? 22 : completion >= 60 ? 21 : completion >= 50 ? 20 : 0)
+  const tier        = tierStyle(completion >= 100 ? 25 : completion >= 90 ? 24 : completion >= 80 ? 23 : completion >= 70 ? 22 : completion >= 60 ? 21 : 20)
 
   return (
     <div className="flex flex-col h-full">
@@ -69,22 +69,19 @@ export default function ChattersPage() {
 
         {/* Active tier banner */}
         {!isLoading && data && (
-          <div className={`flex items-center justify-between px-5 py-3.5 rounded-xl border ${tier.bg}`}>
+          <div className={`flex items-center px-5 py-3.5 rounded-xl border ${tier.bg}`}>
             <div className="flex items-center gap-3">
-              <span className={`text-2xl font-bold ${tier.color}`}>{completion >= 50 ? `${completion}%` : '—'}</span>
+              <span className={`text-2xl font-bold ${tier.color}`}>{completion}%</span>
               <div>
                 <p className={`text-sm font-semibold ${tier.color}`}>
-                  {completion >= 50 ? 'Тир по анкетам: каждая анкета считается отдельно' : 'Планы не установлены или выполнение < 50%'}
+                  Тир по анкетам: каждая анкета считается отдельно
                 </p>
                 <p className="text-xs text-slate-400 mt-0.5">
                   Выполнение плана: <span className={`font-semibold ${planCompletionColor(completion)}`}>{completion}%</span>
-                  {completion >= 50 && (
-                    <span className="ml-2 text-slate-500">· Тиры: ≥100%→25%, ≥90%→24%, ≥80%→23%, ≥70%→22%, ≥60%→21%, ≥50%→20%</span>
-                  )}
+                  <span className="ml-2 text-slate-500">· Тиры: ≥100%→25%, ≥90%→24%, ≥80%→23%, ≥70%→22%, ≥60%→21%, {'<60%'}→20% (мин.) · Нет плана→25%</span>
                 </p>
               </div>
             </div>
-            <span className={`text-xs font-semibold px-2.5 py-1 rounded-full border ${tier.bg} ${tier.color}`}>{tier.label}</span>
           </div>
         )}
 
