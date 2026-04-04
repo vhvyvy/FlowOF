@@ -10,7 +10,8 @@ from sqlalchemy import select, func, and_
 from database import get_db
 from dependencies import get_current_tenant
 from models import Tenant, Transaction, Expense
-from schemas import OverviewResponse, DailyRevenue
+from schemas import OverviewResponse, DailyRevenue, EconomicBreakdown
+from economics import load_settings, compute_economics
 
 logger = logging.getLogger("skynet.overview")
 router = APIRouter(prefix="/api/v1", tags=["overview"])
@@ -21,7 +22,7 @@ def _month_range(year: int, month: int):
     return date(year, month, 1), date(year, month, last_day)
 
 
-async def _monthly_revenue(db: AsyncSession, tenant_id: int, year: int, month: int) -> Decimal:
+async def _monthly_revenue(db: AsyncSession, tenant_id: int, year: int, month: int) -> float:
     start, end = _month_range(year, month)
     result = await db.execute(
         select(func.coalesce(func.sum(Transaction.amount), 0)).where(
@@ -32,10 +33,10 @@ async def _monthly_revenue(db: AsyncSession, tenant_id: int, year: int, month: i
             )
         )
     )
-    return result.scalar() or Decimal(0)
+    return float(result.scalar() or 0)
 
 
-async def _monthly_expenses(db: AsyncSession, tenant_id: int, year: int, month: int) -> Decimal:
+async def _monthly_db_expenses(db: AsyncSession, tenant_id: int, year: int, month: int) -> float:
     start, end = _month_range(year, month)
     result = await db.execute(
         select(func.coalesce(func.sum(Expense.amount), 0)).where(
@@ -46,7 +47,7 @@ async def _monthly_expenses(db: AsyncSession, tenant_id: int, year: int, month: 
             )
         )
     )
-    return result.scalar() or Decimal(0)
+    return float(result.scalar() or 0)
 
 
 @router.get("/overview", response_model=OverviewResponse)
@@ -59,21 +60,26 @@ async def get_overview(
     try:
         start, end = _month_range(year, month)
 
+        # Load settings once
+        settings = await load_settings(db, tenant.id)
+
         # Current period
-        revenue = float(await _monthly_revenue(db, tenant.id, year, month))
-        expenses = float(await _monthly_expenses(db, tenant.id, year, month))
-        profit = revenue - expenses
-        margin = round(profit / revenue * 100, 1) if revenue > 0 else 0.0
+        revenue    = await _monthly_revenue(db, tenant.id, year, month)
+        db_expenses = await _monthly_db_expenses(db, tenant.id, year, month)
+        eco        = compute_economics(revenue, db_expenses, settings)
 
-        # Previous period for deltas
+        # Previous period
         prev_month = month - 1 if month > 1 else 12
-        prev_year = year if month > 1 else year - 1
-        prev_revenue = float(await _monthly_revenue(db, tenant.id, prev_year, prev_month))
-        prev_expenses = float(await _monthly_expenses(db, tenant.id, prev_year, prev_month))
-        prev_profit = prev_revenue - prev_expenses
+        prev_year  = year if month > 1 else year - 1
+        prev_rev   = await _monthly_revenue(db, tenant.id, prev_year, prev_month)
+        prev_db_exp = await _monthly_db_expenses(db, tenant.id, prev_year, prev_month)
+        prev_eco   = compute_economics(prev_rev, prev_db_exp, settings)
 
-        revenue_delta = round((revenue - prev_revenue) / prev_revenue * 100, 1) if prev_revenue > 0 else 0.0
-        profit_delta = round((profit - prev_profit) / abs(prev_profit) * 100, 1) if prev_profit != 0 else 0.0
+        revenue_delta = round((revenue - prev_rev) / prev_rev * 100, 1) if prev_rev > 0 else 0.0
+        profit_delta  = (
+            round((eco["profit"] - prev_eco["profit"]) / abs(prev_eco["profit"]) * 100, 1)
+            if prev_eco["profit"] != 0 else 0.0
+        )
 
         # Transaction count
         cnt_result = await db.execute(
@@ -107,13 +113,14 @@ async def get_overview(
 
         return OverviewResponse(
             revenue=round(revenue, 2),
-            expenses=round(expenses, 2),
-            profit=round(profit, 2),
-            margin=margin,
+            expenses=eco["total_costs"],
+            profit=eco["profit"],
+            margin=eco["margin"],
             transactions_count=transactions_count,
             revenue_delta=revenue_delta,
             profit_delta=profit_delta,
             daily_revenue=daily_revenue,
+            economic=EconomicBreakdown(**{k: eco[k] for k in EconomicBreakdown.model_fields}),
         )
 
     except Exception as e:

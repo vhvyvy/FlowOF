@@ -55,13 +55,14 @@ class DailyRevenue(BaseModel):
 
 class OverviewResponse(BaseModel):
     revenue: float
-    expenses: float
+    expenses: float        # total costs (payouts + db_expenses)
     profit: float
     margin: float
     transactions_count: int
     revenue_delta: float
     profit_delta: float
     daily_revenue: list[DailyRevenue]
+    economic: Optional[EconomicBreakdown] = None
 
 
 # ── Finance ───────────────────────────────────────────────────────────────────
@@ -70,23 +71,42 @@ class PnlRow(BaseModel):
     label: str
     amount: float
     is_total: bool = False
+    is_positive: bool = False  # retention — зелёная строка
 
 
 class WaterfallItem(BaseModel):
     name: str
     value: float
-    type: str  # "revenue" | "expense" | "result"
+    type: str  # "revenue" | "expense" | "result" | "retention"
+
+
+class EconomicBreakdown(BaseModel):
+    model_cut: float
+    chatter_cut: float
+    admin_cut: float
+    withdraw: float
+    retention: float
+    total_payouts: float
+    db_expenses: float
+    total_costs: float
+    model_pct: float
+    chatter_pct: float
+    admin_pct: float
+    withdraw_pct: float
+    use_withdraw: bool
+    use_retention: bool
 
 
 class FinanceResponse(BaseModel):
     total_revenue: float
-    total_expenses: float
+    total_expenses: float   # total_costs including payouts
     total_profit: float
     margin: float
     revenue_delta: float
     pnl_rows: list[PnlRow]
     waterfall: list[WaterfallItem]
     expenses_by_category: list[dict]
+    economic: EconomicBreakdown
 
 
 # ── Chatters ──────────────────────────────────────────────────────────────────

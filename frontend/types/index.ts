@@ -44,12 +44,30 @@ export interface PnlRow {
   label: string
   amount: number
   is_total: boolean
+  is_positive?: boolean
 }
 
 export interface WaterfallItem {
   name: string
   value: number
-  type: 'revenue' | 'expense' | 'result'
+  type: 'revenue' | 'expense' | 'result' | 'retention'
+}
+
+export interface EconomicBreakdown {
+  model_cut: number
+  chatter_cut: number
+  admin_cut: number
+  withdraw: number
+  retention: number
+  total_payouts: number
+  db_expenses: number
+  total_costs: number
+  model_pct: number
+  chatter_pct: number
+  admin_pct: number
+  withdraw_pct: number
+  use_withdraw: boolean
+  use_retention: boolean
 }
 
 export interface FinanceResponse {
@@ -61,6 +79,19 @@ export interface FinanceResponse {
   pnl_rows: PnlRow[]
   waterfall: WaterfallItem[]
   expenses_by_category: { category: string; amount: number }[]
+  economic: EconomicBreakdown
+}
+
+export interface OverviewResponse {
+  revenue: number
+  expenses: number
+  profit: number
+  margin: number
+  transactions_count: number
+  revenue_delta: number
+  profit_delta: number
+  daily_revenue: { date: string; amount: number }[]
+  economic?: EconomicBreakdown
 }
 
 // ── Chatters ──────────────────────────────────────────────────────────────────
