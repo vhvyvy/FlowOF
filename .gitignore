@@ -1,0 +1,35 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+dist/
+build/
+.venv/
+venv/
+*.env
+!.env.example
+!.env.local.example
+
+# Node.js
+node_modules/
+.next/
+out/
+*.local
+
+# IDE
+.vscode/
+.idea/
+*.swp
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Old Streamlit app (will be deleted after migration)
+# repo_temp/
+
+# Logs
+*.log

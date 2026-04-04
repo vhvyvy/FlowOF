@@ -1,0 +1,516 @@
+# Skynet SaaS — Cursor Rules (FastAPI + Next.js)
+# Читай полностью перед любым изменением кода.
+
+## Что мы строим
+
+Skynet — B2B SaaS дашборд для управления OnlyFans-агентствами.
+Функции: финансы, P&L, KPI чаттеров, планы, AI-аналитик.
+
+Мы переходим с Streamlit на FastAPI (бэкенд) + Next.js (фронтенд).
+Вся Python-логика (db.py, services/) остаётся и переиспользуется.
+Streamlit полностью уходит.
+
+## Стек
+
+### Бэкенд (папка /backend)
+- Python 3.11+
+- FastAPI — API сервер
+- SQLAlchemy 2.0 — ORM (вместо прямого psycopg2)
+- Alembic — миграции БД
+- Pydantic v2 — валидация данных
+- python-jose — JWT токены
+- passlib — хеширование паролей
+- asyncpg — async PostgreSQL драйвер
+- httpx — HTTP клиент для внешних API
+- Neon PostgreSQL — база данных
+
+### Фронтенд (папка /frontend)
+- Next.js 14 (App Router)
+- TypeScript — обязательно везде
+- Tailwind CSS — стили
+- shadcn/ui — UI компоненты
+- Recharts — графики
+- TanStack Query (react-query) — стейт и кэш данных
+- Zustand — глобальный стейт
+- next-auth — авторизация
+
+### Деплой
+- Бэкенд: Railway (из /backend)
+- Фронтенд: Vercel (из /frontend)
+- БД: Neon PostgreSQL
+
+## Структура проекта
+
+```
+skynet-saas/
+├── backend/
+│   ├── main.py                 # FastAPI app, middleware, роуты
+│   ├── database.py             # SQLAlchemy engine, session
+│   ├── models.py               # SQLAlchemy модели таблиц
+│   ├── schemas.py              # Pydantic схемы (request/response)
+│   ├── auth.py                 # JWT логика, хеширование паролей
+│   ├── dependencies.py         # FastAPI Depends (get_db, get_tenant)
+│   ├── routers/
+│   │   ├── auth.py             # POST /auth/login, /auth/refresh
+│   │   ├── overview.py         # GET /api/v1/overview
+│   │   ├── finance.py          # GET /api/v1/finance
+│   │   ├── chatters.py         # GET /api/v1/chatters
+│   │   ├── kpi.py              # GET /api/v1/kpi
+│   │   ├── lab.py              # GET /api/v1/lab
+│   │   ├── ai.py               # POST /api/v1/ai/analyze
+│   │   └── admin.py            # POST /api/v1/admin/tenants
+│   ├── services/
+│   │   ├── onlymonster.py      # Onlymonster API клиент
+│   │   ├── openai_service.py   # OpenAI GPT-4o
+│   │   └── notion_sync.py      # Notion → PostgreSQL sync
+│   ├── alembic/                # Миграции БД
+│   ├── requirements.txt
+│   ├── Dockerfile
+│   └── .env.example
+├── frontend/
+│   ├── app/
+│   │   ├── layout.tsx
+│   │   ├── page.tsx            # редирект на /dashboard
+│   │   ├── login/
+│   │   │   └── page.tsx
+│   │   └── dashboard/
+│   │       ├── layout.tsx      # сайдбар + навигация
+│   │       ├── page.tsx        # Overview
+│   │       ├── finance/page.tsx
+│   │       ├── chatters/page.tsx
+│   │       ├── kpi/page.tsx
+│   │       ├── lab/page.tsx
+│   │       └── ai/page.tsx
+│   ├── components/
+│   │   ├── ui/                 # shadcn компоненты
+│   │   ├── charts/
+│   │   │   ├── RevenueChart.tsx
+│   │   │   ├── WaterfallChart.tsx
+│   │   │   └── ChatterTable.tsx
+│   │   ├── metrics/
+│   │   │   └── MetricCard.tsx
+│   │   └── layout/
+│   │       ├── Sidebar.tsx
+│   │       └── Header.tsx
+│   ├── lib/
+│   │   ├── api.ts              # axios инстанс с базовым URL и токеном
+│   │   ├── hooks/              # кастомные хуки для данных
+│   │   └── utils.ts
+│   ├── types/
+│   │   └── index.ts            # TypeScript типы
+│   ├── package.json
+│   └── .env.local.example
+└── .cursorrules                # этот файл
+```
+
+## Мультитенантность — ГЛАВНЫЙ ПРИНЦИП
+
+Каждый клиент = tenant. Данные полностью изолированы по tenant_id.
+
+### БД — tenant_id в каждой таблице:
+```sql
+-- Каждая таблица данных содержит tenant_id
+SELECT * FROM transactions WHERE tenant_id = $1;
+SELECT * FROM expenses WHERE tenant_id = $1;
+SELECT * FROM shifts WHERE tenant_id = $1;
+```
+
+### FastAPI — tenant через JWT:
+```python
+# dependencies.py
+async def get_current_tenant(
+    token: str = Depends(oauth2_scheme),
+    db: AsyncSession = Depends(get_db)
+) -> Tenant:
+    payload = decode_jwt(token)
+    tenant_id = payload.get("tenant_id")
+    tenant = await db.get(Tenant, tenant_id)
+    if not tenant or not tenant.active:
+        raise HTTPException(status_code=401)
+    return tenant
+
+# В каждом роутере:
+@router.get("/overview")
+async def get_overview(
+    month: int,
+    year: int,
+    tenant: Tenant = Depends(get_current_tenant),
+    db: AsyncSession = Depends(get_db)
+):
+    # tenant.id всегда доступен, данные изолированы
+    data = await get_overview_data(db, tenant.id, month, year)
+    return data
+```
+
+### Next.js — токен в каждом запросе:
+```typescript
+// lib/api.ts
+import axios from 'axios'
+
+const api = axios.create({
+  baseURL: process.env.NEXT_PUBLIC_API_URL,
+})
+
+api.interceptors.request.use((config) => {
+  const token = localStorage.getItem('token')
+  if (token) config.headers.Authorization = `Bearer ${token}`
+  return config
+})
+
+export default api
+```
+
+## Модели БД (SQLAlchemy)
+
+```python
+# models.py
+from sqlalchemy import Column, Integer, String, Numeric, DateTime, Boolean, ForeignKey
+from sqlalchemy.orm import DeclarativeBase
+from datetime import datetime
+
+class Base(DeclarativeBase):
+    pass
+
+class Tenant(Base):
+    __tablename__ = "tenants"
+    id = Column(Integer, primary_key=True)
+    name = Column(String, nullable=False)
+    slug = Column(String, unique=True)
+    email = Column(String, unique=True)
+    hashed_password = Column(String)
+    notion_token = Column(String)
+    onlymonster_key = Column(String)
+    onlymonster_account_ids = Column(String)
+    openai_key = Column(String)
+    plan = Column(String, default="basic")
+    active = Column(Boolean, default=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+class Transaction(Base):
+    __tablename__ = "transactions"
+    id = Column(Integer, primary_key=True)
+    tenant_id = Column(Integer, ForeignKey("tenants.id"), nullable=False)
+    date = Column(DateTime)
+    model = Column(String)
+    chatter = Column(String)
+    amount = Column(Numeric)
+    shift_id = Column(String)
+
+class Expense(Base):
+    __tablename__ = "expenses"
+    id = Column(Integer, primary_key=True)
+    tenant_id = Column(Integer, ForeignKey("tenants.id"), nullable=False)
+    date = Column(DateTime)
+    model = Column(String)
+    amount = Column(Numeric)
+    category = Column(String)
+```
+
+## Pydantic схемы (schemas.py)
+
+```python
+# schemas.py
+from pydantic import BaseModel
+from datetime import datetime
+from typing import Optional
+
+class LoginRequest(BaseModel):
+    email: str
+    password: str
+
+class TokenResponse(BaseModel):
+    access_token: str
+    token_type: str = "bearer"
+
+class OverviewResponse(BaseModel):
+    revenue: float
+    profit: float
+    margin: float
+    transactions_count: int
+    revenue_delta: float       # % к прошлому месяцу
+    profit_delta: float
+    daily_revenue: list[dict]  # [{date, amount}]
+
+class ChatterRow(BaseModel):
+    name: str
+    revenue: float
+    transactions: int
+    plan_pct: float
+    rpc: float
+    status: str  # "top" | "ok" | "risk" | "miss"
+
+class ChattersResponse(BaseModel):
+    chatters: list[ChatterRow]
+    total_revenue: float
+
+class FinanceResponse(BaseModel):
+    total_revenue: float
+    total_profit: float
+    margin: float
+    pnl_rows: list[dict]
+    waterfall: list[dict]  # для waterfall графика
+```
+
+## Паттерн роутера (FastAPI)
+
+```python
+# routers/overview.py
+from fastapi import APIRouter, Depends, Query
+from sqlalchemy.ext.asyncio import AsyncSession
+from dependencies import get_db, get_current_tenant
+from models import Tenant
+from schemas import OverviewResponse
+import pandas as pd
+
+router = APIRouter(prefix="/api/v1", tags=["overview"])
+
+@router.get("/overview", response_model=OverviewResponse)
+async def get_overview(
+    month: int = Query(..., ge=1, le=12),
+    year: int = Query(..., ge=2020),
+    tenant: Tenant = Depends(get_current_tenant),
+    db: AsyncSession = Depends(get_db)
+):
+    try:
+        # Текущий месяц
+        current = await get_monthly_revenue(db, tenant.id, month, year)
+        # Прошлый месяц для дельты
+        prev_month = month - 1 if month > 1 else 12
+        prev_year = year if month > 1 else year - 1
+        previous = await get_monthly_revenue(db, tenant.id, prev_month, prev_year)
+
+        delta = ((current - previous) / previous * 100) if previous > 0 else 0
+
+        return OverviewResponse(
+            revenue=current,
+            revenue_delta=round(delta, 1),
+            ...
+        )
+    except Exception as e:
+        logger.error(f"overview error tenant={tenant.id}: {e}")
+        raise HTTPException(status_code=500, detail="Ошибка загрузки данных")
+```
+
+## Паттерн компонента Next.js
+
+```typescript
+// components/metrics/MetricCard.tsx
+interface MetricCardProps {
+  label: string
+  value: string
+  delta?: number      // процент изменения
+  deltaLabel?: string
+}
+
+export function MetricCard({ label, value, delta, deltaLabel }: MetricCardProps) {
+  const isPositive = delta !== undefined && delta >= 0
+
+  return (
+    <div className="bg-white rounded-xl border border-gray-100 p-5">
+      <p className="text-sm text-gray-500 mb-1">{label}</p>
+      <p className="text-2xl font-semibold text-gray-900">{value}</p>
+      {delta !== undefined && (
+        <p className={`text-sm mt-1 ${isPositive ? 'text-emerald-600' : 'text-red-500'}`}>
+          {isPositive ? '+' : ''}{delta}% {deltaLabel ?? 'к прошлому месяцу'}
+        </p>
+      )}
+    </div>
+  )
+}
+```
+
+```typescript
+// app/dashboard/page.tsx
+'use client'
+import { useQuery } from '@tanstack/react-query'
+import { MetricCard } from '@/components/metrics/MetricCard'
+import { RevenueChart } from '@/components/charts/RevenueChart'
+import api from '@/lib/api'
+
+export default function OverviewPage() {
+  const { data, isLoading, error } = useQuery({
+    queryKey: ['overview', month, year],
+    queryFn: () => api.get(`/api/v1/overview?month=${month}&year=${year}`).then(r => r.data)
+  })
+
+  if (isLoading) return <DashboardSkeleton />
+  if (error) return <ErrorState message="Не удалось загрузить данные" />
+
+  return (
+    <div className="space-y-6">
+      <div className="grid grid-cols-4 gap-4">
+        <MetricCard label="Выручка" value={`$${data.revenue.toLocaleString()}`} delta={data.revenue_delta} />
+        <MetricCard label="Прибыль" value={`$${data.profit.toLocaleString()}`} delta={data.profit_delta} />
+        <MetricCard label="Маржа" value={`${data.margin}%`} />
+        <MetricCard label="Транзакции" value={data.transactions_count.toLocaleString()} />
+      </div>
+      <RevenueChart data={data.daily_revenue} />
+    </div>
+  )
+}
+```
+
+## UI библиотеки — как использовать
+
+### shadcn/ui — установка компонентов:
+```bash
+npx shadcn-ui@latest add button card table badge select
+```
+
+### Recharts — паттерн графика:
+```typescript
+// components/charts/RevenueChart.tsx
+'use client'
+import { AreaChart, Area, XAxis, YAxis, Tooltip, ResponsiveContainer } from 'recharts'
+
+interface RevenueChartProps {
+  data: { date: string; amount: number }[]
+}
+
+export function RevenueChart({ data }: RevenueChartProps) {
+  return (
+    <div className="bg-white rounded-xl border border-gray-100 p-5">
+      <h3 className="text-sm font-medium text-gray-700 mb-4">Выручка по дням</h3>
+      <ResponsiveContainer width="100%" height={200}>
+        <AreaChart data={data}>
+          <defs>
+            <linearGradient id="revenue" x1="0" y1="0" x2="0" y2="1">
+              <stop offset="5%" stopColor="#7F77DD" stopOpacity={0.15}/>
+              <stop offset="95%" stopColor="#7F77DD" stopOpacity={0}/>
+            </linearGradient>
+          </defs>
+          <XAxis dataKey="date" tick={{ fontSize: 12 }} />
+          <YAxis tick={{ fontSize: 12 }} />
+          <Tooltip formatter={(v: number) => [`$${v.toLocaleString()}`, 'Выручка']} />
+          <Area type="monotone" dataKey="amount" stroke="#7F77DD" strokeWidth={2} fill="url(#revenue)" />
+        </AreaChart>
+      </ResponsiveContainer>
+    </div>
+  )
+}
+```
+
+## Авторизация
+
+### FastAPI — JWT:
+```python
+# auth.py
+from jose import jwt
+from passlib.context import CryptContext
+from datetime import datetime, timedelta
+
+SECRET_KEY = os.getenv("SECRET_KEY")
+ALGORITHM = "HS256"
+pwd_context = CryptContext(schemes=["bcrypt"])
+
+def create_access_token(tenant_id: int, email: str) -> str:
+    payload = {
+        "tenant_id": tenant_id,
+        "email": email,
+        "exp": datetime.utcnow() + timedelta(days=7)
+    }
+    return jwt.encode(payload, SECRET_KEY, algorithm=ALGORITHM)
+
+def decode_jwt(token: str) -> dict:
+    return jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+```
+
+### Next.js — хранение токена:
+```typescript
+// lib/auth.ts
+export const login = async (email: string, password: string) => {
+  const res = await api.post('/auth/login', { email, password })
+  localStorage.setItem('token', res.data.access_token)
+  return res.data
+}
+
+export const logout = () => {
+  localStorage.removeItem('token')
+  window.location.href = '/login'
+}
+```
+
+## Переменные окружения
+
+### Backend (.env):
+```
+DATABASE_URL=postgresql+asyncpg://user:pass@host/db
+SECRET_KEY=случайная_строка_32_символа
+OPENAI_API_KEY=sk-...
+ADMIN_SECRET=пароль_для_создания_tenants
+```
+
+### Frontend (.env.local):
+```
+NEXT_PUBLIC_API_URL=https://твой-бэкенд.railway.app
+```
+
+## Деплой
+
+### Бэкенд на Railway:
+- Root directory: /backend
+- Build: pip install -r requirements.txt
+- Start: uvicorn main:app --host 0.0.0.0 --port $PORT
+- Переменные: DATABASE_URL, SECRET_KEY, OPENAI_API_KEY
+
+### Фронтенд на Vercel:
+- Root directory: /frontend
+- Framework: Next.js (автодетект)
+- Переменные: NEXT_PUBLIC_API_URL
+
+## CORS (обязательно в main.py):
+```python
+from fastapi.middleware.cors import CORSMiddleware
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[
+        "https://твой-сайт.vercel.app",
+        "http://localhost:3000"
+    ],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+```
+
+## Что НЕЛЬЗЯ делать
+
+- Никогда не делать SQL-запросы без WHERE tenant_id = $1
+- Никогда не хранить секреты в коде — только в .env
+- Никогда не использовать any в TypeScript — всегда типизировать
+- Никогда не делать запросы к API прямо в компонентах — только через хуки
+- Никогда не возвращать данные других tenants
+- Никогда не коммитить .env файлы
+
+## Порядок разработки
+
+### Этап 1 — бэкенд (делаем первым):
+1. database.py — подключение к Neon через asyncpg
+2. models.py — все таблицы
+3. auth.py + routers/auth.py — логин/JWT
+4. dependencies.py — get_db, get_current_tenant
+5. routers/overview.py — первый рабочий эндпоинт
+6. Проверить в Swagger UI (fastapi /docs)
+
+### Этап 2 — фронтенд:
+1. Next.js проект + shadcn/ui установка
+2. lib/api.ts — axios с токеном
+3. Страница логина
+4. Layout с сайдбаром
+5. Dashboard/Overview с реальными данными
+6. Остальные вкладки
+
+### Этап 3 — остальные роутеры:
+finance → chatters → kpi → lab → ai
+
+## Текущий статус
+
+- [x] Логика в db.py и services/ — переиспользуем
+- [x] Neon PostgreSQL — подключён
+- [x] Onlymonster интеграция — переносим в services/
+- [ ] FastAPI бэкенд — СТРОИМ
+- [ ] Next.js фронтенд — СТРОИМ
+- [ ] JWT авторизация — СТРОИМ
+- [ ] Мультитенантность — СТРОИМ
+- [ ] Vercel + Railway деплой — ПОСЛЕ
