@@ -48,30 +48,7 @@ async def get_chatters(
     try:
         start, end = _month_range(year, month)
 
-        # Revenue by chatter
-        chatter_result = await db.execute(
-            select(
-                Transaction.chatter,
-                func.sum(Transaction.amount).label("revenue"),
-                func.count(Transaction.id).label("txn_count"),
-            )
-            .where(
-                and_(
-                    Transaction.tenant_id == tenant.id,
-                    Transaction.date >= start,
-                    Transaction.date <= end,
-                    Transaction.chatter.isnot(None),
-                )
-            )
-            .group_by(Transaction.chatter)
-            .order_by(func.sum(Transaction.amount).desc())
-        )
-        chatter_rows = chatter_result.all()
-
-        # Total revenue for this period
-        total_revenue = sum(float(r.revenue or 0) for r in chatter_rows)
-
-        # Plans for this period → weighted completion
+        # Plans for this period
         plan_result = await db.execute(
             select(Plan.model, Plan.plan_amount).where(
                 and_(
@@ -83,7 +60,7 @@ async def get_chatters(
         )
         plan_rows = {r.model: float(r.plan_amount or 0) for r in plan_result.all()}
 
-        # Revenue by model for plan comparison
+        # Revenue by model → compute tier per model
         model_rev_result = await db.execute(
             select(Transaction.model, func.sum(Transaction.amount).label("rev"))
             .where(
@@ -97,24 +74,60 @@ async def get_chatters(
         )
         model_revenue = {r.model: float(r.rev or 0) for r in model_rev_result.all()}
 
-        # Weighted plan completion across models (skip zero-plan models)
-        nonzero_plans = {m: pa for m, pa in plan_rows.items() if pa > 0}
-        total_plan = sum(nonzero_plans.values())
-        if total_plan > 0:
-            achieved = sum(model_revenue.get(m, 0) for m in nonzero_plans)
-            weighted = achieved / total_plan
-        else:
-            weighted = 0.0
+        # Tier per model based on its own plan completion
+        model_tier: dict[str, float] = {}
+        for model, plan_amount in plan_rows.items():
+            if plan_amount > 0:
+                completion = model_revenue.get(model, 0) / plan_amount
+                model_tier[model] = _tier_pct(completion)
+            # Models with plan_amount=0 → no tier (0%)
 
-        chatter_pct = _tier_pct(weighted)
+        # Revenue by chatter AND model to apply per-model tier
+        chatter_model_result = await db.execute(
+            select(
+                Transaction.chatter,
+                Transaction.model,
+                func.sum(Transaction.amount).label("revenue"),
+                func.count(Transaction.id).label("txn_count"),
+            )
+            .where(
+                and_(
+                    Transaction.tenant_id == tenant.id,
+                    Transaction.date >= start,
+                    Transaction.date <= end,
+                    Transaction.chatter.isnot(None),
+                )
+            )
+            .group_by(Transaction.chatter, Transaction.model)
+        )
+        chatter_model_rows = chatter_model_result.all()
 
-        # Build response rows
-        rows: list[ChatterRow] = []
-        for r in chatter_rows:
+        # Aggregate per chatter: sum revenue and payout across models
+        chatter_data: dict[str, dict] = {}
+        for r in chatter_model_rows:
+            name = r.chatter or "Unknown"
             rev = float(r.revenue or 0)
             txns = int(r.txn_count or 0)
+            tier = model_tier.get(r.model, 0.0)
+            cut = rev * tier
+
+            if name not in chatter_data:
+                chatter_data[name] = {"revenue": 0.0, "txn_count": 0, "chatter_cut": 0.0}
+            chatter_data[name]["revenue"] += rev
+            chatter_data[name]["txn_count"] += txns
+            chatter_data[name]["chatter_cut"] += cut
+
+        total_revenue = sum(d["revenue"] for d in chatter_data.values())
+
+        # Build response rows sorted by revenue desc
+        rows: list[ChatterRow] = []
+        for name, d in sorted(chatter_data.items(), key=lambda x: -x[1]["revenue"]):
+            rev = d["revenue"]
+            txns = d["txn_count"]
+            cut = d["chatter_cut"]
             rpc = round(rev / txns, 2) if txns > 0 else 0.0
-            cut = round(rev * chatter_pct, 2)
+            # Effective % = actual payout / revenue (blended across models)
+            effective_pct = round(cut / rev * 100, 1) if rev > 0 else 0.0
 
             if rev >= total_revenue * 0.20:
                 status = "top"
@@ -127,15 +140,24 @@ async def get_chatters(
 
             rows.append(
                 ChatterRow(
-                    name=r.chatter or "Unknown",
+                    name=name,
                     revenue=round(rev, 2),
                     transactions=txns,
                     rpc=rpc,
-                    chatter_pct=round(chatter_pct * 100, 1),
-                    chatter_cut=cut,
+                    chatter_pct=effective_pct,
+                    chatter_cut=round(cut, 2),
                     status=status,
                 )
             )
+
+        # Overall weighted completion for display
+        nonzero_plans = {m: pa for m, pa in plan_rows.items() if pa > 0}
+        total_plan = sum(nonzero_plans.values())
+        if total_plan > 0:
+            achieved = sum(model_revenue.get(m, 0) for m in nonzero_plans)
+            weighted = achieved / total_plan
+        else:
+            weighted = 0.0
 
         return ChattersResponse(
             chatters=rows,

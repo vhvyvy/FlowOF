@@ -18,13 +18,14 @@ const STATUS_BADGE: Record<ChatterStatus, { label: string; variant: 'success' | 
 }
 
 function tierStyle(pct: number): { color: string; bg: string; label: string } {
-  if (pct >= 25) return { color: 'text-emerald-400', bg: 'bg-emerald-500/15 border-emerald-500/30', label: 'Тир 1' }
-  if (pct >= 24) return { color: 'text-emerald-400', bg: 'bg-emerald-500/10 border-emerald-500/20', label: 'Тир 2' }
-  if (pct >= 23) return { color: 'text-emerald-400', bg: 'bg-emerald-500/10 border-emerald-500/20', label: 'Тир 3' }
-  if (pct >= 22) return { color: 'text-sky-400',     bg: 'bg-sky-500/10 border-sky-500/20',         label: 'Тир 4' }
-  if (pct >= 21) return { color: 'text-sky-400',     bg: 'bg-sky-500/10 border-sky-500/20',         label: 'Тир 5' }
-  if (pct >= 20) return { color: 'text-yellow-400',  bg: 'bg-yellow-500/10 border-yellow-500/20',   label: 'Тир 6' }
-  return            { color: 'text-slate-500',    bg: 'bg-slate-700/30 border-slate-600/30',     label: 'Нет тира' }
+  if (pct >= 25)   return { color: 'text-emerald-400', bg: 'bg-emerald-500/15 border-emerald-500/30', label: '≥100%' }
+  if (pct >= 24)   return { color: 'text-emerald-400', bg: 'bg-emerald-500/10 border-emerald-500/20', label: '≥90%'  }
+  if (pct >= 23)   return { color: 'text-emerald-400', bg: 'bg-emerald-500/10 border-emerald-500/20', label: '≥80%'  }
+  if (pct >= 22)   return { color: 'text-sky-400',     bg: 'bg-sky-500/10 border-sky-500/20',         label: '≥70%'  }
+  if (pct >= 21)   return { color: 'text-sky-400',     bg: 'bg-sky-500/10 border-sky-500/20',         label: '≥60%'  }
+  if (pct >= 20)   return { color: 'text-yellow-400',  bg: 'bg-yellow-500/10 border-yellow-500/20',   label: '≥50%'  }
+  if (pct > 0)     return { color: 'text-orange-400',  bg: 'bg-orange-500/10 border-orange-500/20',   label: 'mixed' }
+  return             { color: 'text-slate-500',    bg: 'bg-slate-700/30 border-slate-600/30',     label: 'нет плана' }
 }
 
 function planCompletionColor(completion: number) {
@@ -38,10 +39,9 @@ export default function ChattersPage() {
   const { month, year } = useMonthStore()
   const { data, isLoading, error } = useChatters(month, year)
 
-  const activePct   = data?.chatters[0]?.chatter_pct ?? 0
   const completion  = data?.plan_completion ?? 0
-  const tier        = tierStyle(activePct)
   const totalPayout = data?.chatters.reduce((s, c) => s + c.chatter_cut, 0) ?? 0
+  const tier        = tierStyle(completion >= 100 ? 25 : completion >= 90 ? 24 : completion >= 80 ? 23 : completion >= 70 ? 22 : completion >= 60 ? 21 : completion >= 50 ? 20 : 0)
 
   return (
     <div className="flex flex-col h-full">
@@ -75,7 +75,7 @@ export default function ChattersPage() {
               <span className={`text-2xl font-bold ${tier.color}`}>{activePct > 0 ? `${activePct}%` : '—'}</span>
               <div>
                 <p className={`text-sm font-semibold ${tier.color}`}>
-                  {activePct > 0 ? `Активный тир — ${activePct}% от выручки каждому чаттеру` : 'Тир не определён — план выполнен менее чем на 50%'}
+                  {completion >= 50 ? `Тир по анкетам: каждая анкета считается отдельно` : 'Планы не установлены или выполнение < 50%'}
                 </p>
                 <p className="text-xs text-slate-400 mt-0.5">
                   Выполнение плана: <span className={`font-semibold ${planCompletionColor(completion)}`}>{completion}%</span>
