@@ -21,9 +21,10 @@ PLAN_TIERS = [
     (0.80, 0.23),  # ≥80%  → 23%
     (0.70, 0.22),  # ≥70%  → 22%
     (0.60, 0.21),  # ≥60%  → 21%
-    (0.50, 0.20),  # ≥50%  → 20%
-    (0.00, 0.00),  # <50%  → 0%
+    (0.00, 0.20),  # <60%  → 20% (минимум)
 ]
+
+DEFAULT_TIER = 0.25  # нет плана → 25%
 
 
 def _tier_pct(completion: float) -> float:
@@ -75,12 +76,14 @@ async def get_chatters(
         model_revenue = {r.model: float(r.rev or 0) for r in model_rev_result.all()}
 
         # Tier per model based on its own plan completion
+        # No plan or plan_amount=0 → DEFAULT_TIER (25%)
         model_tier: dict[str, float] = {}
         for model, plan_amount in plan_rows.items():
             if plan_amount > 0:
                 completion = model_revenue.get(model, 0) / plan_amount
                 model_tier[model] = _tier_pct(completion)
-            # Models with plan_amount=0 → no tier (0%)
+            else:
+                model_tier[model] = DEFAULT_TIER
 
         # Revenue by chatter AND model to apply per-model tier
         chatter_model_result = await db.execute(
@@ -103,12 +106,13 @@ async def get_chatters(
         chatter_model_rows = chatter_model_result.all()
 
         # Aggregate per chatter: sum revenue and payout across models
+        # Models not in plan_rows → DEFAULT_TIER (25%)
         chatter_data: dict[str, dict] = {}
         for r in chatter_model_rows:
             name = r.chatter or "Unknown"
             rev = float(r.revenue or 0)
             txns = int(r.txn_count or 0)
-            tier = model_tier.get(r.model, 0.0)
+            tier = model_tier.get(r.model, DEFAULT_TIER)
             cut = rev * tier
 
             if name not in chatter_data:

@@ -17,15 +17,14 @@ const STATUS_BADGE: Record<ChatterStatus, { label: string; variant: 'success' | 
   miss: { label: 'Провал', variant: 'danger'  },
 }
 
-function tierStyle(pct: number): { color: string; bg: string; label: string } {
-  if (pct >= 25)   return { color: 'text-emerald-400', bg: 'bg-emerald-500/15 border-emerald-500/30', label: '≥100%' }
-  if (pct >= 24)   return { color: 'text-emerald-400', bg: 'bg-emerald-500/10 border-emerald-500/20', label: '≥90%'  }
-  if (pct >= 23)   return { color: 'text-emerald-400', bg: 'bg-emerald-500/10 border-emerald-500/20', label: '≥80%'  }
-  if (pct >= 22)   return { color: 'text-sky-400',     bg: 'bg-sky-500/10 border-sky-500/20',         label: '≥70%'  }
-  if (pct >= 21)   return { color: 'text-sky-400',     bg: 'bg-sky-500/10 border-sky-500/20',         label: '≥60%'  }
-  if (pct >= 20)   return { color: 'text-yellow-400',  bg: 'bg-yellow-500/10 border-yellow-500/20',   label: '≥50%'  }
-  if (pct > 0)     return { color: 'text-orange-400',  bg: 'bg-orange-500/10 border-orange-500/20',   label: 'mixed' }
-  return             { color: 'text-slate-500',    bg: 'bg-slate-700/30 border-slate-600/30',     label: 'нет плана' }
+function tierStyle(pct: number): { color: string; bg: string } {
+  if (pct >= 25)  return { color: 'text-emerald-400', bg: 'bg-emerald-500/15 border-emerald-500/30' }
+  if (pct >= 24)  return { color: 'text-emerald-400', bg: 'bg-emerald-500/10 border-emerald-500/20' }
+  if (pct >= 23)  return { color: 'text-emerald-400', bg: 'bg-emerald-500/10 border-emerald-500/20' }
+  if (pct >= 22)  return { color: 'text-sky-400',     bg: 'bg-sky-500/10 border-sky-500/20'         }
+  if (pct >= 21)  return { color: 'text-sky-400',     bg: 'bg-sky-500/10 border-sky-500/20'         }
+  if (pct >= 20)  return { color: 'text-yellow-400',  bg: 'bg-yellow-500/10 border-yellow-500/20'   }
+  return            { color: 'text-yellow-400',  bg: 'bg-yellow-500/10 border-yellow-500/20'   }
 }
 
 function planCompletionColor(completion: number) {
@@ -104,7 +103,7 @@ export default function ChattersPage() {
                     <th className="text-right px-5 py-3 text-xs font-semibold text-slate-400 uppercase tracking-wide">Выручка</th>
                     <th className="text-right px-5 py-3 text-xs font-semibold text-slate-400 uppercase tracking-wide">Транзакции</th>
                     <th className="text-right px-5 py-3 text-xs font-semibold text-slate-400 uppercase tracking-wide">RPC</th>
-                    <th className="text-right px-5 py-3 text-xs font-semibold text-slate-400 uppercase tracking-wide">% тира</th>
+                    <th className="text-right px-5 py-3 text-xs font-semibold text-slate-400 uppercase tracking-wide">% выплаты</th>
                     <th className="text-right px-5 py-3 text-xs font-semibold text-slate-400 uppercase tracking-wide">Выплата</th>
                     <th className="text-center px-5 py-3 text-xs font-semibold text-slate-400 uppercase tracking-wide">Статус</th>
                   </tr>
@@ -120,13 +119,9 @@ export default function ChattersPage() {
                         <td className="px-5 py-3 text-sm text-slate-300 text-right">{chatter.transactions}</td>
                         <td className="px-5 py-3 text-sm text-slate-300 text-right">${chatter.rpc}</td>
                         <td className="px-5 py-3 text-right">
-                          {chatter.chatter_pct > 0 ? (
-                            <span className={`inline-flex items-center gap-1 text-sm font-bold px-2 py-0.5 rounded-lg border ${ts.bg} ${ts.color}`}>
-                              {chatter.chatter_pct}%
-                            </span>
-                          ) : (
-                            <span className="text-slate-600 text-sm">—</span>
-                          )}
+                          <span className={`inline-flex items-center gap-1 text-sm font-bold px-2 py-0.5 rounded-lg border ${ts.bg} ${ts.color}`}>
+                            {chatter.chatter_pct}%
+                          </span>
                         </td>
                         <td className="px-5 py-3 text-sm font-semibold text-right">
                           {chatter.chatter_cut > 0 ? (

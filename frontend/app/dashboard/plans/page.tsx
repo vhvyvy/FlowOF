@@ -30,24 +30,27 @@ const TIERS: [number, number][] = [
   [80, 23],
   [70, 22],
   [60, 21],
-  [50, 20],
+  [0, 20],   // минимум 20% при любом плане
 ]
 
-function chatterPct(completionPct: number): number {
+const NO_PLAN_PCT = 25  // нет плана → 25% по умолчанию
+
+function chatterPct(completionPct: number, hasPlan: boolean): number {
+  if (!hasPlan) return NO_PLAN_PCT
   for (const [threshold, pct] of TIERS) {
     if (completionPct >= threshold) return pct
   }
-  return 0
+  return 20
 }
 
-function tierLabel(pct: number): { label: string; color: string } {
+function tierLabel(pct: number, hasPlan: boolean): { label: string; color: string } {
+  if (!hasPlan)  return { label: '25% (по умолч.)', color: 'text-slate-400' }
   if (pct >= 100) return { label: '25%', color: 'text-emerald-400' }
   if (pct >= 90)  return { label: '24%', color: 'text-emerald-400' }
   if (pct >= 80)  return { label: '23%', color: 'text-emerald-400' }
   if (pct >= 70)  return { label: '22%', color: 'text-sky-400' }
   if (pct >= 60)  return { label: '21%', color: 'text-sky-400' }
-  if (pct >= 50)  return { label: '20%', color: 'text-yellow-400' }
-  return { label: '—', color: 'text-slate-600' }
+  return           { label: '20% (мин.)', color: 'text-yellow-400' }
 }
 
 function completionBar(pct: number) {
@@ -150,8 +153,8 @@ export default function PlansPage() {
             </div>
             <div className="bg-slate-800/60 border border-slate-700/50 rounded-xl p-4">
               <p className="text-xs text-slate-400 uppercase tracking-wide font-medium">Тир чаттеров</p>
-              <p className={`text-2xl font-bold mt-1 ${tierLabel(weighted).color}`}>
-                {chatterPct(weighted)}%
+              <p className={`text-2xl font-bold mt-1 ${tierLabel(weighted, true).color}`}>
+                {chatterPct(weighted, true)}%
               </p>
               <p className="text-xs text-slate-500 mt-1">от выручки</p>
             </div>
@@ -180,8 +183,9 @@ export default function PlansPage() {
           ) : (
             plans.map((row) => {
               const planVal = getPlanValue(row.model, row.plan_amount)
-              const completion = planVal > 0 ? Math.round((row.actual / planVal) * 100) : 0
-              const tier = tierLabel(completion)
+              const hasPlan = planVal > 0
+              const completion = hasPlan ? Math.round((row.actual / planVal) * 100) : 0
+              const tier = tierLabel(completion, hasPlan)
               const isEdited = edits[row.model] !== undefined
 
               return (
@@ -219,11 +223,7 @@ export default function PlansPage() {
                     )}
                   </div>
                   <div className="col-span-1 text-right">
-                    {planVal > 0 ? (
-                      <p className={`text-xs font-medium ${tier.color}`}>{tier.label}</p>
-                    ) : (
-                      <p className="text-xs text-slate-600">—</p>
-                    )}
+                    <p className={`text-xs font-medium ${tier.color}`}>{tier.label}</p>
                   </div>
                 </div>
               )
@@ -235,13 +235,23 @@ export default function PlansPage() {
         <div className="bg-slate-800/40 border border-slate-700/40 rounded-xl p-4">
           <p className="text-xs font-semibold text-slate-400 uppercase tracking-widest mb-3">Тиры чаттеров</p>
           <div className="flex flex-wrap gap-3">
-            {TIERS.map(([threshold, pct]) => (
+            <div className="flex items-center gap-1.5 text-xs">
+              <span className="w-2 h-2 rounded-full bg-slate-500" />
+              <span className="text-slate-400">Нет плана</span>
+              <span className="text-slate-200 font-semibold">→ 25% (дефолт)</span>
+            </div>
+            {TIERS.filter(([t]) => t > 0).map(([threshold, pct]) => (
               <div key={threshold} className="flex items-center gap-1.5 text-xs">
-                <span className={`w-2 h-2 rounded-full ${pct >= 23 ? 'bg-emerald-500' : pct >= 21 ? 'bg-sky-500' : pct === 20 ? 'bg-yellow-500' : 'bg-red-500'}`} />
-                <span className="text-slate-400">{threshold > 0 ? `≥${threshold}%` : '<50%'}</span>
+                <span className={`w-2 h-2 rounded-full ${pct >= 23 ? 'bg-emerald-500' : pct >= 21 ? 'bg-sky-500' : 'bg-yellow-500'}`} />
+                <span className="text-slate-400">≥{threshold}%</span>
                 <span className="text-slate-200 font-semibold">→ {pct}% чаттеру</span>
               </div>
             ))}
+            <div className="flex items-center gap-1.5 text-xs">
+              <span className="w-2 h-2 rounded-full bg-yellow-500" />
+              <span className="text-slate-400">{'<60%'}</span>
+              <span className="text-slate-200 font-semibold">→ 20% (мин.)</span>
+            </div>
           </div>
         </div>
 
