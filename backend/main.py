@@ -23,8 +23,10 @@ _vercel_url = os.getenv("FRONTEND_URL", "")
 _origins = [
     "http://localhost:3000",
     "http://localhost:3001",
+    "https://flow-of.vercel.app",
+    "https://www.flow-of.vercel.app",
 ]
-if _vercel_url:
+if _vercel_url and _vercel_url not in _origins:
     _origins.append(_vercel_url)
 
 app.add_middleware(
