@@ -7,6 +7,7 @@ import { useMonthStore } from '@/lib/hooks/useMonth'
 import { Skeleton } from '@/components/ui/skeleton'
 import { cn } from '@/lib/utils'
 import { FlaskConical, Target, SlidersHorizontal, Zap } from 'lucide-react'
+import { Header } from '@/components/layout/Header'
 
 // ─── Types & helpers ──────────────────────────────────────────────────────────
 
@@ -287,10 +288,12 @@ export default function LabPage() {
   })
 
   if (lo || ls) return (
-    <div className="space-y-4">
-      <Skeleton className="h-8 w-40 bg-slate-800" />
-      <Skeleton className="h-12 w-full bg-slate-800" />
-      <Skeleton className="h-72 w-full bg-slate-800" />
+    <div className="flex flex-col h-full">
+      <Header title="Лаборатория" />
+      <div className="flex-1 p-6 space-y-4 overflow-y-auto">
+        <Skeleton className="h-12 w-full bg-slate-800" />
+        <Skeleton className="h-72 w-full bg-slate-800" />
+      </div>
     </div>
   )
 
@@ -308,11 +311,9 @@ export default function LabPage() {
   const props = { rev, exp, txn, avg, m, c, a, w, uw, ur }
 
   return (
-    <div className="space-y-6">
-      <div>
-        <h1 className="text-xl font-semibold text-slate-100">Лаборатория</h1>
-        <p className="text-sm text-slate-400 mt-1">Симуляции, цели, сценарии — эксперименты с цифрами</p>
-      </div>
+    <div className="flex flex-col h-full">
+      <Header title="Лаборатория" />
+      <div className="flex-1 overflow-y-auto p-6 space-y-6">
 
       {/* Tabs */}
       <div className="flex gap-1 p-1 bg-slate-800/60 rounded-xl border border-slate-700/50">
@@ -335,6 +336,7 @@ export default function LabPage() {
         {activeTab === 'sens' && <TabSensitivity {...props} />}
         {activeTab === 'scenarios' && <TabScenarios {...props} />}
       </div>
-    </div>
+      </div>{/* flex-1 p-6 */}
+    </div>{/* flex flex-col h-full */}
   )
 }

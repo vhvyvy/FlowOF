@@ -3,6 +3,7 @@
 import { useState, useEffect } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import api from '@/lib/api'
+import { Header } from '@/components/layout/Header'
 import { Skeleton } from '@/components/ui/skeleton'
 import { Save, RefreshCw, AlertCircle, CheckCircle2 } from 'lucide-react'
 
@@ -123,17 +124,19 @@ export default function SettingsPage() {
   const overLimit = totalDeductions > 100
 
   if (isLoading) return (
-    <div className="space-y-4 max-w-xl">
-      {[1,2,3,4].map(i => <Skeleton key={i} className="h-20 bg-slate-800 rounded-xl" />)}
+    <div className="flex flex-col h-full">
+      <Header title="Настройки" />
+      <div className="flex-1 p-6 space-y-4 overflow-y-auto max-w-xl">
+        {[1,2,3,4].map(i => <Skeleton key={i} className="h-20 bg-slate-800 rounded-xl" />)}
+      </div>
     </div>
   )
 
   return (
-    <div className="max-w-xl space-y-6">
-      <div>
-        <h1 className="text-xl font-semibold text-slate-100">Настройки</h1>
-        <p className="text-sm text-slate-400 mt-1">Экономическая модель агентства</p>
-      </div>
+    <div className="flex flex-col h-full">
+      <Header title="Настройки" />
+      <div className="flex-1 overflow-y-auto p-6">
+      <div className="max-w-xl space-y-6">
 
       {/* Sliders */}
       <div className="bg-slate-800/60 border border-slate-700/50 rounded-xl px-5">
@@ -216,6 +219,8 @@ export default function SettingsPage() {
           </span>
         )}
       </div>
-    </div>
+      </div>{/* max-w-xl */}
+      </div>{/* flex-1 overflow-y-auto */}
+    </div>{/* flex flex-col h-full */}
   )
 }
