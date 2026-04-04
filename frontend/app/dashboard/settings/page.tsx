@@ -219,8 +219,8 @@ export default function SettingsPage() {
           </span>
         )}
       </div>
-      </div>{/* max-w-xl */}
-      </div>{/* flex-1 overflow-y-auto */}
-    </div>{/* flex flex-col h-full */}
+      </div>
+      </div>
+    </div>
   )
 }

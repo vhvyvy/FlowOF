@@ -336,7 +336,7 @@ export default function LabPage() {
         {activeTab === 'sens' && <TabSensitivity {...props} />}
         {activeTab === 'scenarios' && <TabScenarios {...props} />}
       </div>
-      </div>{/* flex-1 p-6 */}
-    </div>{/* flex flex-col h-full */}
+      </div>
+    </div>
   )
 }
