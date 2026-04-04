@@ -3,7 +3,7 @@
 import { useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import api from '@/lib/api'
-import { useMonth } from '@/lib/hooks/useMonth'
+import { useMonthStore } from '@/lib/hooks/useMonth'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Skeleton } from '@/components/ui/skeleton'
 import { cn } from '@/lib/utils'
@@ -356,7 +356,7 @@ const TABS = [
 ]
 
 export default function LabPage() {
-  const { month, year } = useMonth()
+  const { month, year } = useMonthStore()
   const [activeTab, setActiveTab] = useState('sim')
 
   const { data: overview, isLoading: loadingOverview } = useQuery<OverviewData>({
