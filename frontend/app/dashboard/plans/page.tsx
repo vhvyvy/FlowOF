@@ -31,24 +31,23 @@ const TIERS: [number, number][] = [
   [70, 22],
   [60, 21],
   [50, 20],
-  [0, 15],
 ]
 
 function chatterPct(completionPct: number): number {
   for (const [threshold, pct] of TIERS) {
     if (completionPct >= threshold) return pct
   }
-  return 15
+  return 0
 }
 
 function tierLabel(pct: number): { label: string; color: string } {
-  if (pct >= 100) return { label: '25% — топ', color: 'text-emerald-400' }
+  if (pct >= 100) return { label: '25%', color: 'text-emerald-400' }
   if (pct >= 90)  return { label: '24%', color: 'text-emerald-400' }
   if (pct >= 80)  return { label: '23%', color: 'text-emerald-400' }
   if (pct >= 70)  return { label: '22%', color: 'text-sky-400' }
   if (pct >= 60)  return { label: '21%', color: 'text-sky-400' }
   if (pct >= 50)  return { label: '20%', color: 'text-yellow-400' }
-  return { label: '15% — риск', color: 'text-red-400' }
+  return { label: '—', color: 'text-slate-600' }
 }
 
 function completionBar(pct: number) {
