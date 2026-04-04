@@ -89,26 +89,48 @@ function ModelPopover({ chatterName, models, onClose, anchorRef }: ModelPopoverP
       </div>
 
       {/* Model rows */}
-      <div className="divide-y divide-slate-700/40 max-h-72 overflow-y-auto">
+      <div className="divide-y divide-slate-700/40 max-h-80 overflow-y-auto">
         {models.map((m) => {
           const ts = tierStyle(m.tier_pct)
           const hasPlan = m.plan_amount > 0
+          const hasRetention = m.retention > 0
           return (
-            <div key={m.model} className="px-4 py-2.5 flex items-center gap-3">
-              <div className="flex-1 min-w-0">
-                <p className="text-xs font-medium text-slate-200 truncate">{m.model}</p>
-                <p className="text-xs text-slate-500 mt-0.5">
-                  {hasPlan
-                    ? `${m.plan_completion}% выполнения · план $${m.plan_amount.toLocaleString()}`
-                    : 'Нет плана → дефолт 25%'
-                  }
-                </p>
-              </div>
-              <div className="text-right shrink-0">
-                <span className={`inline-block text-xs font-bold px-2 py-0.5 rounded-lg border ${ts.bg} ${ts.color}`}>
+            <div key={m.model} className="px-4 py-3">
+              {/* Model name + plan info */}
+              <div className="flex items-start justify-between gap-2 mb-2">
+                <div className="flex-1 min-w-0">
+                  <p className="text-xs font-semibold text-slate-200 truncate">{m.model}</p>
+                  <p className="text-xs text-slate-500 mt-0.5">
+                    {hasPlan
+                      ? `${m.plan_completion}% плана · $${m.plan_amount.toLocaleString()} план`
+                      : 'Нет плана → дефолт 25%'
+                    }
+                  </p>
+                </div>
+                <span className={`shrink-0 inline-block text-xs font-bold px-2 py-0.5 rounded-lg border ${ts.bg} ${ts.color}`}>
                   {m.tier_pct}%
                 </span>
-                <p className="text-xs text-slate-400 mt-0.5">{formatCurrency(m.cut)}</p>
+              </div>
+              {/* Financials */}
+              <div className="bg-slate-700/30 rounded-lg px-3 py-2 space-y-1">
+                <div className="flex justify-between text-xs">
+                  <span className="text-slate-400">Выручка</span>
+                  <span className="text-slate-300">{formatCurrency(m.revenue)}</span>
+                </div>
+                <div className="flex justify-between text-xs">
+                  <span className="text-slate-400">Начислено ({m.tier_pct}%)</span>
+                  <span className="text-slate-300">{formatCurrency(m.cut)}</span>
+                </div>
+                {hasRetention && (
+                  <div className="flex justify-between text-xs">
+                    <span className="text-orange-400/80">Ретеншн −2.5%</span>
+                    <span className="text-orange-400/80">−{formatCurrency(m.retention)}</span>
+                  </div>
+                )}
+                <div className="flex justify-between text-xs font-semibold border-t border-slate-600/40 pt-1 mt-1">
+                  <span className="text-slate-300">К выплате</span>
+                  <span className="text-emerald-400">{formatCurrency(m.net_cut)}</span>
+                </div>
               </div>
             </div>
           )
@@ -117,9 +139,9 @@ function ModelPopover({ chatterName, models, onClose, anchorRef }: ModelPopoverP
 
       {/* Footer total */}
       <div className="px-4 py-2.5 border-t border-slate-700/60 flex items-center justify-between bg-slate-700/20 rounded-b-xl">
-        <span className="text-xs text-slate-400">Итого выплата</span>
+        <span className="text-xs text-slate-400">Итого к выплате</span>
         <span className="text-sm font-semibold text-emerald-400">
-          {formatCurrency(models.reduce((s, m) => s + m.cut, 0))}
+          {formatCurrency(models.reduce((s, m) => s + m.net_cut, 0))}
         </span>
       </div>
     </div>

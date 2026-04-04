@@ -72,6 +72,8 @@ export interface ChatterModelBreakdown {
   revenue: number
   tier_pct: number
   cut: number
+  retention: number
+  net_cut: number
   plan_amount: number
   plan_completion: number
 }

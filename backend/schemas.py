@@ -95,7 +95,9 @@ class ChatterModelBreakdown(BaseModel):
     model: str
     revenue: float
     tier_pct: float        # e.g. 25.0
-    cut: float
+    cut: float             # gross before retention
+    retention: float       # 2.5% if enabled, else 0
+    net_cut: float         # cut - retention
     plan_amount: float     # 0 = нет плана
     plan_completion: float # 0 = нет плана
 
