@@ -10,19 +10,22 @@ logger = logging.getLogger("skynet.db")
 
 _raw_url = os.getenv("DATABASE_URL", "")
 
-# Normalize URL to asyncpg driver format
+# Normalize to asyncpg driver
 if _raw_url.startswith("postgres://"):
     _raw_url = _raw_url.replace("postgres://", "postgresql+asyncpg://", 1)
 elif _raw_url.startswith("postgresql://") and "+asyncpg" not in _raw_url:
     _raw_url = _raw_url.replace("postgresql://", "postgresql+asyncpg://", 1)
 
+# Strip sslmode from URL — asyncpg uses connect_args for SSL, not URL params
+if "?sslmode=" in _raw_url:
+    _raw_url = _raw_url.split("?sslmode=")[0]
+elif "&sslmode=" in _raw_url:
+    _raw_url = _raw_url.replace("&sslmode=require", "").replace("&sslmode=prefer", "")
+
 DATABASE_URL: str = _raw_url
 
 if not DATABASE_URL:
-    logger.warning("DATABASE_URL is not set — database calls will fail")
-
-# Engine is created lazily; connection only happens on first DB call
-_connect_args = {"ssl": "require"} if DATABASE_URL else {}
+    logger.warning("DATABASE_URL is not set — database calls will fail at runtime")
 
 engine = create_async_engine(
     DATABASE_URL or "postgresql+asyncpg://placeholder/placeholder",
@@ -30,7 +33,7 @@ engine = create_async_engine(
     pool_size=5,
     max_overflow=10,
     pool_pre_ping=True,
-    connect_args=_connect_args,
+    connect_args={"ssl": "require"} if DATABASE_URL else {},
 )
 
 AsyncSessionLocal = async_sessionmaker(
