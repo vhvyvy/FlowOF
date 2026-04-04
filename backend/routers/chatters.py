@@ -28,10 +28,11 @@ DEFAULT_TIER = 0.25  # нет плана → 25%
 
 
 def _tier_pct(completion: float) -> float:
+    """Return payout fraction for a model. Minimum is always 20% (0.20)."""
     for threshold, pct in PLAN_TIERS:
         if completion >= threshold:
             return pct
-    return PLAN_TIERS[-1][1]
+    return 0.20  # absolute floor
 
 
 def _month_range(year: int, month: int):
@@ -107,12 +108,13 @@ async def get_chatters(
 
         # Aggregate per chatter: sum revenue and payout across models
         # Models not in plan_rows → DEFAULT_TIER (25%)
+        # Hard floor: no model tier can be below 20%
         chatter_data: dict[str, dict] = {}
         for r in chatter_model_rows:
             name = r.chatter or "Unknown"
             rev = float(r.revenue or 0)
             txns = int(r.txn_count or 0)
-            tier = model_tier.get(r.model, DEFAULT_TIER)
+            tier = max(0.20, model_tier.get(r.model, DEFAULT_TIER))
             cut = rev * tier
 
             if name not in chatter_data:
