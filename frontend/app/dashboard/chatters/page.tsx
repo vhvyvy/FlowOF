@@ -72,14 +72,14 @@ export default function ChattersPage() {
         {!isLoading && data && (
           <div className={`flex items-center justify-between px-5 py-3.5 rounded-xl border ${tier.bg}`}>
             <div className="flex items-center gap-3">
-              <span className={`text-2xl font-bold ${tier.color}`}>{activePct > 0 ? `${activePct}%` : '—'}</span>
+              <span className={`text-2xl font-bold ${tier.color}`}>{completion >= 50 ? `${completion}%` : '—'}</span>
               <div>
                 <p className={`text-sm font-semibold ${tier.color}`}>
-                  {completion >= 50 ? `Тир по анкетам: каждая анкета считается отдельно` : 'Планы не установлены или выполнение < 50%'}
+                  {completion >= 50 ? 'Тир по анкетам: каждая анкета считается отдельно' : 'Планы не установлены или выполнение < 50%'}
                 </p>
                 <p className="text-xs text-slate-400 mt-0.5">
                   Выполнение плана: <span className={`font-semibold ${planCompletionColor(completion)}`}>{completion}%</span>
-                  {activePct > 0 && (
+                  {completion >= 50 && (
                     <span className="ml-2 text-slate-500">· Тиры: ≥100%→25%, ≥90%→24%, ≥80%→23%, ≥70%→22%, ≥60%→21%, ≥50%→20%</span>
                   )}
                 </p>
