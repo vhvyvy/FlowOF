@@ -26,9 +26,11 @@ interface PlansResponse {
 
 const TIERS: [number, number][] = [
   [100, 25],
-  [85, 22],
-  [70, 20],
-  [50, 18],
+  [90, 24],
+  [80, 23],
+  [70, 22],
+  [60, 21],
+  [50, 20],
   [0, 15],
 ]
 
@@ -41,9 +43,11 @@ function chatterPct(completionPct: number): number {
 
 function tierLabel(pct: number): { label: string; color: string } {
   if (pct >= 100) return { label: '25% — топ', color: 'text-emerald-400' }
-  if (pct >= 85) return { label: '22%', color: 'text-emerald-400' }
-  if (pct >= 70) return { label: '20%', color: 'text-sky-400' }
-  if (pct >= 50) return { label: '18%', color: 'text-yellow-400' }
+  if (pct >= 90)  return { label: '24%', color: 'text-emerald-400' }
+  if (pct >= 80)  return { label: '23%', color: 'text-emerald-400' }
+  if (pct >= 70)  return { label: '22%', color: 'text-sky-400' }
+  if (pct >= 60)  return { label: '21%', color: 'text-sky-400' }
+  if (pct >= 50)  return { label: '20%', color: 'text-yellow-400' }
   return { label: '15% — риск', color: 'text-red-400' }
 }
 
@@ -234,8 +238,8 @@ export default function PlansPage() {
           <div className="flex flex-wrap gap-3">
             {TIERS.map(([threshold, pct]) => (
               <div key={threshold} className="flex items-center gap-1.5 text-xs">
-                <span className={`w-2 h-2 rounded-full ${pct === 25 ? 'bg-emerald-500' : pct >= 20 ? 'bg-sky-500' : pct >= 18 ? 'bg-yellow-500' : 'bg-red-500'}`} />
-                <span className="text-slate-400">≥{threshold}% выполнения</span>
+                <span className={`w-2 h-2 rounded-full ${pct >= 23 ? 'bg-emerald-500' : pct >= 21 ? 'bg-sky-500' : pct === 20 ? 'bg-yellow-500' : 'bg-red-500'}`} />
+                <span className="text-slate-400">{threshold > 0 ? `≥${threshold}%` : '<50%'}</span>
                 <span className="text-slate-200 font-semibold">→ {pct}% чаттеру</span>
               </div>
             ))}
