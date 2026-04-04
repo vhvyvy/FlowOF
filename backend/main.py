@@ -39,7 +39,7 @@ app.add_middleware(
 
 # ── Routers ───────────────────────────────────────────────────────────────────
 
-from routers import auth, overview, finance, chatters, events, plans, kpi, ai, admin  # noqa: E402
+from routers import auth, overview, finance, chatters, events, plans, kpi, ai, admin, settings  # noqa: E402
 
 app.include_router(auth.router)
 app.include_router(overview.router)
@@ -50,6 +50,7 @@ app.include_router(plans.router)
 app.include_router(kpi.router)
 app.include_router(ai.router)
 app.include_router(admin.router)
+app.include_router(settings.router)
 
 
 # ── Health ────────────────────────────────────────────────────────────────────
