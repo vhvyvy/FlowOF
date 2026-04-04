@@ -13,8 +13,7 @@ class Tenant(Base):
     name = Column(String(255), nullable=False)
     slug = Column(String(100), unique=True, nullable=True)
     email = Column(String(255), unique=True, nullable=False)
-    hashed_password = Column(String(255), nullable=True)
-    # Legacy SHA-256 hash stored by the old Streamlit app
+    # Stores bcrypt hash (new) or SHA-256 hex (legacy) — auth.py handles both
     password_hash = Column(String(255), nullable=True)
     notion_token = Column(Text, nullable=True)
     onlymonster_key = Column(Text, nullable=True)

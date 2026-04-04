@@ -46,7 +46,7 @@ async def create_tenant(
         name=body.name,
         slug=slug,
         email=body.email.lower().strip(),
-        hashed_password=hash_password(body.password),
+        password_hash=hash_password(body.password),
         plan=body.plan,
         notion_token=body.notion_token,
         onlymonster_key=body.onlymonster_key,
@@ -72,7 +72,7 @@ async def update_password(
     tenant = result.scalar_one_or_none()
     if tenant is None:
         raise HTTPException(status_code=404, detail="Tenant not found")
-    tenant.hashed_password = hash_password(body.password)
+    tenant.password_hash = hash_password(body.password)
     await db.commit()
     logger.info("Password updated for tenant=%d", tenant_id)
 
