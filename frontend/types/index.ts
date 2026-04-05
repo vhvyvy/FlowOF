@@ -170,6 +170,30 @@ export interface PlansResponse {
   weighted_completion: number
 }
 
+// ── Structure ─────────────────────────────────────────────────────────────────
+
+export interface ModelShare {
+  model: string
+  revenue: number
+  share_pct: number
+  plan_amount: number
+  plan_completion: number
+}
+
+export interface ChatterShare {
+  chatter: string
+  revenue: number
+  share_pct: number
+  transactions: number
+}
+
+export interface StructureResponse {
+  total_revenue: number
+  models: ModelShare[]
+  chatters: ChatterShare[]
+  economic: EconomicBreakdown
+}
+
 // ── UI helpers ────────────────────────────────────────────────────────────────
 
 export interface MonthYear {

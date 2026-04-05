@@ -192,6 +192,30 @@ class PlansResponse(BaseModel):
     weighted_completion: float
 
 
+# ── Structure ─────────────────────────────────────────────────────────────────
+
+class ModelShare(BaseModel):
+    model: str
+    revenue: float
+    share_pct: float
+    plan_amount: float
+    plan_completion: float  # 0.0 if no plan
+
+
+class ChatterShare(BaseModel):
+    chatter: str
+    revenue: float
+    share_pct: float
+    transactions: int
+
+
+class StructureResponse(BaseModel):
+    total_revenue: float
+    models: list[ModelShare]
+    chatters: list[ChatterShare]
+    economic: EconomicBreakdown
+
+
 # ── Settings ──────────────────────────────────────────────────────────────────
 
 class SettingUpsert(BaseModel):

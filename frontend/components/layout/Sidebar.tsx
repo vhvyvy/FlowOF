@@ -14,6 +14,7 @@ import {
   FlaskConical,
   Settings,
   ClipboardList,
+  PieChart,
 } from 'lucide-react'
 import { useState } from 'react'
 import { cn } from '@/lib/utils'
@@ -24,6 +25,7 @@ import { Badge } from '@/components/ui/badge'
 const NAV_ITEMS = [
   { href: '/dashboard', label: 'Overview', icon: LayoutDashboard, exact: true },
   { href: '/dashboard/finance', label: 'Финансы', icon: TrendingUp },
+  { href: '/dashboard/structure', label: 'Структура', icon: PieChart },
   { href: '/dashboard/chatters', label: 'Чаттеры', icon: Users },
   { href: '/dashboard/kpi', label: 'KPI', icon: BarChart3 },
   { href: '/dashboard/plans', label: 'Планы', icon: ClipboardList },
