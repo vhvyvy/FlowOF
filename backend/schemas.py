@@ -252,6 +252,15 @@ class KpiSyncResult(BaseModel):
     message: str
 
 
+class NotionSyncResult(BaseModel):
+    inserted: int
+    updated: int
+    skipped: int
+    databases: int
+    assigned_rows: int
+    message: str
+
+
 # ── Events ────────────────────────────────────────────────────────────────────
 
 class EventCreate(BaseModel):

@@ -138,6 +138,26 @@ function TeamsSection() {
     },
   })
 
+  const notionImportMut = useMutation({
+    mutationFn: () =>
+      api
+        .post<{
+          inserted: number
+          updated: number
+          skipped: number
+          databases: number
+          assigned_rows: number
+          message: string
+        }>('/api/v1/sync/notion-transactions')
+        .then((r) => r.data),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['teams'] })
+      qc.invalidateQueries({ queryKey: ['overview'] })
+      qc.invalidateQueries({ queryKey: ['finance'] })
+      qc.invalidateQueries({ queryKey: ['chatters'] })
+    },
+  })
+
   return (
     <div className="bg-slate-800/60 border border-slate-700/50 rounded-xl px-5 py-5 space-y-4">
       <div className="flex items-center gap-2">
@@ -159,6 +179,23 @@ function TeamsSection() {
           ? 'Сопоставление…'
           : 'Сопоставить транзакции с командами (Notion)'}
       </button>
+      <button
+        type="button"
+        onClick={() => notionImportMut.mutate()}
+        disabled={notionImportMut.isPending}
+        className="text-sm px-4 py-2 rounded-lg bg-indigo-600 hover:bg-indigo-500 border border-indigo-500 text-white disabled:opacity-50 ml-2"
+      >
+        {notionImportMut.isPending ? 'Загрузка из Notion…' : 'Загрузить транзакции из Notion в базу'}
+      </button>
+      {notionImportMut.isSuccess && notionImportMut.data && (
+        <p className="text-xs text-emerald-400">{notionImportMut.data.message}</p>
+      )}
+      {notionImportMut.isError && (
+        <p className="text-xs text-red-400">
+          {(notionImportMut.error as { response?: { data?: { detail?: string } } })?.response?.data
+            ?.detail ?? 'Ошибка импорта'}
+        </p>
+      )}
       {reconcileMut.isSuccess && reconcileMut.data && (
         <p className="text-xs text-emerald-400">
           Обновлено страниц из API: {reconcileMut.data.backfilled_pages}, привязано строк:{' '}
