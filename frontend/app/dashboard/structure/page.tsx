@@ -111,7 +111,7 @@ function EconomicDonut({ eco, revenue }: { eco: EconomicBreakdown; revenue: numb
               </Pie>
               <Tooltip
                 contentStyle={{ background: '#1e293b', border: '1px solid #334155', borderRadius: 8, fontSize: 12 }}
-                formatter={(v: number) => [formatCurrency(v), '']}
+                formatter={(v) => [typeof v === 'number' ? formatCurrency(v) : String(v), '']}
               />
             </PieChart>
           </ResponsiveContainer>
