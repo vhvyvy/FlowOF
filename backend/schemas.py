@@ -270,6 +270,36 @@ class StructureResponse(BaseModel):
     economic: EconomicBreakdown
 
 
+# ── Shifts / Admins ───────────────────────────────────────────────────────────
+
+class ShiftRow(BaseModel):
+    name: str                            # display name
+    revenue: float
+    transactions: int
+    chatters: int
+    models: int
+    active_days: int
+    avg_check: float
+    revenue_per_chatter: Optional[float] = None
+    revenue_per_model: Optional[float] = None
+    productivity_per_day: Optional[float] = None
+    share_pct: float
+    admin_payout: float                  # their share of admin pool
+    plan_completion: Optional[float] = None
+    avg_ppv_open_rate: Optional[float] = None
+    avg_apv: Optional[float] = None
+    total_chats_sum: Optional[int] = None
+
+
+class ShiftsResponse(BaseModel):
+    shifts: list[ShiftRow]
+    total_revenue: float
+    admin_pct: float          # from settings, e.g. 9.0
+    admin_payout_total: float
+    admin_payout_each: float  # equal split
+    shifts_count: int
+
+
 # ── Settings ──────────────────────────────────────────────────────────────────
 
 class SettingUpsert(BaseModel):
