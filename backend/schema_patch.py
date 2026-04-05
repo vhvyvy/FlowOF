@@ -9,7 +9,7 @@ import logging
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine
 
-logger = logging.getLogger("skynet.schema")
+logger = logging.getLogger("flowof.schema")
 
 # (sql, critical) — critical ALTERs raise on failure so missing columns do not cause 500s later
 _PATCHES: list[tuple[str, bool]] = [

@@ -12,7 +12,7 @@ from dependencies import get_current_tenant
 from models import Tenant, Plan, Transaction
 from schemas import PlanUpsert, PlanOut, PlansResponse
 
-logger = logging.getLogger("skynet.plans")
+logger = logging.getLogger("flowof.plans")
 router = APIRouter(prefix="/api/v1", tags=["plans"])
 
 

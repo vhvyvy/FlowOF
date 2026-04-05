@@ -10,7 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from models import Team, Tenant, Transaction
 from team_helpers import ensure_default_team, list_teams, normalize_notion_db_id
 
-logger = logging.getLogger("skynet.team_bootstrap")
+logger = logging.getLogger("flowof.team_bootstrap")
 
 # Вторая команда — база Notion с транзакциями (можно переопределить env)
 DEFAULT_TEAM2_NOTION_RAW = os.getenv(

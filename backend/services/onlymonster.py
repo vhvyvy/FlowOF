@@ -13,7 +13,7 @@ from urllib.parse import urlencode
 
 import httpx
 
-logger = logging.getLogger("skynet.onlymonster")
+logger = logging.getLogger("flowof.onlymonster")
 
 _BASE_HEADERS = {
     "Accept": "application/json",

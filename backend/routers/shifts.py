@@ -12,7 +12,7 @@ from economics import load_settings, safe_float_setting
 from models import ChatterKpi, ChatterMapping, Plan, Tenant, Transaction
 from schemas import ShiftRow, ShiftsResponse
 
-logger = logging.getLogger("skynet.shifts")
+logger = logging.getLogger("flowof.shifts")
 router = APIRouter(prefix="/api/v1", tags=["shifts"])
 
 

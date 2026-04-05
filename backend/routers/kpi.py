@@ -24,7 +24,7 @@ from schemas import (
 )
 from services.onlymonster import fetch_chatter_metrics
 
-logger = logging.getLogger("skynet.kpi")
+logger = logging.getLogger("flowof.kpi")
 router = APIRouter(prefix="/api/v1", tags=["kpi"])
 
 HIDDEN_IDS = {"9680", "18073", "71191", "73588", "79737", "80144", "@hornykabanchik"}

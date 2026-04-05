@@ -14,7 +14,7 @@ from economics import load_settings, compute_economics, compute_actual_chatter_c
 from team_helpers import list_teams, ensure_default_team, team_transaction_clause, team_inherits_global_economics
 from team_economics import sum_revenue, aggregate_teams
 
-logger = logging.getLogger("skynet.overview")
+logger = logging.getLogger("flowof.overview")
 router = APIRouter(prefix="/api/v1", tags=["overview"])
 
 

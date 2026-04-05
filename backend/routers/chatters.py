@@ -15,7 +15,7 @@ from economics import _tier_for_model
 RETENTION_RATE = 0.025  # 2.5% удерживается агентством при use_retention=1
 from schemas import ChattersResponse, ChatterRow, ChatterModelBreakdown
 
-logger = logging.getLogger("skynet.chatters")
+logger = logging.getLogger("flowof.chatters")
 router = APIRouter(prefix="/api/v1", tags=["chatters"])
 
 

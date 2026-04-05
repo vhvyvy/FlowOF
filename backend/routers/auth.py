@@ -9,7 +9,7 @@ from auth import verify_password, create_access_token, hash_password
 from dependencies import get_current_tenant
 from schemas import LoginRequest, TokenResponse, TenantOut
 
-logger = logging.getLogger("skynet.auth")
+logger = logging.getLogger("flowof.auth")
 router = APIRouter(prefix="/auth", tags=["auth"])
 
 

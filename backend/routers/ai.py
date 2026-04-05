@@ -12,7 +12,7 @@ from database import get_db
 from dependencies import get_current_tenant
 from models import Tenant, Transaction, Expense
 
-logger = logging.getLogger("skynet.ai")
+logger = logging.getLogger("flowof.ai")
 router = APIRouter(prefix="/api/v1/ai", tags=["ai"])
 
 

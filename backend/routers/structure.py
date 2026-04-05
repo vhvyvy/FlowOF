@@ -12,7 +12,7 @@ from models import Tenant, Transaction, Plan, Expense
 from schemas import StructureResponse, ModelShare, ChatterShare, ChatterInModel, EconomicBreakdown
 from economics import load_settings, compute_economics
 
-logger = logging.getLogger("skynet.structure")
+logger = logging.getLogger("flowof.structure")
 router = APIRouter(prefix="/api/v1", tags=["structure"])
 
 

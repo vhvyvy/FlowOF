@@ -10,7 +10,7 @@ from notion_sync_service import sync_notion_transactions_for_tenant
 from schemas import NotionSyncResult
 from sqlalchemy.ext.asyncio import AsyncSession
 
-logger = logging.getLogger("skynet.sync")
+logger = logging.getLogger("flowof.sync")
 router = APIRouter(prefix="/api/v1", tags=["sync"])
 
 

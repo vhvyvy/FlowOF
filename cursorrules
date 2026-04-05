@@ -1,9 +1,9 @@
-# Skynet SaaS — Cursor Rules (FastAPI + Next.js)
+# FlowOF — Cursor Rules (FastAPI + Next.js)
 # Читай полностью перед любым изменением кода.
 
 ## Что мы строим
 
-Skynet — B2B SaaS дашборд для управления OnlyFans-агентствами.
+FlowOF — B2B SaaS дашборд для управления OnlyFans-агентствами.
 Функции: финансы, P&L, KPI чаттеров, планы, AI-аналитик.
 
 Мы переходим с Streamlit на FastAPI (бэкенд) + Next.js (фронтенд).
@@ -42,7 +42,7 @@ Streamlit полностью уходит.
 ## Структура проекта
 
 ```
-skynet-saas/
+FlowOF/
 ├── backend/
 │   ├── main.py                 # FastAPI app, middleware, роуты
 │   ├── database.py             # SQLAlchemy engine, session

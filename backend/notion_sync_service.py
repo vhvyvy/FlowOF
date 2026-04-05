@@ -21,7 +21,7 @@ from models import Team, Transaction
 from team_bootstrap import assign_transactions_by_notion_database
 from team_helpers import list_teams, normalize_notion_db_id
 
-logger = logging.getLogger("skynet.notion_sync")
+logger = logging.getLogger("flowof.notion_sync")
 
 NOTION_VERSION = "2022-06-28"
 

@@ -6,7 +6,7 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-logger = logging.getLogger("skynet.db")
+logger = logging.getLogger("flowof.db")
 
 _raw_url = os.getenv("DATABASE_URL", "")
 

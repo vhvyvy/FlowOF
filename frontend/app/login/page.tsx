@@ -44,7 +44,7 @@ export default function LoginPage() {
           <div className="w-12 h-12 rounded-2xl bg-indigo-500 flex items-center justify-center mb-4 shadow-lg shadow-indigo-500/25">
             <span className="text-white font-bold text-xl">S</span>
           </div>
-          <h1 className="text-2xl font-bold text-slate-100">Skynet</h1>
+          <h1 className="text-2xl font-bold text-slate-100">FlowOF</h1>
           <p className="text-slate-400 text-sm mt-1">OnlyFans Agency Analytics</p>
         </div>
 
@@ -97,7 +97,7 @@ export default function LoginPage() {
         </div>
 
         <p className="text-center text-xs text-slate-600 mt-6">
-          Skynet SaaS © {new Date().getFullYear()}
+          FlowOF © {new Date().getFullYear()}
         </p>
       </div>
     </div>

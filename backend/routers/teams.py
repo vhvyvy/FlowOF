@@ -11,7 +11,7 @@ from schemas import TeamOut, TeamCreate, TeamUpdate
 from team_helpers import list_teams, ensure_default_team, normalize_notion_db_id, team_inherits_global_economics
 from team_bootstrap import assign_transactions_by_notion_database, backfill_notion_database_id_from_notion_api
 
-logger = logging.getLogger("skynet.teams")
+logger = logging.getLogger("flowof.teams")
 router = APIRouter(prefix="/api/v1", tags=["teams"])
 
 

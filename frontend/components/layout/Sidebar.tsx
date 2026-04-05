@@ -55,7 +55,7 @@ export function Sidebar() {
             <div className="w-7 h-7 rounded-lg bg-indigo-500 flex items-center justify-center">
               <span className="text-white font-bold text-xs">S</span>
             </div>
-            <span className="font-semibold text-slate-100 text-sm">Skynet</span>
+            <span className="font-semibold text-slate-100 text-sm">FlowOF</span>
           </div>
         )}
         {collapsed && (

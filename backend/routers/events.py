@@ -8,7 +8,7 @@ from dependencies import get_current_tenant
 from models import Tenant, Event
 from schemas import EventCreate, EventOut
 
-logger = logging.getLogger("skynet.events")
+logger = logging.getLogger("flowof.events")
 router = APIRouter(prefix="/api/v1", tags=["events"])
 
 

@@ -7,11 +7,11 @@ from dotenv import load_dotenv
 load_dotenv()
 
 logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger("skynet")
+logger = logging.getLogger("flowof")
 
 app = FastAPI(
-    title="Skynet SaaS API",
-    description="FastAPI backend for Skynet — OnlyFans agency analytics platform",
+    title="FlowOF API",
+    description="FastAPI backend for FlowOF — OnlyFans agency analytics platform",
     version="2.0.0",
     docs_url="/docs",
     redoc_url="/redoc",

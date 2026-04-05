@@ -1,4 +1,4 @@
-# Skynet SaaS — FlowOF
+# FlowOF
 
 B2B SaaS dashboard for OnlyFans agencies.  
 **Stack**: FastAPI + asyncpg (backend) · Next.js 16 + TypeScript (frontend) · Neon PostgreSQL

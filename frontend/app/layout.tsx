@@ -3,7 +3,7 @@ import './globals.css'
 import { Providers } from '@/components/Providers'
 
 export const metadata: Metadata = {
-  title: 'Skynet — OnlyFans Analytics',
+  title: 'FlowOF — OnlyFans Analytics',
   description: 'B2B SaaS dashboard for OnlyFans agencies',
 }
 

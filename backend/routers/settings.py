@@ -26,7 +26,7 @@ class ProfileUpdate(BaseModel):
     onlymonster_account_ids: Optional[str] = None
     notion_token: Optional[str] = None
 
-logger = logging.getLogger("skynet.settings")
+logger = logging.getLogger("flowof.settings")
 router = APIRouter(prefix="/api/v1", tags=["settings"])
 
 DEFAULTS = {

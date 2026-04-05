@@ -9,7 +9,7 @@ from models import Tenant
 from auth import hash_password
 from schemas import TenantCreate, TenantOut, TenantPasswordUpdate
 
-logger = logging.getLogger("skynet.admin")
+logger = logging.getLogger("flowof.admin")
 router = APIRouter(prefix="/api/v1/admin", tags=["admin"])
 
 ADMIN_SECRET = os.getenv("ADMIN_SECRET", "")
