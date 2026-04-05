@@ -28,8 +28,11 @@ out/
 .DS_Store
 Thumbs.db
 
-# Old Streamlit app (will be deleted after migration)
-# repo_temp/
+# Old Streamlit app / local copies
+repo_temp/
+
+# Local DB scripts (may contain credentials)
+check_db.py
 
 # Logs
 *.log
