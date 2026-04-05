@@ -5,7 +5,8 @@ import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import api from '@/lib/api'
 import { Header } from '@/components/layout/Header'
 import { Skeleton } from '@/components/ui/skeleton'
-import { Save, RefreshCw, AlertCircle, CheckCircle2, Key, Eye, EyeOff } from 'lucide-react'
+import { Save, RefreshCw, AlertCircle, CheckCircle2, Key, Eye, EyeOff, Users } from 'lucide-react'
+import type { TeamOut } from '@/types'
 
 interface Settings {
   model_percent: string
@@ -92,6 +93,120 @@ interface ProfileOut {
   email: string
   has_onlymonster_key: boolean
   onlymonster_key_preview: string | null
+}
+
+function TeamsSection() {
+  const qc = useQueryClient()
+  const [name, setName] = useState('Команда 2')
+  const [notionId, setNotionId] = useState('')
+  const [chatterMax, setChatterMax] = useState(22)
+  const [adminTotal, setAdminTotal] = useState(8)
+
+  const { data: teams, isLoading } = useQuery({
+    queryKey: ['teams'],
+    queryFn: () => api.get<TeamOut[]>('/api/v1/teams').then((r) => r.data),
+  })
+
+  const createMut = useMutation({
+    mutationFn: () =>
+      api.post('/api/v1/teams', {
+        name: name.trim() || 'Команда',
+        inherit_economics: false,
+        notion_database_id: notionId.trim() || undefined,
+        chatter_max_pct: chatterMax,
+        default_chatter_pct: chatterMax,
+        admin_percent_total: adminTotal,
+      }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['teams'] })
+      qc.invalidateQueries({ queryKey: ['overview'] })
+      qc.invalidateQueries({ queryKey: ['finance'] })
+      qc.invalidateQueries({ queryKey: ['chatters'] })
+    },
+  })
+
+  return (
+    <div className="bg-slate-800/60 border border-slate-700/50 rounded-xl px-5 py-5 space-y-4">
+      <div className="flex items-center gap-2">
+        <Users className="h-4 w-4 text-indigo-400" />
+        <p className="text-xs font-semibold text-slate-400 uppercase tracking-widest">Команды</p>
+      </div>
+      <p className="text-xs text-slate-500">
+        Первая команда («Основная») наследует проценты из блока выше. Для второй команды можно задать потолок чаттерам
+        (например 22%) и суммарный % админам (например 8% = 2×4%). Укажите ID базы Notion с транзакциями этой команды —
+        при синке подставляйте <code className="text-slate-400">team_id</code> в импорте.
+      </p>
+      {isLoading ? (
+        <Skeleton className="h-16 w-full" />
+      ) : (
+        <ul className="space-y-2">
+          {teams?.map((t) => (
+            <li
+              key={t.id}
+              className="flex flex-wrap items-center justify-between gap-2 text-sm bg-slate-700/30 rounded-lg px-3 py-2"
+            >
+              <span className="font-medium text-slate-200">{t.name}</span>
+              <span className="text-xs text-slate-500">
+                {t.inherit_economics
+                  ? 'экономика как в настройках'
+                  : `чаттер ≤${t.chatter_max_pct ?? '—'}%, админы ${t.admin_percent_total ?? '—'}%`}
+              </span>
+              {t.notion_database_id && (
+                <code className="text-[10px] text-slate-500 truncate max-w-full">{t.notion_database_id}</code>
+              )}
+            </li>
+          ))}
+        </ul>
+      )}
+      {teams && teams.length >= 1 && (
+        <div className="border-t border-slate-700/50 pt-4 space-y-3">
+          <p className="text-xs text-slate-400">Добавить команду с отдельной экономикой</p>
+          <input
+            type="text"
+            value={name}
+            onChange={(e) => setName(e.target.value)}
+            placeholder="Название"
+            className="w-full bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-sm text-slate-200"
+          />
+          <input
+            type="text"
+            value={notionId}
+            onChange={(e) => setNotionId(e.target.value)}
+            placeholder="Notion database ID (транзакции команды)"
+            className="w-full bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-sm font-mono text-slate-300"
+          />
+          <div className="grid grid-cols-2 gap-3">
+            <label className="text-xs text-slate-500">
+              Макс % чаттерам
+              <input
+                type="number"
+                value={chatterMax}
+                onChange={(e) => setChatterMax(Number(e.target.value))}
+                className="mt-1 w-full bg-slate-700 border border-slate-600 rounded-lg px-2 py-1.5 text-sm"
+              />
+            </label>
+            <label className="text-xs text-slate-500">
+              Админы всего %
+              <input
+                type="number"
+                value={adminTotal}
+                onChange={(e) => setAdminTotal(Number(e.target.value))}
+                className="mt-1 w-full bg-slate-700 border border-slate-600 rounded-lg px-2 py-1.5 text-sm"
+              />
+            </label>
+          </div>
+          <button
+            type="button"
+            onClick={() => createMut.mutate()}
+            disabled={createMut.isPending}
+            className="text-sm px-4 py-2 rounded-lg bg-indigo-600 hover:bg-indigo-700 text-white disabled:opacity-50"
+          >
+            {createMut.isPending ? 'Создание…' : 'Добавить команду'}
+          </button>
+        </div>
+      )}
+    </div>
+  )
 }
 
 function IntegrationsSection() {
@@ -302,6 +417,8 @@ export default function SettingsPage() {
           </div>
         )}
       </div>
+
+      <TeamsSection />
 
       {/* Integrations */}
       <IntegrationsSection />

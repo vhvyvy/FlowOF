@@ -27,17 +27,6 @@ export interface DailyRevenue {
   amount: number
 }
 
-export interface OverviewResponse {
-  revenue: number
-  expenses: number
-  profit: number
-  margin: number
-  transactions_count: number
-  revenue_delta: number
-  profit_delta: number
-  daily_revenue: DailyRevenue[]
-}
-
 // ── Finance ───────────────────────────────────────────────────────────────────
 
 export interface PnlRow {
@@ -83,6 +72,16 @@ export interface FinanceResponse {
   economic: EconomicBreakdown
 }
 
+export interface OverviewTeamSlice {
+  team_id: number
+  name: string
+  revenue: number
+  chatter_cut: number
+  admin_cut: number
+  profit: number
+  margin: number
+}
+
 export interface OverviewResponse {
   revenue: number
   expenses: number
@@ -96,6 +95,19 @@ export interface OverviewResponse {
   is_current_month: boolean
   revenue_forecast?: number | null
   profit_forecast?: number | null
+  teams_breakdown?: OverviewTeamSlice[]
+  selected_team_id?: number | null
+}
+
+export interface TeamOut {
+  id: number
+  name: string
+  sort_order: number
+  notion_database_id: string | null
+  inherit_economics: boolean
+  chatter_max_pct: number | null
+  default_chatter_pct: number | null
+  admin_percent_total: number | null
 }
 
 // ── Chatters ──────────────────────────────────────────────────────────────────

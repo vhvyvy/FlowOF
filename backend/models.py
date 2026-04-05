@@ -37,6 +37,27 @@ class Transaction(Base):
     shift_id = Column(String(100), nullable=True)
     shift_name = Column(String(255), nullable=True)
     notion_id = Column(String(255), nullable=True)
+    team_id = Column(Integer, ForeignKey("teams_mt.id"), nullable=True, index=True)
+
+
+class Team(Base):
+    """Agency team (separate Notion DB / economics)."""
+    __tablename__ = "teams_mt"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    tenant_id = Column(Integer, ForeignKey("tenants.id"), nullable=False, index=True)
+    name = Column(String(255), nullable=False)
+    sort_order = Column(Integer, default=0)
+    # Notion database ID for this team's transactions (no hyphens or with — normalized in API)
+    notion_database_id = Column(String(64), nullable=True)
+    # If True, use global app_settings for chatter tiers and admin % (applied to this team's revenue)
+    inherit_economics = Column(Boolean, default=True)
+    # When inherit_economics is False: cap chatter tier at this % (e.g. 22)
+    chatter_max_pct = Column(Numeric(5, 2), nullable=True)
+    # Default % for models without a plan (defaults to min(25, chatter_max))
+    default_chatter_pct = Column(Numeric(5, 2), nullable=True)
+    # Total admin pool as % of this team's revenue (e.g. 8 = two admins × 4%)
+    admin_percent_total = Column(Numeric(5, 2), nullable=True)
 
 
 class Expense(Base):

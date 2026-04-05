@@ -7,6 +7,7 @@ import { Badge } from '@/components/ui/badge'
 import { Skeleton } from '@/components/ui/skeleton'
 import { useChatters } from '@/lib/hooks/useChatters'
 import { useMonthStore } from '@/lib/hooks/useMonth'
+import { useTeamStore } from '@/lib/hooks/useTeam'
 import { formatCurrency } from '@/lib/utils'
 import type { ChatterStatus, ChatterModelBreakdown } from '@/types'
 import { DollarSign, Users, Target, TrendingUp, X } from 'lucide-react'
@@ -152,7 +153,8 @@ function ModelPopover({ chatterName, models, onClose, anchorRef }: ModelPopoverP
 
 export default function ChattersPage() {
   const { month, year } = useMonthStore()
-  const { data, isLoading, error } = useChatters(month, year)
+  const { teamId } = useTeamStore()
+  const { data, isLoading, error } = useChatters(month, year, teamId)
 
   const [openPopover, setOpenPopover] = useState<string | null>(null)
   const btnRefs = useRef<Record<string, HTMLButtonElement | null>>({})

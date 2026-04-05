@@ -6,6 +6,7 @@ import { MetricCard, MetricCardSkeleton } from '@/components/metrics/MetricCard'
 import { RevenueChart, RevenueChartSkeleton } from '@/components/charts/RevenueChart'
 import { useOverview } from '@/lib/hooks/useOverview'
 import { useMonthStore } from '@/lib/hooks/useMonth'
+import { useTeamStore } from '@/lib/hooks/useTeam'
 import { formatCurrency } from '@/lib/utils'
 
 function fmtForecast(v?: number | null) {
@@ -16,7 +17,8 @@ function fmtForecast(v?: number | null) {
 
 export default function OverviewPage() {
   const { month, year } = useMonthStore()
-  const { data, isLoading, error } = useOverview(month, year)
+  const { teamId } = useTeamStore()
+  const { data, isLoading, error } = useOverview(month, year, teamId)
 
   return (
     <div className="flex flex-col h-full">
@@ -69,6 +71,30 @@ export default function OverviewPage() {
             </>
           ) : null}
         </div>
+
+        {!isLoading && data && teamId === 'all' && (data.teams_breakdown?.length ?? 0) > 1 && (
+          <div className="space-y-2">
+            <p className="text-xs font-semibold text-slate-400 uppercase tracking-wider">По командам</p>
+            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
+              {(data.teams_breakdown ?? []).map((t) => (
+                <div
+                  key={t.team_id}
+                  className="bg-slate-800/50 border border-slate-700/50 rounded-xl p-4"
+                >
+                  <p className="text-sm font-medium text-slate-200">{t.name}</p>
+                  <p className="text-lg font-bold text-emerald-400 mt-1">{formatCurrency(t.revenue)}</p>
+                  <div className="text-xs text-slate-500 mt-2 space-y-0.5">
+                    <p>Чаттеры: {formatCurrency(t.chatter_cut)}</p>
+                    <p>Админы: {formatCurrency(t.admin_cut)}</p>
+                    <p className="text-slate-400">
+                      Маржа {t.margin}% · прибыль {formatCurrency(t.profit)}
+                    </p>
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
 
         {/* Revenue chart */}
         {isLoading ? (

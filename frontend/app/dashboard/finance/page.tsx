@@ -6,6 +6,7 @@ import { WaterfallChart } from '@/components/charts/WaterfallChart'
 import { Skeleton } from '@/components/ui/skeleton'
 import { useFinance } from '@/lib/hooks/useFinance'
 import { useMonthStore } from '@/lib/hooks/useMonth'
+import { useTeamStore } from '@/lib/hooks/useTeam'
 import { formatCurrency } from '@/lib/utils'
 import { DollarSign, TrendingDown, Percent, TrendingUp } from 'lucide-react'
 import type { EconomicBreakdown } from '@/types'
@@ -74,7 +75,8 @@ function EconomicSummary({ eco, revenue }: { eco: EconomicBreakdown; revenue: nu
 
 export default function FinancePage() {
   const { month, year } = useMonthStore()
-  const { data, isLoading, error } = useFinance(month, year)
+  const { teamId } = useTeamStore()
+  const { data, isLoading, error } = useFinance(month, year, teamId)
 
   return (
     <div className="flex flex-col h-full">

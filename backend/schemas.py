@@ -53,6 +53,16 @@ class DailyRevenue(BaseModel):
     amount: float
 
 
+class OverviewTeamSlice(BaseModel):
+    team_id: int
+    name: str
+    revenue: float
+    chatter_cut: float
+    admin_cut: float
+    profit: float
+    margin: float
+
+
 class OverviewResponse(BaseModel):
     revenue: float
     expenses: float        # total costs (payouts + db_expenses)
@@ -67,6 +77,40 @@ class OverviewResponse(BaseModel):
     is_current_month: bool = False
     revenue_forecast: Optional[float] = None
     profit_forecast: Optional[float] = None
+    # Multi-team: per-team slice; empty if single team / legacy
+    teams_breakdown: list[OverviewTeamSlice] = []
+    selected_team_id: Optional[int] = None  # set when filtering by ?team_id=
+
+
+class TeamOut(BaseModel):
+    id: int
+    name: str
+    sort_order: int
+    notion_database_id: Optional[str] = None
+    inherit_economics: bool
+    chatter_max_pct: Optional[float] = None
+    default_chatter_pct: Optional[float] = None
+    admin_percent_total: Optional[float] = None
+
+
+class TeamCreate(BaseModel):
+    name: str
+    sort_order: int = 1
+    notion_database_id: Optional[str] = None
+    inherit_economics: bool = False
+    chatter_max_pct: Optional[float] = None
+    default_chatter_pct: Optional[float] = None
+    admin_percent_total: Optional[float] = None
+
+
+class TeamUpdate(BaseModel):
+    name: Optional[str] = None
+    sort_order: Optional[int] = None
+    notion_database_id: Optional[str] = None
+    inherit_economics: Optional[bool] = None
+    chatter_max_pct: Optional[float] = None
+    default_chatter_pct: Optional[float] = None
+    admin_percent_total: Optional[float] = None
 
 
 # ── Finance ───────────────────────────────────────────────────────────────────
