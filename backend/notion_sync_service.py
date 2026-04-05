@@ -7,9 +7,11 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import unicodedata
 from datetime import date, datetime
 from decimal import Decimal
 from typing import Any
+from urllib.parse import quote
 
 import httpx
 from sqlalchemy import select
@@ -39,6 +41,13 @@ def _parse_date(val: Any):
         return None
 
 
+def _format_notion_page_id(page_id: str) -> str:
+    pid = page_id.replace("-", "")
+    if len(pid) != 32:
+        return page_id
+    return f"{pid[0:8]}-{pid[8:12]}-{pid[12:16]}-{pid[16:20]}-{pid[20:32]}"
+
+
 async def _page_title(
     client: httpx.AsyncClient,
     headers: dict[str, str],
@@ -47,8 +56,7 @@ async def _page_title(
 ) -> str | None:
     if page_id in cache:
         return cache[page_id]
-    pid = page_id.replace("-", "")
-    fmt = f"{pid[0:8]}-{pid[8:12]}-{pid[12:16]}-{pid[16:20]}-{pid[20:32]}"
+    fmt = _format_notion_page_id(page_id)
     r = await client.get(f"https://api.notion.com/v1/pages/{fmt}", headers=headers, timeout=30.0)
     if r.status_code != 200:
         return None
@@ -62,6 +70,10 @@ async def _page_title(
     return None
 
 
+def _norm_prop_name(key: Any) -> str:
+    return unicodedata.normalize("NFKC", str(key)).strip().lower()
+
+
 def _find_model_property(props: dict) -> dict | None:
     """Колонка модели в разных базах: «Модель», «модель», rollup и т.д."""
     for key in ("Модель", "модель", "Model", "model", "MODEL"):
@@ -69,7 +81,7 @@ def _find_model_property(props: dict) -> dict | None:
         if isinstance(p, dict) and p.get("type"):
             return p
     for key, val in props.items():
-        kn = str(key).strip().lower()
+        kn = _norm_prop_name(key)
         if ("модел" in kn) or kn == "model":
             if isinstance(val, dict) and val.get("type"):
                 return val
@@ -87,21 +99,106 @@ def _text_from_rich_blocks(blocks: list | None) -> str | None:
     return s or None
 
 
+async def _relation_ids_via_property_api(
+    client: httpx.AsyncClient,
+    headers: dict[str, str],
+    page_id: str,
+    property_id: str,
+) -> list[str]:
+    """
+    Полный список ID связанных страниц для relation.
+    Notion в ответе query/retrieve page может отдать пустой relation[] или обрезать >25;
+    для точного списка используется GET /v1/pages/{id}/properties/{property_id}.
+    """
+    fmt = _format_notion_page_id(page_id)
+    prop_path = quote(property_id, safe="")
+    url = f"https://api.notion.com/v1/pages/{fmt}/properties/{prop_path}"
+    ids: list[str] = []
+    cursor: str | None = None
+    while True:
+        params: dict[str, str] = {}
+        if cursor:
+            params["start_cursor"] = cursor
+        r = await client.get(url, headers=headers, params=params, timeout=30.0)
+        if r.status_code != 200:
+            logger.debug(
+                "notion relation property retrieve failed page=%s prop=%s status=%s",
+                fmt[:8],
+                property_id,
+                r.status_code,
+            )
+            break
+        data = r.json()
+        if data.get("object") == "error":
+            logger.debug("notion relation property error: %s", data.get("message"))
+            break
+        if data.get("object") == "list":
+            for item in data.get("results") or []:
+                if not isinstance(item, dict):
+                    continue
+                if item.get("type") != "relation":
+                    continue
+                rel = item.get("relation") or {}
+                rid = rel.get("id") if isinstance(rel, dict) else None
+                if rid:
+                    ids.append(rid)
+            if not data.get("has_more"):
+                break
+            cursor = data.get("next_cursor")
+            if not cursor:
+                break
+            await asyncio.sleep(0.05)
+            continue
+        if isinstance(data, dict) and data.get("type") == "relation":
+            rel = data.get("relation") or {}
+            rid = rel.get("id") if isinstance(rel, dict) else None
+            if rid:
+                ids.append(rid)
+        break
+    return ids
+
+
+async def _relation_target_page_ids(
+    client: httpx.AsyncClient,
+    headers: dict[str, str],
+    model_prop: dict,
+    page_id: str | None,
+) -> list[str]:
+    """ID страниц из relation: inline в ответе + при >25 или пустом inline — через property API."""
+    ids: list[str] = []
+    rel = model_prop.get("relation")
+    if isinstance(rel, list):
+        for item in rel:
+            if isinstance(item, dict) and item.get("id"):
+                ids.append(item["id"])
+    if model_prop.get("type") != "relation":
+        return ids
+    prop_nid = model_prop.get("id")
+    if not page_id or not prop_nid:
+        return ids
+    must_fetch = (model_prop.get("has_more") is True) or (not ids)
+    if not must_fetch:
+        return ids
+    fetched = await _relation_ids_via_property_api(client, headers, page_id, str(prop_nid))
+    return fetched or ids
+
+
 async def _model_name_from_property(
     model_prop: dict,
     client: httpx.AsyncClient,
     headers: dict[str, str],
     model_cache: dict[str, str],
+    page_id: str | None = None,
 ) -> str | None:
     """Достаёт имя модели для relation / select / rollup / formula и др."""
     if not isinstance(model_prop, dict):
         return None
     t = model_prop.get("type")
 
-    if t == "relation" and model_prop.get("relation"):
-        rid = model_prop["relation"][0].get("id")
-        if rid:
-            name = await _page_title(client, headers, rid, model_cache)
+    if t == "relation":
+        rids = await _relation_target_page_ids(client, headers, model_prop, page_id)
+        if rids:
+            name = await _page_title(client, headers, rids[0], model_cache)
             return name or "—"
         return None
 
@@ -159,6 +256,7 @@ async def _parse_row(
     chatter_cache: dict[str, str],
     shift_cache: dict[str, str],
 ) -> tuple[Any, ...]:
+    notion_page_id = row.get("id")
     props = row.get("properties", {})
     amount_prop = (
         props.get("Сумма выхода")
@@ -180,17 +278,19 @@ async def _parse_row(
     model_name = None
     if model_prop:
         model_name = await _model_name_from_property(
-            model_prop, client, headers, model_cache
+            model_prop, client, headers, model_cache, notion_page_id
         )
     # Несколько колонок с «модел» в названии (модель / Модель общее)
     if not model_name:
         for key, val in props.items():
             if not isinstance(val, dict) or val is model_prop:
                 continue
-            kn = str(key).strip().lower()
+            kn = _norm_prop_name(key)
             if "модел" not in kn:
                 continue
-            model_name = await _model_name_from_property(val, client, headers, model_cache)
+            model_name = await _model_name_from_property(
+                val, client, headers, model_cache, notion_page_id
+            )
             if model_name:
                 break
 
