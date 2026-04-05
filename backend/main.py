@@ -18,21 +18,39 @@ app = FastAPI(
 )
 
 # ── CORS ──────────────────────────────────────────────────────────────────────
+# Браузер шлёт Origin текущей страницы. Если домен не в списке — запрос к API
+# блокируется (в UI: «Не удалось загрузить»), даже если в БД есть данные.
+# Задайте в Railway: FRONTEND_URL = точный origin (https://ваш-домен.tld)
+# и при необходимости EXTRA_CORS_ORIGINS = https://a.com,https://b.com
 
-_vercel_url = os.getenv("FRONTEND_URL", "")
+def _origin(url: str) -> str:
+    u = (url or "").strip().rstrip("/")
+    return u
+
+
 _origins = [
     "http://localhost:3000",
     "http://localhost:3001",
     "https://flow-of.vercel.app",
     "https://www.flow-of.vercel.app",
 ]
-if _vercel_url and _vercel_url not in _origins:
-    _origins.append(_vercel_url)
+for key in ("FRONTEND_URL",):
+    v = _origin(os.getenv(key, ""))
+    if v and v not in _origins:
+        _origins.append(v)
+for part in os.getenv("EXTRA_CORS_ORIGINS", "").split(","):
+    v = _origin(part)
+    if v and v not in _origins:
+        _origins.append(v)
+
+# Preview Vercel + опционально свой паттерн (например кастомный домен)
+_default_cors_re = r"https://.*\.vercel\.app"
+_cors_re = os.getenv("CORS_ORIGIN_REGEX", "").strip() or _default_cors_re
 
 app.add_middleware(
     CORSMiddleware,
     allow_origins=_origins,
-    allow_origin_regex=r"https://.*\.vercel\.app",
+    allow_origin_regex=_cors_re,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
