@@ -86,6 +86,20 @@ async def _load_kpi_map(
     return kpi, name_to_id
 
 
+def _pct_delta(curr: float | None, prev: float | None) -> float | None:
+    """% change from prev to curr, None if not computable."""
+    if curr is None or prev is None or prev == 0:
+        return None
+    return round((curr - prev) / abs(prev) * 100, 1)
+
+
+def _pp_delta(curr: float | None, prev: float | None) -> float | None:
+    """Percentage-point change (for rates like PPV open rate)."""
+    if curr is None or prev is None:
+        return None
+    return round(curr - prev, 2)
+
+
 def _kpi_for(chatter: str, kpi: dict, name_to_id: dict) -> dict:
     s = str(chatter).strip()
     if s in kpi:
@@ -285,8 +299,46 @@ async def get_shifts(
                 shift_chatters[sn] = []
             shift_chatters[sn].append(c)
 
+        # ── Previous month stats (for MoM deltas) ────────────────────────
+        prev_month = month - 1 if month > 1 else 12
+        prev_year = year if month > 1 else year - 1
+        prev_start, prev_end = _month_range(prev_year, prev_month)
+
+        prev_shift_result = await db.execute(
+            select(
+                func.coalesce(
+                    case((Transaction.shift_name != "", Transaction.shift_name), else_=None),
+                    Transaction.shift_id,
+                ).label("shift_key"),
+                func.sum(Transaction.amount).label("revenue"),
+                func.count(Transaction.id).label("transactions"),
+                func.count(func.distinct(Transaction.date)).label("active_days"),
+            )
+            .where(and_(
+                Transaction.tenant_id == tenant.id,
+                Transaction.date >= prev_start,
+                Transaction.date <= prev_end,
+                _has_shift,
+            ))
+            .group_by("shift_key")
+        )
+        prev_stats: dict[str, dict] = {}
+        for r in prev_shift_result.all():
+            raw = str(r.shift_key)
+            sn = _uuid_to_name.get(raw, raw)
+            rev_p = float(r.revenue or 0)
+            txns_p = int(r.transactions or 0)
+            days_p = int(r.active_days or 0)
+            prev_stats[sn] = {
+                "revenue": rev_p,
+                "transactions": txns_p,
+                "avg_check": rev_p / txns_p if txns_p > 0 else 0,
+                "productivity_per_day": rev_p / days_p if days_p > 0 else None,
+            }
+
         # ── Onlymonster KPI ───────────────────────────────────────────────
         kpi_data, name_to_id = await _load_kpi_map(db, tenant.id, year, month)
+        prev_kpi_data, prev_name_to_id = await _load_kpi_map(db, tenant.id, prev_year, prev_month)
 
         # ── Build shift rows ──────────────────────────────────────────────
         result_shifts: list[ShiftRow] = []
@@ -317,6 +369,7 @@ async def get_shifts(
             # Average KPI metrics across chatters in this shift
             chatters_in_shift = shift_chatters.get(sn, [])
             ppv_vals, apv_vals, chats_vals = [], [], []
+            prev_ppv_vals, prev_apv_vals = [], []
             for c in chatters_in_shift:
                 km = _kpi_for(c, kpi_data, name_to_id)
                 if km.get("ppv_open_rate") is not None:
@@ -325,6 +378,21 @@ async def get_shifts(
                     apv_vals.append(km["apv"])
                 if km.get("total_chats") is not None:
                     chats_vals.append(km["total_chats"])
+                # Previous month KPI for same chatters
+                pkm = _kpi_for(c, prev_kpi_data, prev_name_to_id)
+                if pkm.get("ppv_open_rate") is not None:
+                    prev_ppv_vals.append(pkm["ppv_open_rate"])
+                if pkm.get("apv") is not None:
+                    prev_apv_vals.append(pkm["apv"])
+
+            avg_ppv = round(sum(ppv_vals) / len(ppv_vals), 1) if ppv_vals else None
+            avg_apv = round(sum(apv_vals) / len(apv_vals), 2) if apv_vals else None
+            prev_ppv = round(sum(prev_ppv_vals) / len(prev_ppv_vals), 1) if prev_ppv_vals else None
+            prev_apv = round(sum(prev_apv_vals) / len(prev_apv_vals), 2) if prev_apv_vals else None
+
+            cur_prod = round(rev / active_days, 2) if active_days > 0 else None
+            cur_avg_check = round(rev / txns, 2) if txns > 0 else 0
+            p = prev_stats.get(sn, {})
 
             result_shifts.append(ShiftRow(
                 name=sn,
@@ -333,16 +401,23 @@ async def get_shifts(
                 chatters=chatters_count,
                 models=models_count,
                 active_days=active_days,
-                avg_check=round(rev / txns, 2) if txns > 0 else 0,
+                avg_check=cur_avg_check,
                 revenue_per_chatter=round(rev / chatters_count, 2) if chatters_count > 0 else None,
                 revenue_per_model=round(rev / models_count, 2) if models_count > 0 else None,
-                productivity_per_day=round(rev / active_days, 2) if active_days > 0 else None,
+                productivity_per_day=cur_prod,
                 share_pct=round(rev / total_revenue * 100, 1) if total_revenue > 0 else 0,
                 admin_payout=round(admin_payout_each, 2),
                 plan_completion=plan_completion,
-                avg_ppv_open_rate=round(sum(ppv_vals) / len(ppv_vals), 1) if ppv_vals else None,
-                avg_apv=round(sum(apv_vals) / len(apv_vals), 2) if apv_vals else None,
+                avg_ppv_open_rate=avg_ppv,
+                avg_apv=avg_apv,
                 total_chats_sum=sum(chats_vals) if chats_vals else None,
+                # MoM deltas
+                revenue_delta=_pct_delta(rev, p.get("revenue")),
+                transactions_delta=_pct_delta(txns, p.get("transactions")),
+                avg_check_delta=_pct_delta(cur_avg_check, p.get("avg_check")),
+                productivity_delta=_pct_delta(cur_prod, p.get("productivity_per_day")),
+                ppv_open_rate_delta=_pp_delta(avg_ppv, prev_ppv),
+                apv_delta=_pct_delta(avg_apv, prev_apv),
             ))
 
         return ShiftsResponse(

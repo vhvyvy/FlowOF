@@ -31,6 +31,13 @@ interface ShiftRow {
   avg_ppv_open_rate: number | null
   avg_apv: number | null
   total_chats_sum: number | null
+  // MoM deltas
+  revenue_delta?: number | null
+  transactions_delta?: number | null
+  avg_check_delta?: number | null
+  productivity_delta?: number | null
+  ppv_open_rate_delta?: number | null
+  apv_delta?: number | null
 }
 
 interface ShiftsResponse {
@@ -53,6 +60,18 @@ function fmt(v: number | null | undefined, prefix = '', suffix = '', digits = 2)
 
 function fmtPct(v: number | null | undefined) {
   return v == null ? '—' : `${v.toFixed(1)}%`
+}
+
+function Delta({ value, pp = false }: { value?: number | null; pp?: boolean }) {
+  if (value == null) return null
+  const zero = Math.abs(value) < 0.05
+  const positive = value > 0
+  if (zero) return <div className="text-slate-600 text-xs leading-none mt-0.5">→ 0{pp ? ' pp' : '%'}</div>
+  return (
+    <div className={`text-xs leading-none mt-0.5 ${positive ? 'text-emerald-500' : 'text-rose-500'}`}>
+      {positive ? '↑' : '↓'} {positive ? '+' : ''}{value.toFixed(1)}{pp ? ' pp' : '%'}
+    </div>
+  )
 }
 
 function planColor(v: number | null): string {
@@ -83,38 +102,51 @@ function ShiftCard({ shift, index, adminPct }: { shift: ShiftRow; index: number;
         </div>
         <div className="text-right">
           <p className="text-sm font-bold" style={{ color }}>{formatCurrency(shift.revenue)}</p>
-          <p className="text-xs text-slate-500">{shift.share_pct}% от выручки</p>
+          <Delta value={shift.revenue_delta} />
+          <p className="text-xs text-slate-500 mt-0.5">{shift.share_pct}% от выручки</p>
         </div>
       </div>
 
       {/* Metrics grid */}
       <div className="grid grid-cols-2 sm:grid-cols-4 gap-px bg-slate-700/30">
-        {[
-          { label: 'Транзакций', value: shift.transactions.toLocaleString() },
-          { label: 'Средний чек', value: formatCurrency(shift.avg_check) },
-          { label: '$/день', value: fmt(shift.productivity_per_day, '$') },
-          { label: '$/чаттер', value: fmt(shift.revenue_per_chatter, '$') },
-        ].map(({ label, value }) => (
-          <div key={label} className="bg-slate-800/40 px-4 py-3">
-            <p className="text-xs text-slate-500 mb-0.5">{label}</p>
-            <p className="text-sm font-medium text-slate-200">{value}</p>
-          </div>
-        ))}
+        <div className="bg-slate-800/40 px-4 py-3">
+          <p className="text-xs text-slate-500 mb-0.5">Транзакций</p>
+          <p className="text-sm font-medium text-slate-200">{shift.transactions.toLocaleString()}</p>
+          <Delta value={shift.transactions_delta} />
+        </div>
+        <div className="bg-slate-800/40 px-4 py-3">
+          <p className="text-xs text-slate-500 mb-0.5">Средний чек</p>
+          <p className="text-sm font-medium text-slate-200">{formatCurrency(shift.avg_check)}</p>
+          <Delta value={shift.avg_check_delta} />
+        </div>
+        <div className="bg-slate-800/40 px-4 py-3">
+          <p className="text-xs text-slate-500 mb-0.5">$/день</p>
+          <p className="text-sm font-medium text-slate-200">{fmt(shift.productivity_per_day, '$')}</p>
+          <Delta value={shift.productivity_delta} />
+        </div>
+        <div className="bg-slate-800/40 px-4 py-3">
+          <p className="text-xs text-slate-500 mb-0.5">$/чаттер</p>
+          <p className="text-sm font-medium text-slate-200">{fmt(shift.revenue_per_chatter, '$')}</p>
+        </div>
       </div>
 
       {/* Onlymonster metrics (if available) */}
       {hasOmData && (
         <div className="grid grid-cols-3 gap-px bg-slate-700/30 border-t border-slate-700/30">
-          {[
-            { label: 'Ср. PPV Open Rate', value: fmtPct(shift.avg_ppv_open_rate) },
-            { label: 'Ср. APV', value: fmt(shift.avg_apv, '$') },
-            { label: 'Total Chats', value: shift.total_chats_sum?.toLocaleString() ?? '—' },
-          ].map(({ label, value }) => (
-            <div key={label} className="bg-slate-800/30 px-4 py-3">
-              <p className="text-xs text-slate-500 mb-0.5">{label}</p>
-              <p className="text-sm font-medium text-slate-300">{value}</p>
-            </div>
-          ))}
+          <div className="bg-slate-800/30 px-4 py-3">
+            <p className="text-xs text-slate-500 mb-0.5">Ср. PPV Open Rate</p>
+            <p className="text-sm font-medium text-slate-300">{fmtPct(shift.avg_ppv_open_rate)}</p>
+            <Delta value={shift.ppv_open_rate_delta} pp />
+          </div>
+          <div className="bg-slate-800/30 px-4 py-3">
+            <p className="text-xs text-slate-500 mb-0.5">Ср. APV</p>
+            <p className="text-sm font-medium text-slate-300">{fmt(shift.avg_apv, '$')}</p>
+            <Delta value={shift.apv_delta} />
+          </div>
+          <div className="bg-slate-800/30 px-4 py-3">
+            <p className="text-xs text-slate-500 mb-0.5">Total Chats</p>
+            <p className="text-sm font-medium text-slate-300">{shift.total_chats_sum?.toLocaleString() ?? '—'}</p>
+          </div>
         </div>
       )}
 

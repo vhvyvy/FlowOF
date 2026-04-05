@@ -289,6 +289,13 @@ class ShiftRow(BaseModel):
     avg_ppv_open_rate: Optional[float] = None
     avg_apv: Optional[float] = None
     total_chats_sum: Optional[int] = None
+    # Month-over-month deltas (% change unless noted)
+    revenue_delta: Optional[float] = None
+    transactions_delta: Optional[float] = None
+    avg_check_delta: Optional[float] = None
+    productivity_delta: Optional[float] = None
+    ppv_open_rate_delta: Optional[float] = None   # pp
+    apv_delta: Optional[float] = None
 
 
 class ShiftsResponse(BaseModel):
