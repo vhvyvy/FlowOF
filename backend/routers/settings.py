@@ -17,11 +17,14 @@ class ProfileOut(BaseModel):
     email: str
     has_onlymonster_key: bool
     onlymonster_key_preview: Optional[str] = None  # masked
+    has_notion_token: bool = False
+    notion_token_preview: Optional[str] = None
 
 
 class ProfileUpdate(BaseModel):
     onlymonster_key: Optional[str] = None
     onlymonster_account_ids: Optional[str] = None
+    notion_token: Optional[str] = None
 
 logger = logging.getLogger("skynet.settings")
 router = APIRouter(prefix="/api/v1", tags=["settings"])
@@ -36,17 +39,26 @@ DEFAULTS = {
 }
 
 
+def _mask_secret(s: str) -> Optional[str]:
+    if not s or len(s) < 12:
+        return "••••" if s else None
+    return f"{s[:8]}…{s[-4:]}"
+
+
 @router.get("/profile", response_model=ProfileOut)
 async def get_profile(
     tenant: Tenant = Depends(get_current_tenant),
 ):
     key = tenant.onlymonster_key or ""
-    preview = f"{key[:6]}…{key[-4:]}" if len(key) > 10 else ("••••" if key else None)
+    om_prev = f"{key[:6]}…{key[-4:]}" if len(key) > 10 else ("••••" if key else None)
+    nt = (tenant.notion_token or "").strip()
     return ProfileOut(
         name=tenant.name,
         email=tenant.email,
         has_onlymonster_key=bool(key),
-        onlymonster_key_preview=preview,
+        onlymonster_key_preview=om_prev,
+        has_notion_token=bool(nt),
+        notion_token_preview=_mask_secret(nt),
     )
 
 
@@ -64,15 +76,20 @@ async def update_profile(
             t.onlymonster_key = body.onlymonster_key.strip() or None
         if body.onlymonster_account_ids is not None:
             t.onlymonster_account_ids = body.onlymonster_account_ids.strip() or None
+        if body.notion_token is not None:
+            t.notion_token = body.notion_token.strip() or None
         await db.commit()
         await db.refresh(t)
         key = t.onlymonster_key or ""
         preview = f"{key[:6]}…{key[-4:]}" if len(key) > 10 else ("••••" if key else None)
+        nt = (t.notion_token or "").strip()
         return ProfileOut(
             name=t.name,
             email=t.email,
             has_onlymonster_key=bool(key),
             onlymonster_key_preview=preview,
+            has_notion_token=bool(nt),
+            notion_token_preview=_mask_secret(nt),
         )
     except Exception as e:
         logger.error("profile update error tenant=%d: %s", tenant.id, e)
