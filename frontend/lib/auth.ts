@@ -1,11 +1,34 @@
 import api from './api'
-import type { LoginRequest, TokenResponse, TenantOut } from '@/types'
+import type {
+  LoginRequest,
+  TokenResponse,
+  TenantOut,
+  RegisterResponse,
+  OnboardingStatus,
+} from '@/types'
 
 export async function login(data: LoginRequest): Promise<TokenResponse> {
   const res = await api.post<TokenResponse>('/auth/login', data)
   if (typeof window !== 'undefined') {
     localStorage.setItem('token', res.data.access_token)
   }
+  return res.data
+}
+
+export async function register(data: {
+  email: string
+  password: string
+  agency_name: string
+}): Promise<RegisterResponse> {
+  const res = await api.post<RegisterResponse>('/auth/register', data)
+  if (typeof window !== 'undefined') {
+    localStorage.setItem('token', res.data.access_token)
+  }
+  return res.data
+}
+
+export async function fetchOnboardingStatus(): Promise<OnboardingStatus> {
+  const res = await api.get<OnboardingStatus>('/api/v1/onboarding/status')
   return res.data
 }
 

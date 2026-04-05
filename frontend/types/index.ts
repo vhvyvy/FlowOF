@@ -10,6 +10,21 @@ export interface TokenResponse {
   token_type: string
 }
 
+export interface RegisterResponse {
+  access_token: string
+  token_type: string
+  onboarding_completed: boolean
+}
+
+export interface OnboardingStatus {
+  onboarding_completed: boolean
+  current_step: number
+  source_type: string | null
+  agency_name: string | null
+  currency: string
+  next_ui_step: number
+}
+
 export interface TenantOut {
   id: number
   name: string

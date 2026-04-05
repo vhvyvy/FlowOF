@@ -60,7 +60,7 @@ app.add_middleware(
 
 # ── Routers ───────────────────────────────────────────────────────────────────
 
-from routers import auth, overview, finance, chatters, events, plans, kpi, ai, admin, settings, structure, shifts, teams, sync  # noqa: E402
+from routers import auth, overview, finance, chatters, events, plans, kpi, ai, admin, settings, structure, shifts, teams, sync, onboarding  # noqa: E402
 from database import engine, Base, AsyncSessionLocal  # noqa: E402
 
 app.include_router(auth.router)
@@ -77,6 +77,7 @@ app.include_router(structure.router)
 app.include_router(shifts.router)
 app.include_router(teams.router)
 app.include_router(sync.router)
+app.include_router(onboarding.router)
 
 
 # ── Startup: create missing tables ───────────────────────────────────────────

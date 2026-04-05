@@ -59,6 +59,12 @@ _PATCHES: list[tuple[str, bool]] = [
         False,
     ),
     ("CREATE INDEX IF NOT EXISTS ix_sync_log_tenant_id ON sync_log (tenant_id)", False),
+    # Старые тенанты без agency_name — не блокировать онбордингом (новые с регистрации заполняют agency_name)
+    (
+        "UPDATE tenants SET onboarding_completed = TRUE WHERE agency_name IS NULL "
+        "AND COALESCE(onboarding_completed, FALSE) = FALSE",
+        False,
+    ),
 ]
 
 
