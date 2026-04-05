@@ -1,6 +1,7 @@
 import axios from 'axios'
 
-function apiBaseURL(): string {
+/** Call per request — avoids server bundle pinning baseURL to localhost before hydration. */
+export function resolveApiBaseURL(): string {
   const fromEnv = process.env.NEXT_PUBLIC_API_URL?.replace(/\/$/, '')
   if (typeof window !== 'undefined') {
     const host = window.location.hostname
@@ -9,7 +10,6 @@ function apiBaseURL(): string {
     if (isLocal) {
       return fromEnv || 'http://localhost:8000'
     }
-    // Production: explicit backend URL, or same-origin + next.config rewrites
     if (fromEnv) return fromEnv
     return ''
   }
@@ -17,11 +17,11 @@ function apiBaseURL(): string {
 }
 
 const api = axios.create({
-  baseURL: apiBaseURL(),
   headers: { 'Content-Type': 'application/json' },
 })
 
 api.interceptors.request.use((config) => {
+  config.baseURL = resolveApiBaseURL()
   if (typeof window !== 'undefined') {
     const token = localStorage.getItem('token')
     if (token) {
