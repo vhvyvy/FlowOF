@@ -4,7 +4,7 @@ from datetime import date
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, func, and_
+from sqlalchemy import select, func, and_, case, or_
 
 from database import get_db
 from dependencies import get_current_tenant
@@ -111,10 +111,24 @@ async def get_shifts(
         settings = await load_settings(db, tenant.id)
         admin_pct = float(settings.get("admin_percent", "9")) / 100
 
+        # shift_key = shift_name if available (select), else shift_id (relation)
+        shift_key = func.coalesce(
+            case((Transaction.shift_name != "", Transaction.shift_name), else_=None),
+            Transaction.shift_id,
+        ).label("shift_key")
+
+        _has_shift = or_(
+            and_(Transaction.shift_name.isnot(None), Transaction.shift_name != ""),
+            and_(Transaction.shift_id.isnot(None), Transaction.shift_id != ""),
+        )
+
         # ── Revenue / stats per shift ──────────────────────────────────────
         shift_result = await db.execute(
             select(
-                Transaction.shift_name,
+                func.coalesce(
+                    case((Transaction.shift_name != "", Transaction.shift_name), else_=None),
+                    Transaction.shift_id,
+                ).label("shift_key"),
                 func.sum(Transaction.amount).label("revenue"),
                 func.count(Transaction.id).label("transactions"),
                 func.count(func.distinct(Transaction.chatter)).label("chatters"),
@@ -125,10 +139,9 @@ async def get_shifts(
                 Transaction.tenant_id == tenant.id,
                 Transaction.date >= start,
                 Transaction.date <= end,
-                Transaction.shift_name.isnot(None),
-                Transaction.shift_name != "",
+                _has_shift,
             ))
-            .group_by(Transaction.shift_name)
+            .group_by("shift_key")
             .order_by(func.sum(Transaction.amount).desc())
         )
         shift_rows = shift_result.all()
@@ -159,7 +172,10 @@ async def get_shifts(
         # Revenue per model within each shift
         model_shift_result = await db.execute(
             select(
-                Transaction.shift_name,
+                func.coalesce(
+                    case((Transaction.shift_name != "", Transaction.shift_name), else_=None),
+                    Transaction.shift_id,
+                ).label("shift_key"),
                 Transaction.model,
                 func.sum(Transaction.amount).label("rev"),
             )
@@ -167,16 +183,15 @@ async def get_shifts(
                 Transaction.tenant_id == tenant.id,
                 Transaction.date >= start,
                 Transaction.date <= end,
-                Transaction.shift_name.isnot(None),
-                Transaction.shift_name != "",
+                _has_shift,
             ))
-            .group_by(Transaction.shift_name, Transaction.model)
+            .group_by("shift_key", Transaction.model)
         )
         # model total revenue (for plan completion)
         model_total_rev: dict[str, float] = {}
         shift_model_rev: dict[str, dict[str, float]] = {}
         for r in model_shift_result.all():
-            sn = str(r.shift_name)
+            sn = str(r.shift_key)
             m = str(r.model or "")
             rev = float(r.rev or 0)
             model_total_rev[m] = model_total_rev.get(m, 0) + rev
@@ -187,21 +202,24 @@ async def get_shifts(
         # ── Chatters per shift (for KPI lookup) ───────────────────────────
         chatter_shift_result = await db.execute(
             select(
-                Transaction.shift_name,
+                func.coalesce(
+                    case((Transaction.shift_name != "", Transaction.shift_name), else_=None),
+                    Transaction.shift_id,
+                ).label("shift_key"),
                 Transaction.chatter,
             )
             .where(and_(
                 Transaction.tenant_id == tenant.id,
                 Transaction.date >= start,
                 Transaction.date <= end,
-                Transaction.shift_name.isnot(None),
+                _has_shift,
                 Transaction.chatter.isnot(None),
             ))
             .distinct()
         )
         shift_chatters: dict[str, list[str]] = {}
         for r in chatter_shift_result.all():
-            sn = str(r.shift_name)
+            sn = str(r.shift_key)
             c = str(r.chatter)
             if sn not in shift_chatters:
                 shift_chatters[sn] = []
@@ -213,7 +231,7 @@ async def get_shifts(
         # ── Build shift rows ──────────────────────────────────────────────
         result_shifts: list[ShiftRow] = []
         for r in shift_rows:
-            sn = str(r.shift_name)
+            sn = str(r.shift_key)
             rev = float(r.revenue or 0)
             txns = int(r.transactions or 0)
             chatters_count = int(r.chatters or 0)
