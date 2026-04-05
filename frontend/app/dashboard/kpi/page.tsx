@@ -330,14 +330,23 @@ function KpiTable({ rows }: { rows: KpiRow[] }) {
                     <div className="text-emerald-400 font-mono">{formatCurrency(row.revenue)}</div>
                     <Delta value={row.revenue_delta} />
                   </td>
-                  <td className="px-3 py-2.5 text-right text-slate-300">{row.transactions}</td>
-                  <td className="px-3 py-2.5 text-right text-slate-300">{formatCurrency(row.avg_check)}</td>
+                  <td className="px-3 py-2.5 text-right">
+                    <div className="text-slate-300">{row.transactions}</div>
+                    <Delta value={row.transactions_delta} />
+                  </td>
+                  <td className="px-3 py-2.5 text-right">
+                    <div className="text-slate-300">{formatCurrency(row.avg_check)}</div>
+                    <Delta value={row.avg_check_delta} />
+                  </td>
                   <td className="px-3 py-2.5 text-right text-slate-400">{fmtPct(row.share_pct)}</td>
                   <td className="px-3 py-2.5 text-right">
                     <div className={`font-medium ${scoreColor(row.ppv_open_rate, 15, 30)}`}>{fmtPct(row.ppv_open_rate)}</div>
                     <Delta value={row.ppv_open_rate_delta} pp />
                   </td>
-                  <td className="px-3 py-2.5 text-right text-slate-300">{fmt(row.apv, '$')}</td>
+                  <td className="px-3 py-2.5 text-right">
+                    <div className="text-slate-300">{fmt(row.apv, '$')}</div>
+                    <Delta value={row.apv_delta} />
+                  </td>
                   <td className="px-3 py-2.5 text-right">
                     <div className="text-slate-300">{row.total_chats?.toLocaleString() ?? '—'}</div>
                     <Delta value={row.total_chats_delta} />
@@ -346,10 +355,22 @@ function KpiTable({ rows }: { rows: KpiRow[] }) {
                     <div className={`font-mono font-medium ${scoreColor(row.rpc, 1, 3)}`}>{fmt(row.rpc, '$')}</div>
                     <Delta value={row.rpc_delta} />
                   </td>
-                  <td className="px-3 py-2.5 text-right text-slate-400">{fmt(row.ppv_sold, '', '', 1)}</td>
-                  <td className="px-3 py-2.5 text-right text-slate-400">{fmt(row.apc_per_chat)}</td>
-                  <td className="px-3 py-2.5 text-right text-slate-400">{fmt(row.volume_rating, '', '', 1)}</td>
-                  <td className="px-3 py-2.5 text-right text-orange-400 font-medium">{formatCurrency(row.payout)}</td>
+                  <td className="px-3 py-2.5 text-right">
+                    <div className="text-slate-400">{fmt(row.ppv_sold, '', '', 1)}</div>
+                    <Delta value={row.ppv_sold_delta} />
+                  </td>
+                  <td className="px-3 py-2.5 text-right">
+                    <div className="text-slate-400">{fmt(row.apc_per_chat)}</div>
+                    <Delta value={row.apc_per_chat_delta} />
+                  </td>
+                  <td className="px-3 py-2.5 text-right">
+                    <div className="text-slate-400">{fmt(row.volume_rating, '', '', 1)}</div>
+                    <Delta value={row.volume_rating_delta} />
+                  </td>
+                  <td className="px-3 py-2.5 text-right">
+                    <div className="text-orange-400 font-medium">{formatCurrency(row.payout)}</div>
+                    <Delta value={row.payout_delta} />
+                  </td>
                 </tr>
               ))}
             </tbody>

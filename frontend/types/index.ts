@@ -152,11 +152,18 @@ export interface KpiRow {
   productivity_index: number | null
   efficiency_ratio: number | null
   source: string | null
-  // Month-over-month deltas
+  // Month-over-month deltas vs prev month
   revenue_delta?: number | null
-  rpc_delta?: number | null
+  transactions_delta?: number | null
+  avg_check_delta?: number | null
   ppv_open_rate_delta?: number | null
+  apv_delta?: number | null
   total_chats_delta?: number | null
+  rpc_delta?: number | null
+  ppv_sold_delta?: number | null
+  apc_per_chat_delta?: number | null
+  volume_rating_delta?: number | null
+  payout_delta?: number | null
 }
 
 export interface KpiResponse {

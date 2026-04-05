@@ -165,13 +165,17 @@ async def _load_mapping(db: AsyncSession, tenant_id: int) -> tuple[dict[str, str
     return id_to_name, name_to_id
 
 
-async def _chatter_revenue_map(
+async def _chatter_txn_stats(
     db: AsyncSession, tenant_id: int, year: int, month: int
-) -> dict[str, float]:
-    """Returns {chatter: revenue} for a given month."""
+) -> dict[str, dict]:
+    """Returns {chatter: {revenue, transactions}} for a given month."""
     start, end = _month_range(year, month)
     result = await db.execute(
-        select(Transaction.chatter, func.sum(Transaction.amount).label("rev"))
+        select(
+            Transaction.chatter,
+            func.sum(Transaction.amount).label("rev"),
+            func.count(Transaction.id).label("txn_count"),
+        )
         .where(and_(
             Transaction.tenant_id == tenant_id,
             Transaction.date >= start, Transaction.date <= end,
@@ -179,7 +183,10 @@ async def _chatter_revenue_map(
         ))
         .group_by(Transaction.chatter)
     )
-    return {str(r.chatter): float(r.rev or 0) for r in result.all()}
+    return {
+        str(r.chatter): {"revenue": float(r.rev or 0), "transactions": int(r.txn_count or 0)}
+        for r in result.all()
+    }
 
 
 def _pct_delta(current: float | None, prev: float | None) -> float | None:
@@ -288,7 +295,9 @@ async def get_kpi(
         prev_month = month - 1 if month > 1 else 12
         prev_year = year if month > 1 else year - 1
         prev_kpi_data = await _load_kpi_data(db, tenant.id, prev_year, prev_month)
-        prev_rev_map = await _chatter_revenue_map(db, tenant.id, prev_year, prev_month)
+        prev_txn_stats = await _chatter_txn_stats(db, tenant.id, prev_year, prev_month)
+        # Prev month total revenue (for share_pct)
+        prev_total_rev = sum(v["revenue"] for v in prev_txn_stats.values())
 
         # ── Build rows ────────────────────────────────────────────────────
         rows: list[KpiRow] = []
@@ -301,7 +310,9 @@ async def get_kpi(
 
             om_metrics, om_id = _resolve_kpi(chatter, kpi_data, name_to_id)
             prev_om, _ = _resolve_kpi(chatter, prev_kpi_data, name_to_id)
-            prev_rev = prev_rev_map.get(chatter, 0.0)
+            prev_stats = prev_txn_stats.get(chatter, {})
+            prev_rev = prev_stats.get("revenue", 0.0)
+            prev_txns = prev_stats.get("transactions", 0)
 
             row = _compute_derived({
                 "chatter": chatter,
@@ -312,13 +323,29 @@ async def get_kpi(
                 **om_metrics,
             }, total_revenue)
 
+            # Compute prev month derived metrics for delta comparison
+            prev_row = _compute_derived({
+                "chatter": chatter,
+                "onlymonster_id": om_id,
+                "revenue": prev_rev,
+                "transactions": prev_txns,
+                "payout": 0.0,  # not needed for delta
+                **prev_om,
+            }, prev_total_rev) if prev_rev > 0 or prev_om else None
+
             # Month-over-month deltas
-            row.revenue_delta = _pct_delta(rev, prev_rev)
-            row.rpc_delta = _pct_delta(row.rpc, _safe(prev_om.get("rpc_approx"), 2))
-            row.ppv_open_rate_delta = _pp_delta(row.ppv_open_rate, prev_om.get("ppv_open_rate"))
-            row.total_chats_delta = _pct_delta(
-                row.total_chats, prev_om.get("total_chats")
-            )
+            row.revenue_delta       = _pct_delta(rev, prev_rev)
+            row.transactions_delta  = _pct_delta(txns, prev_txns) if prev_txns > 0 else None
+            row.avg_check_delta     = _pct_delta(row.avg_check, prev_row.avg_check if prev_row else None)
+            row.ppv_open_rate_delta = _pp_delta(row.ppv_open_rate, prev_row.ppv_open_rate if prev_row else None)
+            row.apv_delta           = _pct_delta(row.apv, prev_row.apv if prev_row else None)
+            row.total_chats_delta   = _pct_delta(row.total_chats, prev_row.total_chats if prev_row else None)
+            row.rpc_delta           = _pct_delta(row.rpc, prev_row.rpc if prev_row else None)
+            row.ppv_sold_delta      = _pct_delta(row.ppv_sold, prev_row.ppv_sold if prev_row else None)
+            row.apc_per_chat_delta  = _pct_delta(row.apc_per_chat, prev_row.apc_per_chat if prev_row else None)
+            row.volume_rating_delta = _pct_delta(row.volume_rating, prev_row.volume_rating if prev_row else None)
+            row.payout_delta        = _pct_delta(row.payout, prev_rev * DEFAULT_TIER if prev_rev > 0 else None)
+
             rows.append(row)
 
         avg_rpc: float | None = None
