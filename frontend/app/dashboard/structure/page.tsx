@@ -246,6 +246,8 @@ function EconomicDonut({ eco, revenue }: { eco: EconomicBreakdown; revenue: numb
               </Pie>
               <Tooltip
                 contentStyle={{ background: '#1e293b', border: '1px solid #334155', borderRadius: 8, fontSize: 12 }}
+                labelStyle={{ color: '#94a3b8', fontSize: 12 }}
+                itemStyle={{ color: '#e2e8f0', fontSize: 12 }}
                 formatter={(v) => [typeof v === 'number' ? formatCurrency(v) : String(v), '']}
               />
             </PieChart>
@@ -302,6 +304,8 @@ function ChatterBar({ chatters }: { chatters: ChatterShare[] }) {
           />
           <Tooltip
             contentStyle={{ background: '#1e293b', border: '1px solid #334155', borderRadius: 8, fontSize: 12 }}
+            labelStyle={{ color: '#94a3b8', fontSize: 12, fontWeight: 600 }}
+            itemStyle={{ color: '#e2e8f0', fontSize: 12 }}
             cursor={{ fill: 'rgba(99,102,241,0.08)' }}
             formatter={(v, _, entry) => [
               `${typeof v === 'number' ? formatCurrency(v) : v} (${(entry?.payload as { share?: number })?.share ?? 0}%)`,
