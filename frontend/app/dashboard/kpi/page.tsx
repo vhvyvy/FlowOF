@@ -451,7 +451,7 @@ export default function KpiPage() {
         </div>
 
         {/* Sync / Upload bar */}
-        <div className="bg-slate-800/50 border border-slate-700/50 rounded-xl p-4">
+        <div className="bg-slate-800/50 border border-slate-700/50 rounded-xl p-4 space-y-3">
           <div className="flex items-center gap-3 flex-wrap">
             <p className="text-sm font-medium text-slate-300 mr-2">Данные Onlymonster</p>
             {hasOm ? (
@@ -464,9 +464,12 @@ export default function KpiPage() {
                 {syncMutation.isPending ? 'Синхронизация...' : 'Синхронизировать через API'}
               </button>
             ) : (
-              <span className="text-xs text-slate-500 bg-slate-700/40 px-3 py-2 rounded-lg">
-                Добавьте ONLYMONSTER_API_KEY в тенант для API-синхронизации
-              </span>
+              <a
+                href="/dashboard/settings"
+                className="flex items-center gap-1.5 text-xs text-indigo-400 hover:text-indigo-300 bg-indigo-500/10 border border-indigo-500/20 px-3 py-2 rounded-lg transition-colors"
+              >
+                Добавьте API-ключ в Настройках →
+              </a>
             )}
             <button
               onClick={() => fileRef.current?.click()}
@@ -474,7 +477,7 @@ export default function KpiPage() {
               className="flex items-center gap-2 px-4 py-2 bg-slate-700 hover:bg-slate-600 disabled:opacity-50 text-slate-200 text-sm rounded-lg transition-colors"
             >
               <Upload className={`h-4 w-4 ${uploadMutation.isPending ? 'animate-pulse' : ''}`} />
-              {uploadMutation.isPending ? 'Загрузка...' : 'Загрузить CSV'}
+              {uploadMutation.isPending ? 'Загрузка...' : 'Загрузить CSV из Onlymonster'}
             </button>
             <input
               ref={fileRef}
@@ -488,12 +491,15 @@ export default function KpiPage() {
               }}
             />
           </div>
-          {syncMsg && <p className="mt-2 text-xs text-emerald-400">{syncMsg}</p>}
-          {syncError && <p className="mt-2 text-xs text-rose-400">{syncError}</p>}
+          {syncMsg && <p className="text-xs text-emerald-400">{syncMsg}</p>}
+          {syncError && <p className="text-xs text-rose-400">{syncError}</p>}
           {!hasOmData && !isLoading && rows.length > 0 && (
-            <p className="mt-2 text-xs text-slate-500">
-              Нет данных из Onlymonster — синхронизируйте через API или загрузите CSV-экспорт, чтобы увидеть PPV Open Rate, APV, RPC и другие метрики
-            </p>
+            <div className="text-xs text-slate-500 bg-slate-700/30 rounded-lg p-3 space-y-1">
+              <p className="text-slate-400 font-medium">Как заполнить PPV Open Rate, APV, RPC и другие метрики:</p>
+              <p>1. Маппинг ✓ — вы уже связали чаттеров с Onlymonster ID</p>
+              <p>2. Загрузите данные: нажмите <span className="text-slate-300">"Загрузить CSV"</span> (экспорт из Onlymonster → Chatter Metrics) или <span className="text-slate-300">"Синхронизировать через API"</span> (нужен API-ключ в Настройках)</p>
+              <p>3. После загрузки метрики появятся автоматически</p>
+            </div>
           )}
         </div>
 

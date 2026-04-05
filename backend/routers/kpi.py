@@ -8,7 +8,7 @@ import csv
 
 from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, func, and_, delete
+from sqlalchemy import select, func, and_, delete, text
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from database import get_db
@@ -87,7 +87,19 @@ def _compute_derived(row: dict, total_revenue: float) -> KpiRow:
 
 
 async def _load_kpi_data(db: AsyncSession, tenant_id: int, year: int, month: int) -> dict[str, dict]:
-    """Load stored Onlymonster metrics from chatter_kpi_mt, keyed by chatter id."""
+    """
+    Load Onlymonster metrics keyed by chatter id/name.
+    Checks chatter_kpi_mt first, then falls back to legacy chatter_kpi table.
+    """
+    def _row_to_dict(chatter, ppv, apv, chats, source):
+        return {
+            "ppv_open_rate": float(ppv) if ppv is not None else None,
+            "apv": float(apv) if apv is not None else None,
+            "total_chats": int(chats) if chats is not None else None,
+            "source": source,
+        }
+
+    # Primary: new multi-tenant table
     result = await db.execute(
         select(ChatterKpi).where(
             and_(
@@ -97,15 +109,33 @@ async def _load_kpi_data(db: AsyncSession, tenant_id: int, year: int, month: int
             )
         )
     )
-    return {
-        str(r.chatter): {
-            "ppv_open_rate": float(r.ppv_open_rate) if r.ppv_open_rate is not None else None,
-            "apv": float(r.apv) if r.apv is not None else None,
-            "total_chats": int(r.total_chats) if r.total_chats is not None else None,
-            "source": r.source,
+    rows = result.scalars().all()
+    if rows:
+        return {
+            str(r.chatter): _row_to_dict(r.chatter, r.ppv_open_rate, r.apv, r.total_chats, r.source)
+            for r in rows
         }
-        for r in result.scalars().all()
-    }
+
+    # Fallback: legacy single-tenant chatter_kpi table (from old Streamlit app)
+    try:
+        legacy = await db.execute(
+            text(
+                "SELECT chatter, ppv_open_rate, apv, total_chats, source "
+                "FROM chatter_kpi WHERE year=:year AND month=:month"
+            ),
+            {"year": year, "month": month},
+        )
+        legacy_rows = legacy.all()
+        if legacy_rows:
+            logger.info("kpi: using legacy chatter_kpi table (%d rows)", len(legacy_rows))
+            return {
+                str(r.chatter): _row_to_dict(r.chatter, r.ppv_open_rate, r.apv, r.total_chats, getattr(r, "source", "legacy"))
+                for r in legacy_rows
+            }
+    except Exception as e:
+        logger.debug("legacy chatter_kpi not available: %s", e)
+
+    return {}
 
 
 async def _load_mapping(db: AsyncSession, tenant_id: int) -> tuple[dict[str, str], dict[str, str]]:
@@ -231,18 +261,24 @@ async def get_kpi(
         # Resolve KPI metrics for a chatter display name
         def _kpi_for_chatter(chatter: str) -> tuple[dict, str | None]:
             s = str(chatter).strip()
-            # Direct match by display name
+            # 1. Direct match by display name in kpi_data
             if s in kpi_data:
-                oid = name_to_id.get(s)
-                return kpi_data[s], oid
-            # Match via mapping: get OM id for this chatter name, then look up kpi by id
+                return kpi_data[s], name_to_id.get(s)
+            # 2. Resolve display name → onlymonster_id → look up kpi by id
             oid = name_to_id.get(s)
             if oid and oid in kpi_data:
                 return kpi_data[oid], oid
-            # Partial match
+            # 3. Look up all aliases for this chatter's onlymonster_id
+            if oid:
+                # The legacy table may store data under various alias forms
+                for alias in [oid, f"@{oid}"]:
+                    if alias in kpi_data:
+                        return kpi_data[alias], oid
+            # 4. Partial match (prefix)
             for k, m in kpi_data.items():
-                if s.startswith(k) or k.startswith(s):
-                    return m, name_to_id.get(k)
+                ks = str(k).strip()
+                if s and ks and (s.startswith(ks) or ks.startswith(s)):
+                    return m, name_to_id.get(ks)
             return {}, None
 
         # ── Build rows ────────────────────────────────────────────────────
