@@ -181,8 +181,9 @@ function ChatterBar({ chatters }: { chatters: ChatterShare[] }) {
           />
           <Tooltip
             contentStyle={{ background: '#1e293b', border: '1px solid #334155', borderRadius: 8, fontSize: 12 }}
-            formatter={(v: number, _: string, entry: { payload: { share: number } }) => [
-              `${formatCurrency(v)} (${entry.payload.share}%)`, 'Выручка'
+            formatter={(v, _, entry) => [
+              `${typeof v === 'number' ? formatCurrency(v) : v} (${(entry?.payload as { share?: number })?.share ?? 0}%)`,
+              'Выручка',
             ]}
           />
           <Bar dataKey="revenue" radius={[0, 4, 4, 0]} fill="#6366f1" fillOpacity={0.85}>
