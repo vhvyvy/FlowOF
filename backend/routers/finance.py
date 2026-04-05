@@ -1,6 +1,5 @@
 import logging
 import math
-import os
 from calendar import monthrange
 from datetime import date
 
@@ -45,6 +44,13 @@ def _sanitize_eco(eco: dict) -> dict:
             continue
         out[k] = _finite(v)
     return out
+
+
+def _http_error_detail(exc: BaseException, max_len: int = 520) -> str:
+    """Краткий текст для JSON detail — виден в Network → Response без env vars."""
+    name = type(exc).__name__
+    msg = str(exc).strip() or repr(exc)
+    return f"{name}: {msg}"[:max_len]
 
 
 def _economic_breakdown(eco: dict) -> EconomicBreakdown:
@@ -288,13 +294,7 @@ async def get_finance(
         raise
     except ProgrammingError as e:
         logger.exception("finance SQL tenant=%d", tenant.id)
-        msg = "Ошибка SQL (часто нет колонки team_id — redeploy бэкенда)."
-        if os.getenv("SHOW_FINANCE_TRACEBACK") == "1":
-            orig = getattr(e, "orig", None) or str(e)
-            msg = str(orig)[:400]
-        raise HTTPException(status_code=500, detail=msg) from e
+        raise HTTPException(status_code=500, detail=_http_error_detail(e)) from e
     except Exception as e:
         logger.exception("finance error tenant=%d", tenant.id)
-        if os.getenv("SHOW_FINANCE_TRACEBACK") == "1":
-            raise HTTPException(status_code=500, detail=repr(e)) from e
-        raise HTTPException(status_code=500, detail="Ошибка загрузки данных")
+        raise HTTPException(status_code=500, detail=_http_error_detail(e)) from e
