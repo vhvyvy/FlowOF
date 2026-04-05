@@ -111,16 +111,27 @@ async def get_shifts(
         settings = await load_settings(db, tenant.id)
         admin_pct = float(settings.get("admin_percent", "9")) / 100
 
-        # shift_key = shift_name if available (select), else shift_id (relation)
-        shift_key = func.coalesce(
-            case((Transaction.shift_name != "", Transaction.shift_name), else_=None),
-            Transaction.shift_id,
-        ).label("shift_key")
-
         _has_shift = or_(
             and_(Transaction.shift_name.isnot(None), Transaction.shift_name != ""),
             and_(Transaction.shift_id.isnot(None), Transaction.shift_id != ""),
         )
+
+        # Build UUID→name mapping from ALL transactions where both fields exist
+        # (e.g. April has select name; March had relation UUID → same UUID in shift_id)
+        mapping_result = await db.execute(
+            select(Transaction.shift_id, Transaction.shift_name)
+            .where(and_(
+                Transaction.tenant_id == tenant.id,
+                Transaction.shift_id.isnot(None),
+                Transaction.shift_id != "",
+                Transaction.shift_name.isnot(None),
+                Transaction.shift_name != "",
+            ))
+            .distinct()
+        )
+        _uuid_to_name: dict[str, str] = {
+            r.shift_id: r.shift_name for r in mapping_result.all()
+        }
 
         # ── Revenue / stats per shift ──────────────────────────────────────
         shift_result = await db.execute(
@@ -191,7 +202,8 @@ async def get_shifts(
         model_total_rev: dict[str, float] = {}
         shift_model_rev: dict[str, dict[str, float]] = {}
         for r in model_shift_result.all():
-            sn = str(r.shift_key)
+            raw = str(r.shift_key)
+            sn = _uuid_to_name.get(raw, raw)
             m = str(r.model or "")
             rev = float(r.rev or 0)
             model_total_rev[m] = model_total_rev.get(m, 0) + rev
@@ -219,7 +231,8 @@ async def get_shifts(
         )
         shift_chatters: dict[str, list[str]] = {}
         for r in chatter_shift_result.all():
-            sn = str(r.shift_key)
+            raw = str(r.shift_key)
+            sn = _uuid_to_name.get(raw, raw)
             c = str(r.chatter)
             if sn not in shift_chatters:
                 shift_chatters[sn] = []
@@ -231,7 +244,9 @@ async def get_shifts(
         # ── Build shift rows ──────────────────────────────────────────────
         result_shifts: list[ShiftRow] = []
         for r in shift_rows:
-            sn = str(r.shift_key)
+            raw_key = str(r.shift_key)
+            # If shift_key is a UUID (relation type), substitute human-readable name
+            sn = _uuid_to_name.get(raw_key, raw_key)
             rev = float(r.revenue or 0)
             txns = int(r.transactions or 0)
             chatters_count = int(r.chatters or 0)
