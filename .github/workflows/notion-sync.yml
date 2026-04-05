@@ -1,24 +1,30 @@
-# Скопируйте в .github/workflows/notion-sync.yml (нужен push с правом workflow на токене).
 name: Notion transactions sync
+
 on:
   schedule:
     - cron: "0 6,14,22 * * *"
   workflow_dispatch:
+
 jobs:
   sync:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
+
       - name: Install backend dependencies
         run: pip install -r requirements.txt
         working-directory: backend
-      - name: Run Notion sync
+
+      - name: Run Notion → PostgreSQL sync
         working-directory: backend
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
           NOTION_TOKEN: ${{ secrets.NOTION_TOKEN }}
           NOTION_SYNC_TENANT_ID: ${{ secrets.NOTION_SYNC_TENANT_ID }}
+          NOTION_SYNC_SHIFT_TYPE: ${{ vars.NOTION_SYNC_SHIFT_TYPE }}
+          NOTION_SYNC_ALLOW_EMPTY_MODEL: ${{ vars.NOTION_SYNC_ALLOW_EMPTY_MODEL }}
         run: python scripts/run_notion_sync.py
