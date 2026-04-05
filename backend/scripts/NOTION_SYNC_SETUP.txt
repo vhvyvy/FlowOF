@@ -1,0 +1,37 @@
+Notion → Neon: что настроить один раз
+========================================
+
+1) GitHub (репозиторий → Settings → Secrets and variables → Actions)
+
+   Repository secrets:
+   - DATABASE_URL — тот же URL, что на Railway (postgresql://... или уже с +asyncpg)
+   - NOTION_TOKEN — Internal Integration Secret из Notion (Integrations → ваше приложение)
+   - NOTION_SYNC_TENANT_ID — число, id строки в таблице tenants (часто 1)
+
+   Опционально (Repository variables):
+   - NOTION_SYNC_SHIFT_TYPE = relation | select
+   - NOTION_SYNC_ALLOW_EMPTY_MODEL = 1 — только если без этого импорт всё ещё режет строки
+
+2) Railway (backend service → Variables)
+
+   - NOTION_TRANSACTIONS_DATABASE_ID — UUID базы транзакций в Notion (если не только team DB)
+   - NOTION_SYNC_ALLOW_EMPTY_MODEL — по необходимости (см. выше)
+   - Убедитесь, что tenants.notion_token задан (или тот же токен, что в GitHub)
+
+3) Notion
+
+   У интеграции с этим токеном: Share → Connections на базе транзакций И на базе моделей
+   (куда ведёт relation «модель»).
+
+4) Проверка workflow
+
+   Actions → «Notion transactions sync» → Run workflow (ручной запуск).
+   После первого успешного прогона по расписанию 3 раза в сутки (UTC в cron).
+
+5) Локально (без GitHub)
+
+   cd backend
+   set DATABASE_URL=...
+   set NOTION_TOKEN=...
+   set NOTION_SYNC_TENANT_ID=1
+   python scripts/run_notion_sync.py
