@@ -6,7 +6,7 @@ import { useStructure } from '@/lib/hooks/useStructure'
 import { useMonthStore } from '@/lib/hooks/useMonth'
 import { formatCurrency } from '@/lib/utils'
 import type { ModelShare, ChatterShare, EconomicBreakdown } from '@/types'
-import { useMemo } from 'react'
+import { useMemo, useEffect, useRef, useState } from 'react'
 import {
   PieChart, Pie, Cell, Tooltip, ResponsiveContainer,
   BarChart, Bar, XAxis, YAxis, CartesianGrid,
@@ -48,12 +48,143 @@ function completionBg(pct: number) {
   return 'bg-slate-600'
 }
 
-// ── Custom Treemap cell ───────────────────────────────────────────────────────
+// ── Binary-split SVG layout ───────────────────────────────────────────────────
 
-function TreemapCell(props: {
+type LayoutItem<T> = T & { x: number; y: number; w: number; h: number }
+
+function binaryLayout<T extends { value: number }>(
+  items: T[], x: number, y: number, w: number, h: number,
+): LayoutItem<T>[] {
+  if (items.length === 0 || w < 1 || h < 1) return []
+  if (items.length === 1) return [{ ...items[0], x, y, w, h }]
+  const total = items.reduce((s, i) => s + i.value, 0)
+  if (total === 0) return items.map((item, i) => ({ ...item, x: x + i * (w / items.length), y, w: w / items.length, h }))
+
+  let acc = 0, splitAt = 1
+  for (let i = 0; i < items.length - 1; i++) {
+    acc += items[i].value
+    splitAt = i + 1
+    if (acc >= total / 2) break
+  }
+  const left = items.slice(0, splitAt)
+  const right = items.slice(splitAt)
+  const lf = left.reduce((s, i) => s + i.value, 0) / total
+
+  return w >= h
+    ? [...binaryLayout(left, x, y, lf * w, h), ...binaryLayout(right, x + lf * w, y, (1 - lf) * w, h)]
+    : [...binaryLayout(left, x, y, w, lf * h), ...binaryLayout(right, x, y + lf * h, w, (1 - lf) * h)]
+}
+
+function blueShade(value: number, min: number, max: number): string {
+  const t = max > min ? (value - min) / (max - min) : 0.5
+  const r = Math.round(10  + t * (30  - 10))
+  const g = Math.round(50  + t * (180 - 50))
+  const b = Math.round(80  + t * (255 - 80))
+  return `rgb(${r},${g},${b})`
+}
+
+// ── Hierarchical SVG Treemap ──────────────────────────────────────────────────
+
+const HEADER_H = 22
+
+function HierarchicalTreemap({ models }: { models: ModelShare[] }) {
+  const containerRef = useRef<HTMLDivElement>(null)
+  const [svgWidth, setSvgWidth] = useState(800)
+  const svgHeight = 400
+
+  useEffect(() => {
+    const el = containerRef.current
+    if (!el) return
+    const ro = new ResizeObserver((entries) => setSvgWidth(entries[0].contentRect.width))
+    ro.observe(el)
+    setSvgWidth(el.offsetWidth)
+    return () => ro.disconnect()
+  }, [])
+
+  const { modelRects, allMin, allMax } = useMemo(() => {
+    const valid = models.filter((m) => m.chatters?.length > 0)
+    const items = valid.map((m) => ({ ...m, value: m.revenue }))
+    const rects = binaryLayout(items, 0, 0, svgWidth, svgHeight)
+    let allMin = Infinity, allMax = 0
+    for (const m of valid) for (const c of m.chatters) {
+      if (c.revenue < allMin) allMin = c.revenue
+      if (c.revenue > allMax) allMax = c.revenue
+    }
+    return { modelRects: rects, allMin: allMin === Infinity ? 0 : allMin, allMax }
+  }, [models, svgWidth])
+
+  return (
+    <div className="bg-slate-800/50 border border-slate-700/50 rounded-xl p-5">
+      <div className="flex items-center justify-between mb-4">
+        <p className="text-sm font-semibold text-slate-300">Карта: анкеты → чаттеры</p>
+        <div className="flex items-center gap-2 text-xs text-slate-500">
+          <span>Мало</span>
+          <div className="flex gap-px">
+            {[0, 0.25, 0.5, 0.75, 1].map((t) => (
+              <div key={t} className="w-6 h-3 rounded-sm" style={{ background: blueShade(t, 0, 1) }} />
+            ))}
+          </div>
+          <span>Много</span>
+        </div>
+      </div>
+      <div ref={containerRef} style={{ width: '100%' }}>
+        <svg width={svgWidth} height={svgHeight} style={{ display: 'block', borderRadius: 8 }}>
+          {modelRects.map((model) => {
+            const mx = model.x + 2, my = model.y + 2
+            const mw = model.w - 4, mh = model.h - 4
+            const innerH = mh - HEADER_H
+            const chItems = (model.chatters ?? []).map((c) => ({ ...c, value: c.revenue }))
+            const chRects = binaryLayout(chItems, mx, my + HEADER_H, mw, innerH)
+            return (
+              <g key={model.model}>
+                <rect x={mx} y={my} width={mw} height={mh} fill="#0f172a" stroke="#1e293b" strokeWidth={2} rx={6} />
+                <rect x={mx} y={my} width={mw} height={HEADER_H} fill="#1e293b" rx={6} />
+                <rect x={mx} y={my + HEADER_H - 6} width={mw} height={6} fill="#1e293b" />
+                {mw > 40 && (
+                  <text x={mx + mw / 2} y={my + 14} textAnchor="middle" fill="#94a3b8"
+                    fontSize={Math.min(11, mw / 11)} fontWeight={700}>
+                    {model.model.length > Math.floor(mw / 8) ? model.model.slice(0, Math.floor(mw / 8)) + '…' : model.model}
+                  </text>
+                )}
+                {chRects.map((c, ci) => {
+                  const cw = c.w - 1, ch = c.h - 1
+                  const color = blueShade(c.revenue, allMin, allMax)
+                  const bright = c.revenue > (allMin + allMax) / 2
+                  const fg = bright ? '#e2e8f0' : '#bfdbfe'
+                  return (
+                    <g key={ci}>
+                      <rect x={c.x} y={c.y} width={cw} height={ch} fill={color} stroke="#0f172a" strokeWidth={0.5} />
+                      {cw > 28 && ch > 16 && (
+                        <text x={c.x + cw / 2} y={c.y + ch / 2 + (ch > 30 ? -5 : 4)}
+                          textAnchor="middle" fill={fg} fontSize={Math.min(11, cw / 7)} fontWeight={500}>
+                          {c.chatter.length > Math.floor(cw / 7) ? c.chatter.slice(0, Math.floor(cw / 7)) + '…' : c.chatter}
+                        </text>
+                      )}
+                      {cw > 50 && ch > 30 && (
+                        <text x={c.x + cw / 2} y={c.y + ch / 2 + 10}
+                          textAnchor="middle" fill={fg} fontSize={9} opacity={0.7}>
+                          {formatCurrency(c.revenue)}
+                        </text>
+                      )}
+                    </g>
+                  )
+                })}
+              </g>
+            )
+          })}
+        </svg>
+      </div>
+    </div>
+  )
+}
+
+// ── Model Treemap (coloured) ──────────────────────────────────────────────────
+
+interface TreemapCellProps {
   x?: number; y?: number; width?: number; height?: number
-  name?: string; value?: number; index?: number; share_pct?: number
-}) {
+  name?: string; value?: number; share_pct?: number; index?: number
+}
+function TreemapCell(props: TreemapCellProps) {
   const { x = 0, y = 0, width = 0, height = 0, name = '', value = 0, index = 0, share_pct = 0 } = props
   const color = MODEL_COLORS[index % MODEL_COLORS.length]
   if (width < 20 || height < 20) return null
@@ -76,13 +207,24 @@ function TreemapCell(props: {
   )
 }
 
+function ModelTreemap({ models }: { models: ModelShare[] }) {
+  const data = models.map((m, i) => ({ name: m.model, value: m.revenue, share_pct: m.share_pct, index: i }))
+  return (
+    <div className="bg-slate-800/50 border border-slate-700/50 rounded-xl p-5">
+      <p className="text-sm font-semibold text-slate-300 mb-4">Карта анкет по выручке</p>
+      <ResponsiveContainer width="100%" height={280}>
+        <Treemap data={data} dataKey="value" aspectRatio={4 / 3} content={<TreemapCell />} />
+      </ResponsiveContainer>
+    </div>
+  )
+}
+
 // ── Economic Donut ────────────────────────────────────────────────────────────
 
 function EconomicDonut({ eco, revenue }: { eco: EconomicBreakdown; revenue: number }) {
   const agencyNet = revenue > 0
     ? revenue - eco.model_cut - eco.chatter_cut - eco.admin_cut - eco.withdraw + eco.retention
     : 0
-
   const slices = [
     { name: 'Моделям',   value: eco.model_cut,   pct: eco.model_pct },
     { name: 'Чаттерам',  value: eco.chatter_cut,  pct: eco.chatter_pct },
@@ -99,16 +241,8 @@ function EconomicDonut({ eco, revenue }: { eco: EconomicBreakdown; revenue: numb
         <div className="shrink-0">
           <ResponsiveContainer width={180} height={180}>
             <PieChart>
-              <Pie
-                data={slices}
-                cx="50%" cy="50%"
-                innerRadius={52} outerRadius={82}
-                paddingAngle={2}
-                dataKey="value"
-              >
-                {slices.map((s) => (
-                  <Cell key={s.name} fill={ECO_COLORS[s.name] ?? '#6366f1'} />
-                ))}
+              <Pie data={slices} cx="50%" cy="50%" innerRadius={52} outerRadius={82} paddingAngle={2} dataKey="value">
+                {slices.map((s) => <Cell key={s.name} fill={ECO_COLORS[s.name] ?? '#6366f1'} />)}
               </Pie>
               <Tooltip
                 contentStyle={{ background: '#1e293b', border: '1px solid #334155', borderRadius: 8, fontSize: 12 }}
@@ -132,166 +266,21 @@ function EconomicDonut({ eco, revenue }: { eco: EconomicBreakdown; revenue: numb
   )
 }
 
-// ── Hierarchical Treemap (model → chatters) ───────────────────────────────────
-
-function blueColor(value: number, min: number, max: number): string {
-  const t = max > min ? (value - min) / (max - min) : 0
-  // Dark navy (#0f2a4a) → bright blue (#3b9eff)
-  const r = Math.round(15  + t * (59  - 15))
-  const g = Math.round(42  + t * (158 - 42))
-  const b = Math.round(74  + t * (255 - 74))
-  return `rgb(${r},${g},${b})`
-}
-
-interface HTreemapCellProps {
-  x?: number; y?: number; width?: number; height?: number
-  name?: string; value?: number; depth?: number
-  minVal?: number; maxVal?: number; isModel?: boolean
-}
-
-function HTreemapCell(props: HTreemapCellProps) {
-  const { x = 0, y = 0, width = 0, height = 0, name = '', value = 0, depth = 0, minVal = 0, maxVal = 1, isModel } = props
-  if (width < 4 || height < 4) return null
-
-  if (depth === 1) {
-    // Model (parent) — dark header bar
-    return (
-      <g>
-        <rect x={x} y={y} width={width} height={height} fill="#1e293b" stroke="#334155" strokeWidth={2} rx={4} />
-        {width > 40 && (
-          <text x={x + width / 2} y={y + 14} textAnchor="middle" fill="#94a3b8" fontSize={Math.min(12, width / 10)} fontWeight={600}>
-            {name.length > Math.floor(width / 8) ? name.slice(0, Math.floor(width / 8)) + '…' : name}
-          </text>
-        )}
-      </g>
-    )
-  }
-
-  if (depth === 2) {
-    // Chatter (child) — blue gradient cell
-    const color = blueColor(value, minVal, maxVal)
-    const textColor = value > (minVal + maxVal) / 2 ? '#e2e8f0' : '#bfdbfe'
-    return (
-      <g>
-        <rect x={x + 1} y={y + 1} width={width - 2} height={height - 2} fill={color} stroke="#1e293b" strokeWidth={1} rx={2} />
-        {width > 30 && height > 20 && (
-          <text x={x + width / 2} y={y + height / 2 + (height > 36 ? -6 : 4)} textAnchor="middle" fill={textColor} fontSize={Math.min(11, width / 9)} fontWeight={500}>
-            {name.length > Math.floor(width / 7) ? name.slice(0, Math.floor(width / 7)) + '…' : name}
-          </text>
-        )}
-        {width > 40 && height > 36 && (
-          <text x={x + width / 2} y={y + height / 2 + 10} textAnchor="middle" fill={textColor} fontSize={10} opacity={0.75}>
-            {formatCurrency(value)}
-          </text>
-        )}
-      </g>
-    )
-  }
-
-  return null
-}
-
-function HierarchicalTreemap({ models }: { models: ModelShare[] }) {
-  const { treeData, minVal, maxVal } = useMemo(() => {
-    let minVal = Infinity, maxVal = 0
-    const children = models
-      .filter((m) => m.chatters && m.chatters.length > 0)
-      .map((m) => {
-        const kids = m.chatters.map((c) => {
-          if (c.revenue < minVal) minVal = c.revenue
-          if (c.revenue > maxVal) maxVal = c.revenue
-          return { name: c.chatter, value: c.revenue }
-        })
-        return { name: m.model, children: kids }
-      })
-    return { treeData: [{ name: 'root', children }], minVal: minVal === Infinity ? 0 : minVal, maxVal }
-  }, [models])
-
-  // Custom content needs minVal/maxVal via closure
-  const CustomContent = (props: HTreemapCellProps) => (
-    <HTreemapCell {...props} minVal={minVal} maxVal={maxVal} />
-  )
-
-  return (
-    <div className="bg-slate-800/50 border border-slate-700/50 rounded-xl p-5">
-      <div className="flex items-center justify-between mb-4">
-        <p className="text-sm font-semibold text-slate-300">Карта: анкеты → чаттеры</p>
-        {/* Legend */}
-        <div className="flex items-center gap-2 text-xs text-slate-500">
-          <span>Мало</span>
-          <div className="flex gap-px">
-            {[0, 0.2, 0.4, 0.6, 0.8, 1].map((t) => (
-              <div key={t} className="w-5 h-3 rounded-sm" style={{ background: blueColor(t, 0, 1) }} />
-            ))}
-          </div>
-          <span>Много</span>
-        </div>
-      </div>
-      <ResponsiveContainer width="100%" height={360}>
-        <Treemap
-          data={treeData}
-          dataKey="value"
-          aspectRatio={16 / 9}
-          content={<CustomContent />}
-        >
-          <Tooltip
-            contentStyle={{ background: '#1e293b', border: '1px solid #334155', borderRadius: 8, fontSize: 12 }}
-            formatter={(v) => [typeof v === 'number' ? formatCurrency(v) : String(v), 'Выручка']}
-          />
-        </Treemap>
-      </ResponsiveContainer>
-    </div>
-  )
-}
-
-// ── Model Treemap ─────────────────────────────────────────────────────────────
-
-function ModelTreemap({ models }: { models: ModelShare[] }) {
-  const data = models.map((m, i) => ({
-    name: m.model,
-    value: m.revenue,
-    share_pct: m.share_pct,
-    index: i,
-  }))
-
-  return (
-    <div className="bg-slate-800/50 border border-slate-700/50 rounded-xl p-5">
-      <p className="text-sm font-semibold text-slate-300 mb-4">Карта анкет по выручке</p>
-      <ResponsiveContainer width="100%" height={280}>
-        <Treemap
-          data={data}
-          dataKey="value"
-          aspectRatio={4 / 3}
-          content={<TreemapCell />}
-        />
-      </ResponsiveContainer>
-    </div>
-  )
-}
-
 // ── Chatter Bar ───────────────────────────────────────────────────────────────
 
 function ChatterBar({ chatters }: { chatters: ChatterShare[] }) {
   const top = chatters.slice(0, 15)
   const data = top.map((c) => ({ name: c.chatter, revenue: c.revenue, share: c.share_pct }))
-
   return (
     <div className="bg-slate-800/50 border border-slate-700/50 rounded-xl p-5">
       <p className="text-sm font-semibold text-slate-300 mb-4">Выручка по чаттерам (топ {top.length})</p>
       <ResponsiveContainer width="100%" height={Math.max(220, top.length * 28)}>
         <BarChart data={data} layout="vertical" margin={{ top: 0, right: 64, left: 8, bottom: 0 }}>
           <CartesianGrid horizontal={false} stroke="#334155" strokeOpacity={0.4} />
-          <XAxis
-            type="number"
-            tick={{ fontSize: 11, fill: '#64748b' }}
-            tickFormatter={(v: number) => `$${(v / 1000).toFixed(0)}k`}
-            axisLine={false} tickLine={false}
-          />
-          <YAxis
-            type="category" dataKey="name"
-            tick={{ fontSize: 11, fill: '#94a3b8' }}
-            axisLine={false} tickLine={false} width={110}
-          />
+          <XAxis type="number" tick={{ fontSize: 11, fill: '#64748b' }}
+            tickFormatter={(v: number) => `$${(v / 1000).toFixed(0)}k`} axisLine={false} tickLine={false} />
+          <YAxis type="category" dataKey="name" tick={{ fontSize: 11, fill: '#94a3b8' }}
+            axisLine={false} tickLine={false} width={110} />
           <Tooltip
             contentStyle={{ background: '#1e293b', border: '1px solid #334155', borderRadius: 8, fontSize: 12 }}
             formatter={(v, _, entry) => [
@@ -299,10 +288,8 @@ function ChatterBar({ chatters }: { chatters: ChatterShare[] }) {
               'Выручка',
             ]}
           />
-          <Bar dataKey="revenue" radius={[0, 4, 4, 0]} fill="#6366f1" fillOpacity={0.85}>
-            {data.map((_, i) => (
-              <Cell key={i} fill={MODEL_COLORS[i % MODEL_COLORS.length]} fillOpacity={0.8} />
-            ))}
+          <Bar dataKey="revenue" radius={[0, 4, 4, 0]}>
+            {data.map((_, i) => <Cell key={i} fill={MODEL_COLORS[i % MODEL_COLORS.length]} fillOpacity={0.8} />)}
           </Bar>
         </BarChart>
       </ResponsiveContainer>
@@ -324,19 +311,14 @@ function ModelTable({ models }: { models: ModelShare[] }) {
           return (
             <div key={m.model} className="flex items-center gap-4 px-5 py-3 hover:bg-slate-700/20 transition-colors">
               <span className="text-xs font-bold text-slate-600 w-5 shrink-0">{i + 1}</span>
-              <div
-                className="w-2.5 h-2.5 rounded-sm shrink-0"
-                style={{ background: MODEL_COLORS[i % MODEL_COLORS.length] }}
-              />
+              <div className="w-2.5 h-2.5 rounded-sm shrink-0" style={{ background: MODEL_COLORS[i % MODEL_COLORS.length] }} />
               <div className="flex-1 min-w-0">
                 <p className="text-sm font-medium text-slate-200 truncate">{m.model}</p>
                 {hasPlan && (
                   <div className="flex items-center gap-2 mt-1">
                     <div className="flex-1 h-1 bg-slate-700 rounded-full max-w-32">
-                      <div
-                        className={`h-1 rounded-full ${completionBg(m.plan_completion)}`}
-                        style={{ width: `${Math.min(m.plan_completion, 100)}%` }}
-                      />
+                      <div className={`h-1 rounded-full ${completionBg(m.plan_completion)}`}
+                        style={{ width: `${Math.min(m.plan_completion, 100)}%` }} />
                     </div>
                     <span className={`text-xs font-medium ${completionColor(m.plan_completion)}`}>
                       {m.plan_completion}%
@@ -365,7 +347,6 @@ export default function StructurePage() {
   return (
     <div className="flex flex-col h-full">
       <Header title="Структура" />
-
       <div className="flex-1 p-6 space-y-6 overflow-y-auto">
         {error && (
           <div className="bg-red-500/10 border border-red-500/20 rounded-xl p-4">
@@ -373,7 +354,14 @@ export default function StructurePage() {
           </div>
         )}
 
-        {/* Top row: Treemap + Donut */}
+        {/* Hierarchical treemap: model → chatters */}
+        {isLoading ? (
+          <Skeleton className="h-[452px] w-full rounded-xl" />
+        ) : data && data.models.some((m) => m.chatters?.length > 0) ? (
+          <HierarchicalTreemap models={data.models} />
+        ) : null}
+
+        {/* Top row: coloured treemap + donut */}
         <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
           <div className="lg:col-span-2">
             {isLoading ? (
@@ -391,13 +379,6 @@ export default function StructurePage() {
           </div>
         </div>
 
-        {/* Hierarchical treemap: model → chatters */}
-        {isLoading ? (
-          <Skeleton className="h-[412px] w-full rounded-xl" />
-        ) : data && data.models.some((m) => m.chatters?.length > 0) ? (
-          <HierarchicalTreemap models={data.models} />
-        ) : null}
-
         {/* Chatter bar chart */}
         {isLoading ? (
           <Skeleton className="h-64 w-full rounded-xl" />
@@ -405,7 +386,7 @@ export default function StructurePage() {
           <ChatterBar chatters={data.chatters} />
         ) : null}
 
-        {/* Model detail table */}
+        {/* Model table */}
         {isLoading ? (
           <div className="bg-slate-800/50 border border-slate-700/50 rounded-xl p-5 space-y-2">
             {Array.from({ length: 6 }).map((_, i) => <Skeleton key={i} className="h-12 w-full" />)}
