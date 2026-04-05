@@ -62,6 +62,94 @@ async def _page_title(
     return None
 
 
+def _find_model_property(props: dict) -> dict | None:
+    """Колонка модели в разных базах: «Модель», «модель», rollup и т.д."""
+    for key in ("Модель", "модель", "Model", "model", "MODEL"):
+        p = props.get(key)
+        if isinstance(p, dict) and p.get("type"):
+            return p
+    for key, val in props.items():
+        kn = str(key).strip().lower()
+        if ("модел" in kn) or kn == "model":
+            if isinstance(val, dict) and val.get("type"):
+                return val
+    return None
+
+
+def _text_from_rich_blocks(blocks: list | None) -> str | None:
+    if not blocks:
+        return None
+    parts = []
+    for b in blocks:
+        if isinstance(b, dict):
+            parts.append((b.get("plain_text") or "").strip())
+    s = " ".join(x for x in parts if x).strip()
+    return s or None
+
+
+async def _model_name_from_property(
+    model_prop: dict,
+    client: httpx.AsyncClient,
+    headers: dict[str, str],
+    model_cache: dict[str, str],
+) -> str | None:
+    """Достаёт имя модели для relation / select / rollup / formula и др."""
+    if not isinstance(model_prop, dict):
+        return None
+    t = model_prop.get("type")
+
+    if t == "relation" and model_prop.get("relation"):
+        rid = model_prop["relation"][0].get("id")
+        if rid:
+            name = await _page_title(client, headers, rid, model_cache)
+            return name or "—"
+        return None
+
+    if t == "rollup":
+        roll = model_prop.get("rollup") or {}
+        rt = roll.get("type")
+        if rt == "array" and roll.get("array"):
+            for item in roll["array"]:
+                if not isinstance(item, dict):
+                    continue
+                it = item.get("type")
+                if it == "title" and item.get("title"):
+                    tx = _text_from_rich_blocks(item["title"])
+                    if tx:
+                        return tx
+                if it == "rich_text" and item.get("rich_text"):
+                    tx = _text_from_rich_blocks(item["rich_text"])
+                    if tx:
+                        return tx
+                if it == "select" and item.get("select"):
+                    n = (item["select"].get("name") or "").strip()
+                    if n:
+                        return n
+        if rt == "string" and roll.get("string") is not None:
+            s = str(roll.get("string") or "").strip()
+            return s or None
+
+    if t == "formula":
+        f = model_prop.get("formula") or {}
+        ft = f.get("type")
+        if ft == "string" and f.get("string") is not None:
+            s = str(f.get("string") or "").strip()
+            return s or None
+
+    if t == "select" and model_prop.get("select"):
+        return (model_prop["select"].get("name") or "").strip() or None
+    if t == "rich_text" and model_prop.get("rich_text"):
+        return _text_from_rich_blocks(model_prop["rich_text"])
+    if t == "title" and model_prop.get("title"):
+        return _text_from_rich_blocks(model_prop["title"])
+    if t == "multi_select" and model_prop.get("multi_select"):
+        return (model_prop["multi_select"][0].get("name") or "").strip() or None
+    if t == "status" and model_prop.get("status"):
+        return (model_prop["status"].get("name") or "").strip() or None
+
+    return None
+
+
 async def _parse_row(
     row: dict,
     shift_type: str,
@@ -88,30 +176,23 @@ async def _parse_row(
     date_obj = (date_prop or {}).get("date") if isinstance(date_prop, dict) else None
     date_val = _parse_date(date_obj.get("start") if date_obj else None)
 
-    model_prop = props.get("Модель") or props.get("модель") or props.get("Model") or props.get("model")
-    if not model_prop or not isinstance(model_prop, dict):
-        for key, val in props.items():
-            lk = str(key).lower()
-            if "модел" in lk or lk == "model":
-                model_prop = val
-                break
+    model_prop = _find_model_property(props)
     model_name = None
-    model_rel = (model_prop or {}).get("relation", []) if isinstance(model_prop, dict) else []
-    if model_rel:
-        model_name = await _page_title(client, headers, model_rel[0]["id"], model_cache)
-    if not model_name and model_rel:
-        model_name = "—"
-    # Не только relation: часто «Модель» = select / rich_text / title
-    if not model_name and isinstance(model_prop, dict):
-        mt = model_prop.get("type")
-        if mt == "select" and model_prop.get("select"):
-            model_name = (model_prop["select"].get("name") or "").strip() or None
-        elif mt == "rich_text" and model_prop.get("rich_text"):
-            model_name = (model_prop["rich_text"][0].get("plain_text") or "").strip() or None
-        elif mt == "title" and model_prop.get("title"):
-            model_name = (model_prop["title"][0].get("plain_text") or "").strip() or None
-        elif mt == "multi_select" and model_prop.get("multi_select"):
-            model_name = (model_prop["multi_select"][0].get("name") or "").strip() or None
+    if model_prop:
+        model_name = await _model_name_from_property(
+            model_prop, client, headers, model_cache
+        )
+    # Несколько колонок с «модел» в названии (модель / Модель общее)
+    if not model_name:
+        for key, val in props.items():
+            if not isinstance(val, dict) or val is model_prop:
+                continue
+            kn = str(key).strip().lower()
+            if "модел" not in kn:
+                continue
+            model_name = await _model_name_from_property(val, client, headers, model_cache)
+            if model_name:
+                break
 
     chatter = None
     cp = props.get("Чаттер") or props.get("Chatter") or props.get("чаттер") or {}
