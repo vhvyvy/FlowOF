@@ -116,22 +116,34 @@ async def get_shifts(
             and_(Transaction.shift_id.isnot(None), Transaction.shift_id != ""),
         )
 
-        # Build UUID→name mapping from ALL transactions where both fields exist
-        # (e.g. April has select name; March had relation UUID → same UUID in shift_id)
-        mapping_result = await db.execute(
-            select(Transaction.shift_id, Transaction.shift_name)
+        # Build UUID→name mapping for relation-type shifts.
+        # Since old months use shift_id (UUID) and new months use shift_name (select),
+        # we rank UUID shift_ids by their ALL-TIME revenue and call them "Смена 1/2/3".
+        # This gives a consistent, deterministic name across all months.
+        import re as _re
+        _UUID_RE = _re.compile(
+            r'^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$', _re.I
+        )
+
+        uuid_rev_result = await db.execute(
+            select(Transaction.shift_id, func.sum(Transaction.amount).label("total_rev"))
             .where(and_(
                 Transaction.tenant_id == tenant.id,
                 Transaction.shift_id.isnot(None),
                 Transaction.shift_id != "",
-                Transaction.shift_name.isnot(None),
-                Transaction.shift_name != "",
             ))
-            .distinct()
+            .group_by(Transaction.shift_id)
+            .order_by(func.sum(Transaction.amount).desc())
         )
-        _uuid_to_name: dict[str, str] = {
-            r.shift_id: r.shift_name for r in mapping_result.all()
-        }
+        uuid_rows = uuid_rev_result.all()
+        # Assign "Смена N" only to UUID-looking shift_ids
+        _uuid_to_name: dict[str, str] = {}
+        rank = 1
+        for row in uuid_rows:
+            sid = str(row.shift_id)
+            if _UUID_RE.match(sid):
+                _uuid_to_name[sid] = f"Смена {rank}"
+                rank += 1
 
         # ── Revenue / stats per shift ──────────────────────────────────────
         shift_result = await db.execute(
