@@ -5,6 +5,7 @@ from calendar import monthrange
 from datetime import date
 
 from fastapi import APIRouter, Depends, HTTPException, Query
+from sqlalchemy.exc import ProgrammingError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, func, and_
 
@@ -44,6 +45,26 @@ def _sanitize_eco(eco: dict) -> dict:
             continue
         out[k] = _finite(v)
     return out
+
+
+def _economic_breakdown(eco: dict) -> EconomicBreakdown:
+    """Явная сборка — без KeyError при рассинхроне Pydantic / полей eco."""
+    return EconomicBreakdown(
+        model_cut=_finite(eco.get("model_cut")),
+        chatter_cut=_finite(eco.get("chatter_cut")),
+        admin_cut=_finite(eco.get("admin_cut")),
+        withdraw=_finite(eco.get("withdraw")),
+        retention=_finite(eco.get("retention")),
+        total_payouts=_finite(eco.get("total_payouts")),
+        db_expenses=_finite(eco.get("db_expenses")),
+        total_costs=_finite(eco.get("total_costs")),
+        model_pct=_finite(eco.get("model_pct")),
+        chatter_pct=_finite(eco.get("chatter_pct")),
+        admin_pct=_finite(eco.get("admin_pct")),
+        withdraw_pct=_finite(eco.get("withdraw_pct")),
+        use_withdraw=bool(eco.get("use_withdraw")),
+        use_retention=bool(eco.get("use_retention")),
+    )
 
 
 @router.get("/finance", response_model=FinanceResponse)
@@ -260,11 +281,18 @@ async def get_finance(
             pnl_rows=pnl_rows,
             waterfall=waterfall,
             expenses_by_category=expenses_by_category,
-            economic=EconomicBreakdown(**{k: eco[k] for k in EconomicBreakdown.model_fields}),
+            economic=_economic_breakdown(eco),
         )
 
     except HTTPException:
         raise
+    except ProgrammingError as e:
+        logger.exception("finance SQL tenant=%d", tenant.id)
+        msg = "Ошибка SQL (часто нет колонки team_id — redeploy бэкенда)."
+        if os.getenv("SHOW_FINANCE_TRACEBACK") == "1":
+            orig = getattr(e, "orig", None) or str(e)
+            msg = str(orig)[:400]
+        raise HTTPException(status_code=500, detail=msg) from e
     except Exception as e:
         logger.exception("finance error tenant=%d", tenant.id)
         if os.getenv("SHOW_FINANCE_TRACEBACK") == "1":

@@ -33,6 +33,8 @@ _origins = [
     "http://localhost:3001",
     "https://flow-of.vercel.app",
     "https://www.flow-of.vercel.app",
+    "https://flow-of-vercel.app",
+    "https://www.flow-of-vercel.app",
 ]
 for key in ("FRONTEND_URL",):
     v = _origin(os.getenv(key, ""))
@@ -85,15 +87,16 @@ async def _create_tables():
     from team_bootstrap import bootstrap_teams, assign_transactions_by_notion_database
     from sqlalchemy import select
 
+    # create_all + schema patches must not be swallowed — иначе колонки (team_id) нет,
+    # а приложение стартует и /finance падает с 500 на SQL.
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+    await apply_schema_patches(engine)
+
     try:
-        async with engine.begin() as conn:
-            await conn.run_sync(Base.metadata.create_all)
-        await apply_schema_patches(engine)
         async with AsyncSessionLocal() as db:
             await bootstrap_teams(db)
-            # Привязка team_id, если у транзакций уже есть notion_database_id
             await assign_transactions_by_notion_database(db)
-            # Опционально: подтянуть notion_database_id из API — POST /api/v1/teams/reconcile-notion
         if os.getenv("NOTION_BACKFILL_ON_STARTUP") == "1":
             from team_bootstrap import backfill_notion_database_id_from_notion_api
             from models import Tenant as TenantModel
@@ -110,7 +113,7 @@ async def _create_tables():
                             logger.warning("startup notion backfill tenant=%s: %s", tid, e)
                 await assign_transactions_by_notion_database(db)
     except Exception as exc:
-        logger.warning("startup schema/teams warning (non-fatal): %s", exc, exc_info=True)
+        logger.warning("startup teams/bootstrap warning (non-fatal): %s", exc, exc_info=True)
 
 
 # ── Health ────────────────────────────────────────────────────────────────────
