@@ -132,16 +132,45 @@ export interface ChattersResponse {
 export interface KpiRow {
   chatter: string
   onlymonster_id: string | null
-  messages_sent: number
+  // From transactions
   revenue: number
-  rpc: number
+  transactions: number
+  avg_check: number
+  share_pct: number
+  payout: number
+  // Onlymonster metrics
+  ppv_open_rate: number | null
+  apv: number | null
+  total_chats: number | null
+  rpc: number | null
+  ppv_sold: number | null
+  apc_per_chat: number | null
+  volume_rating: number | null
+  // Composite scores
+  conversion_score: number | null
+  monetization_depth: number | null
+  productivity_index: number | null
+  efficiency_ratio: number | null
+  source: string | null
 }
 
 export interface KpiResponse {
   rows: KpiRow[]
-  total_messages: number
   total_revenue: number
-  avg_rpc: number
+  total_transactions: number
+  avg_rpc: number | null
+  has_onlymonster_key: boolean
+}
+
+export interface KpiMappingOut {
+  id: number
+  onlymonster_id: string
+  display_names: string | null
+}
+
+export interface KpiSyncResult {
+  synced: number
+  message: string
 }
 
 // ── Events ────────────────────────────────────────────────────────────────────

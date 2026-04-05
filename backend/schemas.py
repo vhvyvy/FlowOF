@@ -143,17 +143,53 @@ class ChattersResponse(BaseModel):
 
 class KpiRow(BaseModel):
     chatter: str
-    onlymonster_id: Optional[str]
-    messages_sent: int
+    onlymonster_id: Optional[str] = None
+    # From transactions
     revenue: float
-    rpc: float
+    transactions: int           # выходы / смены
+    avg_check: float            # revenue / transactions
+    share_pct: float            # % от общей выручки
+    payout: float               # расчётная оплата (net)
+    # From Onlymonster
+    ppv_open_rate: Optional[float] = None   # %
+    apv: Optional[float] = None             # avg price per sold PPV
+    total_chats: Optional[int] = None
+    rpc: Optional[float] = None             # revenue / total_chats
+    ppv_sold: Optional[float] = None        # revenue / apv
+    apc_per_chat: Optional[float] = None    # ppv_sold / total_chats
+    volume_rating: Optional[float] = None   # total_chats * ppv_open_rate/100
+    # Composite scores
+    conversion_score: Optional[float] = None    # ppv_open_rate * apc_per_chat
+    monetization_depth: Optional[float] = None  # (rpc/apv)*100
+    productivity_index: Optional[float] = None
+    efficiency_ratio: Optional[float] = None
+    source: Optional[str] = None
 
 
 class KpiResponse(BaseModel):
     rows: list[KpiRow]
-    total_messages: int
     total_revenue: float
-    avg_rpc: float
+    total_transactions: int
+    avg_rpc: Optional[float] = None
+    has_onlymonster_key: bool = False
+
+
+class KpiMappingCreate(BaseModel):
+    onlymonster_id: str
+    display_name: str
+
+
+class KpiMappingOut(BaseModel):
+    id: int
+    onlymonster_id: str
+    display_names: Optional[str]
+
+    model_config = {"from_attributes": True}
+
+
+class KpiSyncResult(BaseModel):
+    synced: int
+    message: str
 
 
 # ── Events ────────────────────────────────────────────────────────────────────

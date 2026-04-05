@@ -98,6 +98,26 @@ class AppSetting(Base):
     )
 
 
+class ChatterKpi(Base):
+    """Per-chatter Onlymonster metrics (multi-tenant)."""
+    __tablename__ = "chatter_kpi_mt"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    tenant_id = Column(Integer, ForeignKey("tenants.id"), nullable=False, index=True)
+    year = Column(Integer, nullable=False)
+    month = Column(Integer, nullable=False)
+    chatter = Column(String(255), nullable=False)  # onlymonster_id or display name
+    ppv_open_rate = Column(Numeric(8, 2), nullable=True)
+    apv = Column(Numeric(12, 2), nullable=True)
+    total_chats = Column(Numeric(12, 0), nullable=True)
+    model = Column(String(255), nullable=True)
+    source = Column(String(50), default="manual")
+
+    __table_args__ = (
+        UniqueConstraint("tenant_id", "year", "month", "chatter", name="uq_chatter_kpi_mt"),
+    )
+
+
 class ChatterMapping(Base):
     __tablename__ = "chatter_onlymonster_mapping"
 

@@ -40,6 +40,7 @@ app.add_middleware(
 # ── Routers ───────────────────────────────────────────────────────────────────
 
 from routers import auth, overview, finance, chatters, events, plans, kpi, ai, admin, settings, structure  # noqa: E402
+from database import engine, Base  # noqa: E402
 
 app.include_router(auth.router)
 app.include_router(overview.router)
@@ -52,6 +53,18 @@ app.include_router(ai.router)
 app.include_router(admin.router)
 app.include_router(settings.router)
 app.include_router(structure.router)
+
+
+# ── Startup: create missing tables ───────────────────────────────────────────
+
+@app.on_event("startup")
+async def _create_tables():
+    import models  # noqa: F401 – ensure all models are registered
+    try:
+        async with engine.begin() as conn:
+            await conn.run_sync(Base.metadata.create_all)
+    except Exception as exc:
+        logger.warning("create_all warning (non-fatal): %s", exc)
 
 
 # ── Health ────────────────────────────────────────────────────────────────────
