@@ -23,6 +23,42 @@ _PATCHES: list[tuple[str, bool]] = [
     ("ALTER TABLE teams_mt ADD COLUMN IF NOT EXISTS chatter_max_pct NUMERIC(5, 2)", False),
     ("ALTER TABLE teams_mt ADD COLUMN IF NOT EXISTS default_chatter_pct NUMERIC(5, 2)", False),
     ("ALTER TABLE teams_mt ADD COLUMN IF NOT EXISTS admin_percent_total NUMERIC(5, 2)", False),
+    # Этап 1: onboarding + источники + журнал синков (дублирует Alembic 20260405_01 для деплоев без migrate)
+    ("ALTER TABLE tenants ADD COLUMN IF NOT EXISTS onboarding_step INTEGER NOT NULL DEFAULT 0", False),
+    ("ALTER TABLE tenants ADD COLUMN IF NOT EXISTS onboarding_completed BOOLEAN NOT NULL DEFAULT FALSE", False),
+    ("ALTER TABLE tenants ADD COLUMN IF NOT EXISTS source_type VARCHAR(64)", False),
+    ("ALTER TABLE tenants ADD COLUMN IF NOT EXISTS last_sync_at TIMESTAMP", False),
+    ("ALTER TABLE tenants ADD COLUMN IF NOT EXISTS currency VARCHAR(8) NOT NULL DEFAULT 'USD'", False),
+    ("ALTER TABLE tenants ADD COLUMN IF NOT EXISTS agency_name VARCHAR(255)", False),
+    (
+        """CREATE TABLE IF NOT EXISTS tenant_sources (
+            id SERIAL PRIMARY KEY,
+            tenant_id INTEGER NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+            source_type VARCHAR(64) NOT NULL,
+            credentials JSONB,
+            mapping_config JSONB,
+            active BOOLEAN NOT NULL DEFAULT TRUE,
+            created_at TIMESTAMP NOT NULL DEFAULT NOW(),
+            updated_at TIMESTAMP NOT NULL DEFAULT NOW()
+        )""",
+        False,
+    ),
+    ("CREATE INDEX IF NOT EXISTS ix_tenant_sources_tenant_id ON tenant_sources (tenant_id)", False),
+    (
+        """CREATE TABLE IF NOT EXISTS sync_log (
+            id SERIAL PRIMARY KEY,
+            tenant_id INTEGER NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+            source_type VARCHAR(64),
+            started_at TIMESTAMP NOT NULL DEFAULT NOW(),
+            finished_at TIMESTAMP,
+            rows_imported INTEGER NOT NULL DEFAULT 0,
+            rows_skipped INTEGER NOT NULL DEFAULT 0,
+            status VARCHAR(32) NOT NULL DEFAULT 'running',
+            error_message TEXT
+        )""",
+        False,
+    ),
+    ("CREATE INDEX IF NOT EXISTS ix_sync_log_tenant_id ON sync_log (tenant_id)", False),
 ]
 
 

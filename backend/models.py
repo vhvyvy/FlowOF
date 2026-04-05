@@ -3,6 +3,8 @@ from sqlalchemy import (
     Boolean, Column, DateTime, Date, ForeignKey,
     Integer, Numeric, String, Text, UniqueConstraint, PrimaryKeyConstraint,
 )
+from sqlalchemy.dialects.postgresql import JSONB
+
 from database import Base
 
 
@@ -21,6 +23,42 @@ class Tenant(Base):
     plan = Column(String(50), default="basic")
     active = Column(Boolean, default=True)
     created_at = Column(DateTime, default=datetime.utcnow)
+    # Onboarding / import (Этап 1)
+    onboarding_step = Column(Integer, default=0, nullable=False)
+    onboarding_completed = Column(Boolean, default=False, nullable=False)
+    source_type = Column(String(64), nullable=True)
+    last_sync_at = Column(DateTime, nullable=True)
+    currency = Column(String(8), default="USD", nullable=False)
+    agency_name = Column(String(255), nullable=True)
+
+
+class TenantSource(Base):
+    """Подключённые источники данных (Notion, Sheets, …)."""
+    __tablename__ = "tenant_sources"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    tenant_id = Column(Integer, ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False, index=True)
+    source_type = Column(String(64), nullable=False)
+    credentials = Column(JSONB, nullable=True)
+    mapping_config = Column(JSONB, nullable=True)
+    active = Column(Boolean, default=True, nullable=False)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
+
+
+class SyncLog(Base):
+    """Журнал синхронизаций (все прогоны, включая ошибки)."""
+    __tablename__ = "sync_log"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    tenant_id = Column(Integer, ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False, index=True)
+    source_type = Column(String(64), nullable=True)
+    started_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    finished_at = Column(DateTime, nullable=True)
+    rows_imported = Column(Integer, default=0, nullable=False)
+    rows_skipped = Column(Integer, default=0, nullable=False)
+    status = Column(String(32), default="running", nullable=False)
+    error_message = Column(Text, nullable=True)
 
 
 class Transaction(Base):
