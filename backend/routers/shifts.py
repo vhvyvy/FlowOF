@@ -117,31 +117,66 @@ async def get_shifts(
         )
 
         # Build UUID→name mapping for relation-type shifts.
-        # Since old months use shift_id (UUID) and new months use shift_name (select),
-        # we rank UUID shift_ids by their ALL-TIME revenue and call them "Смена 1/2/3".
-        # This gives a consistent, deterministic name across all months.
+        # Strategy: match UUID shifts (old months) to named shifts (new months)
+        # by chatter overlap — same chatters work in the same shift across months.
         import re as _re
         _UUID_RE = _re.compile(
             r'^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$', _re.I
         )
 
-        uuid_rev_result = await db.execute(
-            select(Transaction.shift_id, func.sum(Transaction.amount).label("total_rev"))
+        # Chatters per UUID shift_id (across all time)
+        uid_chatter_result = await db.execute(
+            select(Transaction.shift_id, Transaction.chatter)
             .where(and_(
                 Transaction.tenant_id == tenant.id,
                 Transaction.shift_id.isnot(None),
                 Transaction.shift_id != "",
+                Transaction.chatter.isnot(None),
             ))
-            .group_by(Transaction.shift_id)
-            .order_by(func.sum(Transaction.amount).desc())
+            .distinct()
         )
-        uuid_rows = uuid_rev_result.all()
-        # Assign "Смена N" only to UUID-looking shift_ids
-        _uuid_to_name: dict[str, str] = {}
-        rank = 1
-        for row in uuid_rows:
+        uuid_chatters: dict[str, set] = {}
+        for row in uid_chatter_result.all():
             sid = str(row.shift_id)
             if _UUID_RE.match(sid):
+                uuid_chatters.setdefault(sid, set()).add(str(row.chatter))
+
+        # Chatters per named shift_name (across all time)
+        name_chatter_result = await db.execute(
+            select(Transaction.shift_name, Transaction.chatter)
+            .where(and_(
+                Transaction.tenant_id == tenant.id,
+                Transaction.shift_name.isnot(None),
+                Transaction.shift_name != "",
+                Transaction.chatter.isnot(None),
+            ))
+            .distinct()
+        )
+        name_chatters: dict[str, set] = {}
+        for row in name_chatter_result.all():
+            name_chatters.setdefault(str(row.shift_name), set()).add(str(row.chatter))
+
+        # Match each UUID to the named shift with the most chatter overlap
+        _uuid_to_name: dict[str, str] = {}
+        used_names: set[str] = set()
+        # Sort UUIDs by size of chatter set descending for greedy best-match
+        for sid in sorted(uuid_chatters, key=lambda s: len(uuid_chatters[s]), reverse=True):
+            best_name, best_score = None, -1
+            for sname, sset in name_chatters.items():
+                if sname in used_names:
+                    continue
+                overlap = len(uuid_chatters[sid] & sset)
+                if overlap > best_score:
+                    best_score = overlap
+                    best_name = sname
+            if best_name and best_score > 0:
+                _uuid_to_name[sid] = best_name
+                used_names.add(best_name)
+
+        # Fallback: any remaining UUIDs without a match → "Смена N"
+        rank = len(used_names) + 1
+        for sid in uuid_chatters:
+            if sid not in _uuid_to_name:
                 _uuid_to_name[sid] = f"Смена {rank}"
                 rank += 1
 
