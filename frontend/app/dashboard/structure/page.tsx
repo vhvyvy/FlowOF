@@ -308,9 +308,7 @@ function ChatterBar({ chatters }: { chatters: ChatterShare[] }) {
               'Выручка',
             ]}
           />
-          <Bar dataKey="revenue" radius={[0, 4, 4, 0]} maxBarSize={28}
-            label={{ position: 'right', formatter: (v: number) => formatCurrency(v), fill: '#64748b', fontSize: 11 }}
-          >
+          <Bar dataKey="revenue" radius={[0, 4, 4, 0]} maxBarSize={28}>
             {data.map((_, i) => <Cell key={i} fill={MODEL_COLORS[i % MODEL_COLORS.length]} fillOpacity={0.85} />)}
           </Bar>
         </BarChart>
