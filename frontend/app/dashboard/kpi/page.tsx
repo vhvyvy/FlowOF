@@ -282,8 +282,8 @@ function KpiTable({ rows }: { rows: KpiRow[] }) {
     { label: 'Monetization Depth', field: 'monetization_depth', low: 1, high: 3 },
     { label: 'Productivity Index', field: 'productivity_index', low: 0.5, high: 2 },
     { label: 'Efficiency Ratio', field: 'efficiency_ratio', low: 0.5, high: 2 },
-    { label: 'Выручка', field: 'revenue' },
-    { label: 'RPC', field: 'rpc' },
+    { label: 'Выручка', field: 'revenue', low: 0, high: Infinity },
+    { label: 'RPC', field: 'rpc', low: 1, high: 3 },
   ]
 
   return (
