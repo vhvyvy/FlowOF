@@ -10,7 +10,7 @@ from database import get_db
 from dependencies import get_current_tenant
 from models import Tenant, Transaction, Expense
 from schemas import FinanceResponse, PnlRow, WaterfallItem, EconomicBreakdown
-from economics import load_settings, compute_economics
+from economics import load_settings, compute_economics, compute_actual_chatter_cut
 
 logger = logging.getLogger("skynet.finance")
 router = APIRouter(prefix="/api/v1", tags=["finance"])
@@ -77,8 +77,18 @@ async def get_finance(
         cat_rows = cat_result.all()
         db_expenses = sum(float(r.amount or 0) for r in cat_rows)
 
-        # Apply economic model
-        eco = compute_economics(total_revenue, db_expenses, settings)
+        # Compute actual chatter payout using per-model plan tiers
+        ur = settings.get("use_retention", "1") == "1"
+        chatter_gross, chatter_net = await compute_actual_chatter_cut(
+            db, tenant.id, year, month, ur
+        )
+
+        # Apply economic model with plan-based chatter cut
+        eco = compute_economics(
+            total_revenue, db_expenses, settings,
+            actual_chatter_gross=chatter_gross,
+            actual_chatter_net=chatter_net,
+        )
 
         # Previous month revenue delta
         prev_month = month - 1 if month > 1 else 12

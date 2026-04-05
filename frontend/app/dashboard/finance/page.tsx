@@ -10,13 +10,13 @@ import { formatCurrency } from '@/lib/utils'
 import { DollarSign, TrendingDown, Percent, TrendingUp } from 'lucide-react'
 import type { EconomicBreakdown } from '@/types'
 
-function EcoCard({ label, amount, pct, color }: { label: string; amount: number; pct?: number; color: string }) {
+function EcoCard({ label, amount, pct, color, note }: { label: string; amount: number; pct?: number; color: string; note?: string }) {
   return (
     <div className="bg-slate-800/60 border border-slate-700/50 rounded-xl p-4">
       <p className="text-xs text-slate-400 uppercase tracking-wide font-medium">{label}</p>
       <p className={`text-xl font-bold mt-1 ${color}`}>{formatCurrency(amount)}</p>
       {pct !== undefined && (
-        <p className="text-xs text-slate-500 mt-0.5">{pct}% от выручки</p>
+        <p className="text-xs text-slate-500 mt-0.5">{pct}% от выручки{note && <span className="text-slate-600"> · {note}</span>}</p>
       )}
     </div>
   )
@@ -28,7 +28,7 @@ function EconomicSummary({ eco, revenue }: { eco: EconomicBreakdown; revenue: nu
       <p className="text-sm font-semibold text-slate-300 mb-4">Экономическая модель</p>
       <div className="grid grid-cols-2 sm:grid-cols-3 gap-3 mb-4">
         <EcoCard label="Моделям"  amount={eco.model_cut}   pct={eco.model_pct}   color="text-rose-400" />
-        <EcoCard label="Чаттерам" amount={eco.chatter_cut} pct={eco.chatter_pct} color="text-orange-400" />
+        <EcoCard label="Чаттерам" amount={eco.chatter_cut} pct={eco.chatter_pct} color="text-orange-400" note="по тирам планов" />
         <EcoCard label="Адмнам"   amount={eco.admin_cut}   pct={eco.admin_pct}   color="text-yellow-400" />
         {eco.use_withdraw && (
           <EcoCard label="Вывод" amount={eco.withdraw} pct={eco.withdraw_pct} color="text-slate-400" />

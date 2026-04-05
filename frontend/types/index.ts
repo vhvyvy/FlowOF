@@ -56,6 +56,7 @@ export interface WaterfallItem {
 export interface EconomicBreakdown {
   model_cut: number
   chatter_cut: number
+  chatter_cut_gross?: number
   admin_cut: number
   withdraw: number
   retention: number

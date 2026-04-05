@@ -11,7 +11,7 @@ from database import get_db
 from dependencies import get_current_tenant
 from models import Tenant, Transaction, Expense
 from schemas import OverviewResponse, DailyRevenue, EconomicBreakdown
-from economics import load_settings, compute_economics
+from economics import load_settings, compute_economics, compute_actual_chatter_cut
 
 logger = logging.getLogger("skynet.overview")
 router = APIRouter(prefix="/api/v1", tags=["overview"])
@@ -64,16 +64,31 @@ async def get_overview(
         settings = await load_settings(db, tenant.id)
 
         # Current period
-        revenue    = await _monthly_revenue(db, tenant.id, year, month)
+        revenue     = await _monthly_revenue(db, tenant.id, year, month)
         db_expenses = await _monthly_db_expenses(db, tenant.id, year, month)
-        eco        = compute_economics(revenue, db_expenses, settings)
+        ur = settings.get("use_retention", "1") == "1"
+        chatter_gross, chatter_net = await compute_actual_chatter_cut(
+            db, tenant.id, year, month, ur
+        )
+        eco = compute_economics(
+            revenue, db_expenses, settings,
+            actual_chatter_gross=chatter_gross,
+            actual_chatter_net=chatter_net,
+        )
 
         # Previous period
-        prev_month = month - 1 if month > 1 else 12
-        prev_year  = year if month > 1 else year - 1
-        prev_rev   = await _monthly_revenue(db, tenant.id, prev_year, prev_month)
+        prev_month  = month - 1 if month > 1 else 12
+        prev_year   = year if month > 1 else year - 1
+        prev_rev    = await _monthly_revenue(db, tenant.id, prev_year, prev_month)
         prev_db_exp = await _monthly_db_expenses(db, tenant.id, prev_year, prev_month)
-        prev_eco   = compute_economics(prev_rev, prev_db_exp, settings)
+        prev_ch_gross, prev_ch_net = await compute_actual_chatter_cut(
+            db, tenant.id, prev_year, prev_month, ur
+        )
+        prev_eco = compute_economics(
+            prev_rev, prev_db_exp, settings,
+            actual_chatter_gross=prev_ch_gross,
+            actual_chatter_net=prev_ch_net,
+        )
 
         revenue_delta = round((revenue - prev_rev) / prev_rev * 100, 1) if prev_rev > 0 else 0.0
         profit_delta  = (
