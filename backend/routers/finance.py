@@ -1,4 +1,6 @@
 import logging
+import math
+import os
 from calendar import monthrange
 from datetime import date
 
@@ -23,6 +25,27 @@ def _month_range(year: int, month: int):
     return date(year, month, 1), date(year, month, last_day)
 
 
+def _finite(x) -> float:
+    try:
+        v = float(x)
+        return v if math.isfinite(v) else 0.0
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _sanitize_eco(eco: dict) -> dict:
+    """JSON не допускает NaN/inf — иначе FastAPI отдаёт 500 при сериализации ответа."""
+    out = dict(eco)
+    for k, v in list(out.items()):
+        if k in ("use_withdraw", "use_retention"):
+            out[k] = bool(v)
+            continue
+        if isinstance(v, bool):
+            continue
+        out[k] = _finite(v)
+    return out
+
+
 @router.get("/finance", response_model=FinanceResponse)
 async def get_finance(
     month: int = Query(..., ge=1, le=12),
@@ -37,6 +60,14 @@ async def get_finance(
         settings = await load_settings(db, tenant.id)
         await ensure_default_team(db, tenant.id)
         teams = await list_teams(db, tenant.id)
+        if not teams:
+            await ensure_default_team(db, tenant.id)
+            teams = await list_teams(db, tenant.id)
+        if not teams:
+            raise HTTPException(
+                status_code=500,
+                detail="Нет команд для агентства — обратитесь в поддержку",
+            )
         default_team_id = teams[0].id
 
         selected_team: Team | None = None
@@ -95,16 +126,26 @@ async def get_finance(
                 cap = None
                 dfrac = None
             else:
-                cap = (
-                    float(selected_team.chatter_max_pct) / 100
-                    if selected_team.chatter_max_pct
-                    else None
-                )
-                dfrac = (
-                    float(selected_team.default_chatter_pct) / 100
-                    if selected_team.default_chatter_pct
-                    else cap
-                )
+                try:
+                    cm = (
+                        float(selected_team.chatter_max_pct)
+                        if selected_team.chatter_max_pct is not None
+                        else None
+                    )
+                    cm = cm if cm is not None and math.isfinite(cm) else None
+                except (TypeError, ValueError):
+                    cm = None
+                try:
+                    cd = (
+                        float(selected_team.default_chatter_pct)
+                        if selected_team.default_chatter_pct is not None
+                        else None
+                    )
+                    cd = cd if cd is not None and math.isfinite(cd) else None
+                except (TypeError, ValueError):
+                    cd = None
+                cap = cm / 100 if cm is not None else None
+                dfrac = cd / 100 if cd is not None else cap
             chatter_gross, chatter_net = await compute_actual_chatter_cut(
                 db, tenant.id, year, month, ur,
                 team_id=selected_team.id,
@@ -115,27 +156,36 @@ async def get_finance(
             if fin_inherit:
                 ap = safe_float_setting(settings, "admin_percent", "9") / 100
             else:
-                ap = float(selected_team.admin_percent_total or 0) / 100
+                try:
+                    ap_t = float(selected_team.admin_percent_total or 0)
+                    ap_t = ap_t if math.isfinite(ap_t) else 0.0
+                except (TypeError, ValueError):
+                    ap_t = 0.0
+                ap = ap_t / 100
             admin_override = total_revenue * ap
-            eco = compute_economics(
-                total_revenue,
-                db_exp_use,
-                settings,
-                actual_chatter_gross=chatter_gross,
-                actual_chatter_net=chatter_net,
-                admin_cut_override=admin_override,
+            eco = _sanitize_eco(
+                compute_economics(
+                    total_revenue,
+                    db_exp_use,
+                    settings,
+                    actual_chatter_gross=chatter_gross,
+                    actual_chatter_net=chatter_net,
+                    admin_cut_override=admin_override,
+                )
             )
         else:
             total_revenue, chatter_gross, chatter_net, admin_sum, _ = await aggregate_teams(
                 db, tenant.id, year, month, settings, teams, default_team_id, ur
             )
-            eco = compute_economics(
-                total_revenue,
-                db_expenses,
-                settings,
-                actual_chatter_gross=chatter_gross,
-                actual_chatter_net=chatter_net,
-                admin_cut_override=admin_sum,
+            eco = _sanitize_eco(
+                compute_economics(
+                    total_revenue,
+                    db_expenses,
+                    settings,
+                    actual_chatter_gross=chatter_gross,
+                    actual_chatter_net=chatter_net,
+                    admin_cut_override=admin_sum,
+                )
             )
 
         prev_month = month - 1 if month > 1 else 12
@@ -153,6 +203,8 @@ async def get_finance(
             if prev_revenue > 0
             else 0.0
         )
+        revenue_delta = _finite(revenue_delta)
+        total_revenue = _finite(total_revenue)
 
         # ── Build P&L rows ────────────────────────────────────────────────────
         pnl_rows: list[PnlRow] = [
@@ -201,9 +253,9 @@ async def get_finance(
 
         return FinanceResponse(
             total_revenue=round(total_revenue, 2),
-            total_expenses=eco["total_costs"],
-            total_profit=eco["profit"],
-            margin=eco["margin"],
+            total_expenses=_finite(eco["total_costs"]),
+            total_profit=_finite(eco["profit"]),
+            margin=_finite(eco["margin"]),
             revenue_delta=revenue_delta,
             pnl_rows=pnl_rows,
             waterfall=waterfall,
@@ -215,4 +267,6 @@ async def get_finance(
         raise
     except Exception as e:
         logger.exception("finance error tenant=%d", tenant.id)
+        if os.getenv("SHOW_FINANCE_TRACEBACK") == "1":
+            raise HTTPException(status_code=500, detail=repr(e)) from e
         raise HTTPException(status_code=500, detail="Ошибка загрузки данных")

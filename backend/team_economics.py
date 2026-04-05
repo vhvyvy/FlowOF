@@ -1,6 +1,7 @@
 """Multi-team revenue aggregation and chatter/admin splits for a month."""
 from __future__ import annotations
 
+import math
 from calendar import monthrange
 from datetime import date
 
@@ -11,6 +12,16 @@ from economics import compute_actual_chatter_cut, safe_float_setting
 from models import Transaction
 from schemas import OverviewTeamSlice
 from team_helpers import team_transaction_clause, team_inherits_global_economics
+
+
+def _team_pct(val) -> float | None:
+    if val is None:
+        return None
+    try:
+        x = float(val)
+        return x if math.isfinite(x) else None
+    except (TypeError, ValueError):
+        return None
 
 
 def month_range(year: int, month: int):
@@ -69,8 +80,10 @@ async def aggregate_teams(
             cap = None
             dfrac = None
         else:
-            cap = float(team.chatter_max_pct) / 100 if team.chatter_max_pct else None
-            dfrac = float(team.default_chatter_pct) / 100 if team.default_chatter_pct else cap
+            cm = _team_pct(team.chatter_max_pct)
+            cd = _team_pct(team.default_chatter_pct)
+            cap = cm / 100 if cm is not None else None
+            dfrac = cd / 100 if cd is not None else cap
 
         cg, cn = await compute_actual_chatter_cut(
             db, tenant_id, year, month, ur,
@@ -85,7 +98,8 @@ async def aggregate_teams(
         if inherit:
             ap = safe_float_setting(settings, "admin_percent", "9") / 100
         else:
-            ap = float(team.admin_percent_total or 0) / 100
+            ap_raw = _team_pct(team.admin_percent_total) or 0.0
+            ap = ap_raw / 100
         adm = rev_t * ap
         admin_sum += adm
 
@@ -93,10 +107,12 @@ async def aggregate_teams(
         wt = rev_t * w_pct if uw else 0
         prof = rev_t - mc - cn - adm - wt
         margin = round(prof / rev_t * 100, 1) if rev_t > 0 else 0.0
+        if not math.isfinite(margin):
+            margin = 0.0
         slices.append(
             OverviewTeamSlice(
                 team_id=team.id,
-                name=team.name,
+                name=(team.name or "Команда").strip() or "Команда",
                 revenue=round(rev_t, 2),
                 chatter_cut=round(cn, 2),
                 admin_cut=round(adm, 2),
