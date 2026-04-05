@@ -11,8 +11,7 @@ import api from '@/lib/api'
 import type { KpiRow, KpiResponse, KpiMappingOut, KpiSyncResult } from '@/types'
 import {
   MessageSquare, DollarSign, Zap, RefreshCw, Upload,
-  ChevronDown, ChevronUp, Info, Plus, Trash2, Link2, Users,
-  TrendingUp, TrendingDown, Minus
+  ChevronDown, ChevronUp, Info, Plus, Trash2, Link2, Users
 } from 'lucide-react'
 
 // ── helpers ──────────────────────────────────────────────────────────────────
@@ -37,15 +36,14 @@ function scoreColor(v: number | null, low: number, high: number): string {
 // ── Delta badge ───────────────────────────────────────────────────────────────
 
 function Delta({ value, suffix = '%', pp = false }: { value?: number | null; suffix?: string; pp?: boolean }) {
-  if (value == null) return <span className="text-slate-700 text-xs">—</span>
+  if (value == null) return null
   const positive = value > 0
   const zero = Math.abs(value) < 0.05
-  if (zero) return <span className="text-slate-500 text-xs flex items-center gap-0.5"><Minus className="h-2.5 w-2.5" />0{suffix}</span>
+  if (zero) return <div className="text-slate-600 text-xs leading-none mt-0.5">→ 0{pp ? ' pp' : suffix}</div>
   return (
-    <span className={`text-xs font-medium flex items-center gap-0.5 ${positive ? 'text-emerald-400' : 'text-rose-400'}`}>
-      {positive ? <TrendingUp className="h-2.5 w-2.5" /> : <TrendingDown className="h-2.5 w-2.5" />}
-      {positive ? '+' : ''}{value.toFixed(1)}{pp ? ' pp' : suffix}
-    </span>
+    <div className={`text-xs leading-none mt-0.5 ${positive ? 'text-emerald-500' : 'text-rose-500'}`}>
+      {positive ? '↑' : '↓'} {positive ? '+' : ''}{value.toFixed(1)}{pp ? ' pp' : suffix}
+    </div>
   )
 }
 
@@ -280,17 +278,13 @@ function KpiTable({ rows }: { rows: KpiRow[] }) {
 
   const mainCols: { label: string; field: SortKey }[] = [
     { label: 'Выручка', field: 'revenue' },
-    { label: '∆ мес', field: 'revenue_delta' },
     { label: 'Выходы', field: 'transactions' },
     { label: 'Средний чек', field: 'avg_check' },
     { label: 'Доля %', field: 'share_pct' },
     { label: 'PPV Open Rate', field: 'ppv_open_rate' },
-    { label: '∆ pp', field: 'ppv_open_rate_delta' },
     { label: 'APV', field: 'apv' },
     { label: 'Total Chats', field: 'total_chats' },
-    { label: '∆ мес', field: 'total_chats_delta' },
     { label: 'RPC', field: 'rpc' },
-    { label: '∆ мес', field: 'rpc_delta' },
     { label: 'PPV Sold', field: 'ppv_sold' },
     { label: 'APC/Chat', field: 'apc_per_chat' },
     { label: 'Volume', field: 'volume_rating' },
@@ -332,18 +326,26 @@ function KpiTable({ rows }: { rows: KpiRow[] }) {
               {sorted.map((row) => (
                 <tr key={row.chatter} className="hover:bg-slate-700/15 transition-colors">
                   <td className="px-3 py-2.5 font-medium text-slate-200 whitespace-nowrap">{row.chatter}</td>
-                  <td className="px-3 py-2.5 text-right text-emerald-400 font-mono">{formatCurrency(row.revenue)}</td>
-                  <td className="px-3 py-2.5 text-right"><Delta value={row.revenue_delta} /></td>
+                  <td className="px-3 py-2.5 text-right">
+                    <div className="text-emerald-400 font-mono">{formatCurrency(row.revenue)}</div>
+                    <Delta value={row.revenue_delta} />
+                  </td>
                   <td className="px-3 py-2.5 text-right text-slate-300">{row.transactions}</td>
                   <td className="px-3 py-2.5 text-right text-slate-300">{formatCurrency(row.avg_check)}</td>
                   <td className="px-3 py-2.5 text-right text-slate-400">{fmtPct(row.share_pct)}</td>
-                  <td className={`px-3 py-2.5 text-right font-medium ${scoreColor(row.ppv_open_rate, 15, 30)}`}>{fmtPct(row.ppv_open_rate)}</td>
-                  <td className="px-3 py-2.5 text-right"><Delta value={row.ppv_open_rate_delta} pp /></td>
+                  <td className="px-3 py-2.5 text-right">
+                    <div className={`font-medium ${scoreColor(row.ppv_open_rate, 15, 30)}`}>{fmtPct(row.ppv_open_rate)}</div>
+                    <Delta value={row.ppv_open_rate_delta} pp />
+                  </td>
                   <td className="px-3 py-2.5 text-right text-slate-300">{fmt(row.apv, '$')}</td>
-                  <td className="px-3 py-2.5 text-right text-slate-300">{row.total_chats?.toLocaleString() ?? '—'}</td>
-                  <td className="px-3 py-2.5 text-right"><Delta value={row.total_chats_delta} /></td>
-                  <td className={`px-3 py-2.5 text-right font-mono font-medium ${scoreColor(row.rpc, 1, 3)}`}>{fmt(row.rpc, '$')}</td>
-                  <td className="px-3 py-2.5 text-right"><Delta value={row.rpc_delta} /></td>
+                  <td className="px-3 py-2.5 text-right">
+                    <div className="text-slate-300">{row.total_chats?.toLocaleString() ?? '—'}</div>
+                    <Delta value={row.total_chats_delta} />
+                  </td>
+                  <td className="px-3 py-2.5 text-right">
+                    <div className={`font-mono font-medium ${scoreColor(row.rpc, 1, 3)}`}>{fmt(row.rpc, '$')}</div>
+                    <Delta value={row.rpc_delta} />
+                  </td>
                   <td className="px-3 py-2.5 text-right text-slate-400">{fmt(row.ppv_sold, '', '', 1)}</td>
                   <td className="px-3 py-2.5 text-right text-slate-400">{fmt(row.apc_per_chat)}</td>
                   <td className="px-3 py-2.5 text-right text-slate-400">{fmt(row.volume_rating, '', '', 1)}</td>
