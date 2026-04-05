@@ -8,6 +8,12 @@ import { useOverview } from '@/lib/hooks/useOverview'
 import { useMonthStore } from '@/lib/hooks/useMonth'
 import { formatCurrency } from '@/lib/utils'
 
+function fmtForecast(v?: number | null) {
+  if (v == null) return undefined
+  if (v >= 1000) return `$${(v / 1000).toFixed(1)}k`
+  return `$${v.toFixed(0)}`
+}
+
 export default function OverviewPage() {
   const { month, year } = useMonthStore()
   const { data, isLoading, error } = useOverview(month, year)
@@ -37,13 +43,17 @@ export default function OverviewPage() {
               <MetricCard
                 label="Выручка"
                 value={formatCurrency(data.revenue)}
-                delta={data.revenue_delta}
+                delta={data.is_current_month ? undefined : data.revenue_delta}
+                forecast={data.is_current_month ? fmtForecast(data.revenue_forecast) : undefined}
+                forecastLabel="Прогноз на месяц:"
                 icon={<DollarSign className="h-4 w-4" />}
               />
               <MetricCard
                 label="Прибыль"
                 value={formatCurrency(data.profit)}
-                delta={data.profit_delta}
+                delta={data.is_current_month ? undefined : data.profit_delta}
+                forecast={data.is_current_month ? fmtForecast(data.profit_forecast) : undefined}
+                forecastLabel="Прогноз на месяц:"
                 icon={<TrendingUp className="h-4 w-4" />}
               />
               <MetricCard

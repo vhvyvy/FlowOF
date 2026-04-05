@@ -93,6 +93,9 @@ export interface OverviewResponse {
   profit_delta: number
   daily_revenue: { date: string; amount: number }[]
   economic?: EconomicBreakdown
+  is_current_month: boolean
+  revenue_forecast?: number | null
+  profit_forecast?: number | null
 }
 
 // ── Chatters ──────────────────────────────────────────────────────────────────

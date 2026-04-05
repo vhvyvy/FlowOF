@@ -8,11 +8,13 @@ interface MetricCardProps {
   value: string
   delta?: number
   deltaLabel?: string
+  forecast?: string        // shown instead of delta when it's the current month
+  forecastLabel?: string
   icon?: React.ReactNode
   className?: string
 }
 
-export function MetricCard({ label, value, delta, deltaLabel, icon, className }: MetricCardProps) {
+export function MetricCard({ label, value, delta, deltaLabel, forecast, forecastLabel, icon, className }: MetricCardProps) {
   const isPositive = delta !== undefined && delta >= 0
 
   return (
@@ -25,7 +27,12 @@ export function MetricCard({ label, value, delta, deltaLabel, icon, className }:
       </CardHeader>
       <CardContent>
         <p className="text-2xl font-bold text-slate-100">{value}</p>
-        {delta !== undefined && (
+        {forecast != null ? (
+          <p className="mt-1.5 flex items-center gap-1 text-xs text-indigo-400">
+            <TrendingUp className="h-3 w-3" />
+            {forecastLabel ?? 'Прогноз:'} {forecast}
+          </p>
+        ) : delta !== undefined ? (
           <p
             className={cn(
               'mt-1.5 flex items-center gap-1 text-xs',
@@ -36,7 +43,7 @@ export function MetricCard({ label, value, delta, deltaLabel, icon, className }:
             {isPositive ? '+' : ''}
             {delta.toFixed(1)}% {deltaLabel ?? 'к прошлому месяцу'}
           </p>
-        )}
+        ) : null}
       </CardContent>
     </Card>
   )

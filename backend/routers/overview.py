@@ -2,6 +2,7 @@ import logging
 from datetime import date
 from calendar import monthrange
 from decimal import Decimal
+from math import ceil
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -96,6 +97,20 @@ async def get_overview(
             if prev_eco["profit"] != 0 else 0.0
         )
 
+        # Forecast for current calendar month
+        today = date.today()
+        is_current_month = (year == today.year and month == today.month)
+        revenue_forecast: float | None = None
+        profit_forecast: float | None = None
+        if is_current_month and revenue > 0:
+            days_elapsed = today.day
+            days_in_month = monthrange(year, month)[1]
+            daily_rate = revenue / days_elapsed
+            revenue_forecast = round(daily_rate * days_in_month, 2)
+            # Scale profit at same margin
+            if revenue > 0:
+                profit_forecast = round(revenue_forecast * (eco["profit"] / revenue), 2)
+
         # Transaction count
         cnt_result = await db.execute(
             select(func.count(Transaction.id)).where(
@@ -136,6 +151,9 @@ async def get_overview(
             profit_delta=profit_delta,
             daily_revenue=daily_revenue,
             economic=EconomicBreakdown(**{k: eco[k] for k in EconomicBreakdown.model_fields}),
+            is_current_month=is_current_month,
+            revenue_forecast=revenue_forecast,
+            profit_forecast=profit_forecast,
         )
 
     except Exception as e:

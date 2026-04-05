@@ -63,6 +63,10 @@ class OverviewResponse(BaseModel):
     profit_delta: float
     daily_revenue: list[DailyRevenue]
     economic: Optional[EconomicBreakdown] = None
+    # Forecast fields (only populated for current calendar month)
+    is_current_month: bool = False
+    revenue_forecast: Optional[float] = None
+    profit_forecast: Optional[float] = None
 
 
 # ── Finance ───────────────────────────────────────────────────────────────────
