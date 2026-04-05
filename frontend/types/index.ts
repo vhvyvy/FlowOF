@@ -152,6 +152,11 @@ export interface KpiRow {
   productivity_index: number | null
   efficiency_ratio: number | null
   source: string | null
+  // Month-over-month deltas
+  revenue_delta?: number | null
+  rpc_delta?: number | null
+  ppv_open_rate_delta?: number | null
+  total_chats_delta?: number | null
 }
 
 export interface KpiResponse {

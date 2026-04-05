@@ -165,6 +165,56 @@ async def _load_mapping(db: AsyncSession, tenant_id: int) -> tuple[dict[str, str
     return id_to_name, name_to_id
 
 
+async def _chatter_revenue_map(
+    db: AsyncSession, tenant_id: int, year: int, month: int
+) -> dict[str, float]:
+    """Returns {chatter: revenue} for a given month."""
+    start, end = _month_range(year, month)
+    result = await db.execute(
+        select(Transaction.chatter, func.sum(Transaction.amount).label("rev"))
+        .where(and_(
+            Transaction.tenant_id == tenant_id,
+            Transaction.date >= start, Transaction.date <= end,
+            Transaction.chatter.isnot(None),
+        ))
+        .group_by(Transaction.chatter)
+    )
+    return {str(r.chatter): float(r.rev or 0) for r in result.all()}
+
+
+def _pct_delta(current: float | None, prev: float | None) -> float | None:
+    """% change from prev to current. Returns None if prev is 0 or missing."""
+    if prev is None or current is None or prev == 0:
+        return None
+    return round((current - prev) / abs(prev) * 100, 1)
+
+
+def _pp_delta(current: float | None, prev: float | None) -> float | None:
+    """Percentage-point delta (for rates like PPV Open Rate)."""
+    if prev is None or current is None:
+        return None
+    return round(current - prev, 1)
+
+
+def _resolve_kpi(chatter: str, kpi_data: dict, name_to_id: dict) -> tuple[dict, str | None]:
+    """Resolve Onlymonster metrics for a chatter display name."""
+    s = str(chatter).strip()
+    if s in kpi_data:
+        return kpi_data[s], name_to_id.get(s)
+    oid = name_to_id.get(s)
+    if oid and oid in kpi_data:
+        return kpi_data[oid], oid
+    if oid:
+        for alias in [oid, f"@{oid}"]:
+            if alias in kpi_data:
+                return kpi_data[alias], oid
+    for k, m in kpi_data.items():
+        ks = str(k).strip()
+        if s and ks and (s.startswith(ks) or ks.startswith(s)):
+            return m, name_to_id.get(ks)
+    return {}, None
+
+
 @router.get("/kpi", response_model=KpiResponse)
 async def get_kpi(
     month: int = Query(..., ge=1, le=12),
@@ -178,21 +228,18 @@ async def get_kpi(
         settings = await load_settings(db, tenant.id)
         ur = settings.get("use_retention", "1") == "1"
 
-        # ── Revenue per chatter from transactions ──────────────────────────
+        # ── Current month: revenue per chatter ────────────────────────────
         chatter_result = await db.execute(
             select(
                 Transaction.chatter,
                 func.sum(Transaction.amount).label("revenue"),
                 func.count(Transaction.id).label("txn_count"),
             )
-            .where(
-                and_(
-                    Transaction.tenant_id == tenant.id,
-                    Transaction.date >= start,
-                    Transaction.date <= end,
-                    Transaction.chatter.isnot(None),
-                )
-            )
+            .where(and_(
+                Transaction.tenant_id == tenant.id,
+                Transaction.date >= start, Transaction.date <= end,
+                Transaction.chatter.isnot(None),
+            ))
             .group_by(Transaction.chatter)
             .order_by(func.sum(Transaction.amount).desc())
         )
@@ -200,25 +247,17 @@ async def get_kpi(
         total_revenue = sum(float(r.revenue or 0) for r in txn_rows)
         total_txns = sum(int(r.txn_count or 0) for r in txn_rows)
 
-        # ── Payout per chatter (plan-tier based, per model) ───────────────
-        # Build model revenue map
-        model_rev_result = await db.execute(
-            select(
-                Transaction.chatter,
-                Transaction.model,
-                func.sum(Transaction.amount).label("rev"),
-            )
-            .where(
-                and_(
-                    Transaction.tenant_id == tenant.id,
-                    Transaction.date >= start,
-                    Transaction.date <= end,
-                    Transaction.chatter.isnot(None),
-                )
-            )
+        # ── Payout per chatter (plan-tier based) ──────────────────────────
+        chatter_model_result = await db.execute(
+            select(Transaction.chatter, Transaction.model, func.sum(Transaction.amount).label("rev"))
+            .where(and_(
+                Transaction.tenant_id == tenant.id,
+                Transaction.date >= start, Transaction.date <= end,
+                Transaction.chatter.isnot(None),
+            ))
             .group_by(Transaction.chatter, Transaction.model)
         )
-        chatter_model_rows = model_rev_result.all()
+        chatter_model_rows = chatter_model_result.all()
 
         plan_result = await db.execute(
             select(Plan.model, Plan.plan_amount).where(
@@ -227,59 +266,29 @@ async def get_kpi(
         )
         plan_map = {r.model: float(r.plan_amount or 0) for r in plan_result.all()}
 
-        # model revenue for tier calc
-        model_total_rev: dict[str, float] = {}
-        for r in model_rev_result:
-            pass
-        model_rev_result2 = await db.execute(
+        model_rev_result = await db.execute(
             select(Transaction.model, func.sum(Transaction.amount).label("rev"))
             .where(and_(Transaction.tenant_id == tenant.id, Transaction.date >= start, Transaction.date <= end))
             .group_by(Transaction.model)
         )
-        model_total_rev = {r.model: float(r.rev or 0) for r in model_rev_result2.all()}
+        model_total_rev = {r.model: float(r.rev or 0) for r in model_rev_result.all()}
 
-        # chatter payout
         chatter_payout: dict[str, float] = {}
         for r in chatter_model_rows:
-            ch = r.chatter
-            m = r.model
-            rev = float(r.rev or 0)
+            ch, m, rev = r.chatter, r.model, float(r.rev or 0)
             plan_amt = plan_map.get(m, 0.0)
-            if plan_amt > 0:
-                model_rev_total = model_total_rev.get(m, rev)
-                tier = max(0.20, _tier_pct(model_rev_total / plan_amt))
-            else:
-                tier = DEFAULT_TIER
-            gross = rev * tier
-            net = gross * (1 - RETENTION_RATE) if ur else gross
+            tier = max(0.20, _tier_pct(model_total_rev.get(m, rev) / plan_amt)) if plan_amt > 0 else DEFAULT_TIER
+            net = rev * tier * (1 - RETENTION_RATE if ur else 1)
             chatter_payout[ch] = chatter_payout.get(ch, 0.0) + net
 
-        # ── Onlymonster mapping & stored metrics ──────────────────────────
+        # ── Onlymonster mapping & metrics (current + prev month) ──────────
         id_to_name, name_to_id = await _load_mapping(db, tenant.id)
         kpi_data = await _load_kpi_data(db, tenant.id, year, month)
 
-        # Resolve KPI metrics for a chatter display name
-        def _kpi_for_chatter(chatter: str) -> tuple[dict, str | None]:
-            s = str(chatter).strip()
-            # 1. Direct match by display name in kpi_data
-            if s in kpi_data:
-                return kpi_data[s], name_to_id.get(s)
-            # 2. Resolve display name → onlymonster_id → look up kpi by id
-            oid = name_to_id.get(s)
-            if oid and oid in kpi_data:
-                return kpi_data[oid], oid
-            # 3. Look up all aliases for this chatter's onlymonster_id
-            if oid:
-                # The legacy table may store data under various alias forms
-                for alias in [oid, f"@{oid}"]:
-                    if alias in kpi_data:
-                        return kpi_data[alias], oid
-            # 4. Partial match (prefix)
-            for k, m in kpi_data.items():
-                ks = str(k).strip()
-                if s and ks and (s.startswith(ks) or ks.startswith(s)):
-                    return m, name_to_id.get(ks)
-            return {}, None
+        prev_month = month - 1 if month > 1 else 12
+        prev_year = year if month > 1 else year - 1
+        prev_kpi_data = await _load_kpi_data(db, tenant.id, prev_year, prev_month)
+        prev_rev_map = await _chatter_revenue_map(db, tenant.id, prev_year, prev_month)
 
         # ── Build rows ────────────────────────────────────────────────────
         rows: list[KpiRow] = []
@@ -290,30 +299,39 @@ async def get_kpi(
             rev = float(r.revenue or 0)
             txns = int(r.txn_count or 0)
 
-            om_metrics, om_id = _kpi_for_chatter(chatter)
-            row_data = {
+            om_metrics, om_id = _resolve_kpi(chatter, kpi_data, name_to_id)
+            prev_om, _ = _resolve_kpi(chatter, prev_kpi_data, name_to_id)
+            prev_rev = prev_rev_map.get(chatter, 0.0)
+
+            row = _compute_derived({
                 "chatter": chatter,
                 "onlymonster_id": om_id,
                 "revenue": rev,
                 "transactions": txns,
                 "payout": chatter_payout.get(chatter, 0.0),
                 **om_metrics,
-            }
-            rows.append(_compute_derived(row_data, total_revenue))
+            }, total_revenue)
+
+            # Month-over-month deltas
+            row.revenue_delta = _pct_delta(rev, prev_rev)
+            row.rpc_delta = _pct_delta(row.rpc, _safe(prev_om.get("rpc_approx"), 2))
+            row.ppv_open_rate_delta = _pp_delta(row.ppv_open_rate, prev_om.get("ppv_open_rate"))
+            row.total_chats_delta = _pct_delta(
+                row.total_chats, prev_om.get("total_chats")
+            )
+            rows.append(row)
 
         avg_rpc: float | None = None
         total_chats_sum = sum(r.total_chats for r in rows if r.total_chats)
         if total_chats_sum > 0:
             avg_rpc = round(total_revenue / total_chats_sum, 2)
 
-        has_key = bool(tenant.onlymonster_key)
-
         return KpiResponse(
             rows=rows,
             total_revenue=round(total_revenue, 2),
             total_transactions=total_txns,
             avg_rpc=avg_rpc,
-            has_onlymonster_key=has_key,
+            has_onlymonster_key=bool(tenant.onlymonster_key),
         )
 
     except Exception as e:
@@ -353,6 +371,55 @@ async def sync_kpi_from_api(
     await db.commit()
 
     return KpiSyncResult(synced=len(records), message=f"Синхронизировано {len(records)} записей из Onlymonster API")
+
+
+@router.post("/kpi/sync-all", response_model=KpiSyncResult)
+async def sync_kpi_all_months(
+    tenant: Tenant = Depends(get_current_tenant),
+    db: AsyncSession = Depends(get_db),
+):
+    """Sync chatter metrics from Onlymonster API for ALL months that have transactions."""
+    if not tenant.onlymonster_key:
+        raise HTTPException(status_code=400, detail="Onlymonster API-ключ не настроен")
+
+    api_url = "https://omapi.onlymonster.ai"
+    api_key = tenant.onlymonster_key
+
+    # Find all distinct year/month combos with transactions
+    months_result = await db.execute(
+        select(
+            func.extract("year", Transaction.date).label("yr"),
+            func.extract("month", Transaction.date).label("mo"),
+        )
+        .where(Transaction.tenant_id == tenant.id)
+        .group_by("yr", "mo")
+        .order_by("yr", "mo")
+    )
+    months = [(int(r.yr), int(r.mo)) for r in months_result.all() if r.yr and r.mo]
+
+    if not months:
+        return KpiSyncResult(synced=0, message="Нет месяцев с транзакциями")
+
+    total = 0
+    errors: list[str] = []
+    for yr, mo in months:
+        last_day = monthrange(yr, mo)[1]
+        start = datetime(yr, mo, 1)
+        end = datetime(yr, mo, last_day, 23, 59, 59)
+        try:
+            records = await fetch_chatter_metrics(api_url, api_key, start, end)
+            if records:
+                await _upsert_kpi_records(db, tenant.id, yr, mo, records)
+                total += len(records)
+        except Exception as e:
+            errors.append(f"{yr}/{mo}: {e}")
+            logger.warning("sync-all error %d/%d: %s", yr, mo, e)
+
+    await db.commit()
+    msg = f"Синхронизировано {total} записей за {len(months)} месяцев"
+    if errors:
+        msg += f" (ошибки: {'; '.join(errors[:3])})"
+    return KpiSyncResult(synced=total, message=msg)
 
 
 @router.post("/kpi/upload", response_model=KpiSyncResult)

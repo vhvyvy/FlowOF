@@ -164,6 +164,11 @@ class KpiRow(BaseModel):
     productivity_index: Optional[float] = None
     efficiency_ratio: Optional[float] = None
     source: Optional[str] = None
+    # Month-over-month deltas (% change, or pp for rates)
+    revenue_delta: Optional[float] = None       # % change vs prev month
+    rpc_delta: Optional[float] = None           # % change
+    ppv_open_rate_delta: Optional[float] = None # pp change
+    total_chats_delta: Optional[float] = None   # % change
 
 
 class KpiResponse(BaseModel):

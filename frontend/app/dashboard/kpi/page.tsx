@@ -11,7 +11,8 @@ import api from '@/lib/api'
 import type { KpiRow, KpiResponse, KpiMappingOut, KpiSyncResult } from '@/types'
 import {
   MessageSquare, DollarSign, Zap, RefreshCw, Upload,
-  ChevronDown, ChevronUp, Info, Plus, Trash2, Link2, Users
+  ChevronDown, ChevronUp, Info, Plus, Trash2, Link2, Users,
+  TrendingUp, TrendingDown, Minus
 } from 'lucide-react'
 
 // ── helpers ──────────────────────────────────────────────────────────────────
@@ -31,6 +32,21 @@ function scoreColor(v: number | null, low: number, high: number): string {
   if (v >= high) return 'text-emerald-400'
   if (v >= low) return 'text-yellow-400'
   return 'text-rose-400'
+}
+
+// ── Delta badge ───────────────────────────────────────────────────────────────
+
+function Delta({ value, suffix = '%', pp = false }: { value?: number | null; suffix?: string; pp?: boolean }) {
+  if (value == null) return <span className="text-slate-700 text-xs">—</span>
+  const positive = value > 0
+  const zero = Math.abs(value) < 0.05
+  if (zero) return <span className="text-slate-500 text-xs flex items-center gap-0.5"><Minus className="h-2.5 w-2.5" />0{suffix}</span>
+  return (
+    <span className={`text-xs font-medium flex items-center gap-0.5 ${positive ? 'text-emerald-400' : 'text-rose-400'}`}>
+      {positive ? <TrendingUp className="h-2.5 w-2.5" /> : <TrendingDown className="h-2.5 w-2.5" />}
+      {positive ? '+' : ''}{value.toFixed(1)}{pp ? ' pp' : suffix}
+    </span>
+  )
 }
 
 // ── Pamyatka ─────────────────────────────────────────────────────────────────
@@ -264,13 +280,17 @@ function KpiTable({ rows }: { rows: KpiRow[] }) {
 
   const mainCols: { label: string; field: SortKey }[] = [
     { label: 'Выручка', field: 'revenue' },
+    { label: '∆ мес', field: 'revenue_delta' },
     { label: 'Выходы', field: 'transactions' },
     { label: 'Средний чек', field: 'avg_check' },
     { label: 'Доля %', field: 'share_pct' },
     { label: 'PPV Open Rate', field: 'ppv_open_rate' },
+    { label: '∆ pp', field: 'ppv_open_rate_delta' },
     { label: 'APV', field: 'apv' },
     { label: 'Total Chats', field: 'total_chats' },
+    { label: '∆ мес', field: 'total_chats_delta' },
     { label: 'RPC', field: 'rpc' },
+    { label: '∆ мес', field: 'rpc_delta' },
     { label: 'PPV Sold', field: 'ppv_sold' },
     { label: 'APC/Chat', field: 'apc_per_chat' },
     { label: 'Volume', field: 'volume_rating' },
@@ -313,13 +333,17 @@ function KpiTable({ rows }: { rows: KpiRow[] }) {
                 <tr key={row.chatter} className="hover:bg-slate-700/15 transition-colors">
                   <td className="px-3 py-2.5 font-medium text-slate-200 whitespace-nowrap">{row.chatter}</td>
                   <td className="px-3 py-2.5 text-right text-emerald-400 font-mono">{formatCurrency(row.revenue)}</td>
+                  <td className="px-3 py-2.5 text-right"><Delta value={row.revenue_delta} /></td>
                   <td className="px-3 py-2.5 text-right text-slate-300">{row.transactions}</td>
                   <td className="px-3 py-2.5 text-right text-slate-300">{formatCurrency(row.avg_check)}</td>
                   <td className="px-3 py-2.5 text-right text-slate-400">{fmtPct(row.share_pct)}</td>
                   <td className={`px-3 py-2.5 text-right font-medium ${scoreColor(row.ppv_open_rate, 15, 30)}`}>{fmtPct(row.ppv_open_rate)}</td>
+                  <td className="px-3 py-2.5 text-right"><Delta value={row.ppv_open_rate_delta} pp /></td>
                   <td className="px-3 py-2.5 text-right text-slate-300">{fmt(row.apv, '$')}</td>
                   <td className="px-3 py-2.5 text-right text-slate-300">{row.total_chats?.toLocaleString() ?? '—'}</td>
+                  <td className="px-3 py-2.5 text-right"><Delta value={row.total_chats_delta} /></td>
                   <td className={`px-3 py-2.5 text-right font-mono font-medium ${scoreColor(row.rpc, 1, 3)}`}>{fmt(row.rpc, '$')}</td>
+                  <td className="px-3 py-2.5 text-right"><Delta value={row.rpc_delta} /></td>
                   <td className="px-3 py-2.5 text-right text-slate-400">{fmt(row.ppv_sold, '', '', 1)}</td>
                   <td className="px-3 py-2.5 text-right text-slate-400">{fmt(row.apc_per_chat)}</td>
                   <td className="px-3 py-2.5 text-right text-slate-400">{fmt(row.volume_rating, '', '', 1)}</td>
@@ -383,10 +407,23 @@ export default function KpiPage() {
     onSuccess: (res) => {
       setSyncMsg(res.message)
       setSyncError(null)
-      qc.invalidateQueries({ queryKey: ['kpi', month, year] })
+      qc.invalidateQueries({ queryKey: ['kpi'] })
     },
     onError: (e: any) => {
       setSyncError(e?.response?.data?.detail ?? 'Ошибка синхронизации')
+      setSyncMsg(null)
+    },
+  })
+
+  const syncAllMutation = useMutation({
+    mutationFn: () => api.post<KpiSyncResult>('/api/v1/kpi/sync-all').then(r => r.data),
+    onSuccess: (res) => {
+      setSyncMsg(res.message)
+      setSyncError(null)
+      qc.invalidateQueries({ queryKey: ['kpi'] })
+    },
+    onError: (e: any) => {
+      setSyncError(e?.response?.data?.detail ?? 'Ошибка синхронизации всех месяцев')
       setSyncMsg(null)
     },
   })
@@ -455,14 +492,25 @@ export default function KpiPage() {
           <div className="flex items-center gap-3 flex-wrap">
             <p className="text-sm font-medium text-slate-300 mr-2">Данные Onlymonster</p>
             {hasOm ? (
-              <button
-                onClick={() => syncMutation.mutate()}
-                disabled={syncMutation.isPending}
-                className="flex items-center gap-2 px-4 py-2 bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 text-white text-sm rounded-lg transition-colors"
-              >
-                <RefreshCw className={`h-4 w-4 ${syncMutation.isPending ? 'animate-spin' : ''}`} />
-                {syncMutation.isPending ? 'Синхронизация...' : 'Синхронизировать через API'}
-              </button>
+              <>
+                <button
+                  onClick={() => syncMutation.mutate()}
+                  disabled={syncMutation.isPending || syncAllMutation.isPending}
+                  className="flex items-center gap-2 px-4 py-2 bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 text-white text-sm rounded-lg transition-colors"
+                >
+                  <RefreshCw className={`h-4 w-4 ${syncMutation.isPending ? 'animate-spin' : ''}`} />
+                  {syncMutation.isPending ? 'Синхронизация...' : 'Этот месяц'}
+                </button>
+                <button
+                  onClick={() => syncAllMutation.mutate()}
+                  disabled={syncMutation.isPending || syncAllMutation.isPending}
+                  className="flex items-center gap-2 px-4 py-2 bg-indigo-900/60 hover:bg-indigo-800/70 border border-indigo-700/50 disabled:opacity-50 text-indigo-300 text-sm rounded-lg transition-colors"
+                  title="Синхронизировать все месяцы с транзакциями"
+                >
+                  <RefreshCw className={`h-4 w-4 ${syncAllMutation.isPending ? 'animate-spin' : ''}`} />
+                  {syncAllMutation.isPending ? 'Синхронизация...' : 'Все месяцы'}
+                </button>
+              </>
             ) : (
               <a
                 href="/dashboard/settings"
