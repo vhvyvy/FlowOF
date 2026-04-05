@@ -57,10 +57,22 @@ async def _page_title(
     if page_id in cache:
         return cache[page_id]
     fmt = _format_notion_page_id(page_id)
-    r = await client.get(f"https://api.notion.com/v1/pages/{fmt}", headers=headers, timeout=30.0)
-    if r.status_code != 200:
+    # Как в sync_notion_full.get_page_title: пробуем канонический UUID и сырой id из API
+    data: dict | None = None
+    for url_id in (fmt, page_id):
+        if not url_id:
+            continue
+        r = await client.get(
+            f"https://api.notion.com/v1/pages/{url_id}",
+            headers=headers,
+            timeout=30.0,
+        )
+        if r.status_code != 200:
+            continue
+        data = r.json()
+        break
+    if not data:
         return None
-    data = r.json()
     for p in data.get("properties", {}).values():
         if p.get("type") == "title" and p.get("title"):
             t = p["title"][0].get("plain_text", "").strip()
@@ -72,6 +84,17 @@ async def _page_title(
 
 def _norm_prop_name(key: Any) -> str:
     return unicodedata.normalize("NFKC", str(key)).strip().lower()
+
+
+def _legacy_model_property(props: dict) -> dict | None:
+    """Как в scripts/sync_notion_full.py: только точные имена, плюс совпадение с .strip() по ключу."""
+    for pk in ("Модель", "модель", "Model", "model", "MODEL"):
+        for k, v in props.items():
+            if str(k).strip() != pk:
+                continue
+            if isinstance(v, dict) and v.get("type"):
+                return v
+    return None
 
 
 def _find_model_property(props: dict) -> dict | None:
@@ -274,7 +297,8 @@ async def _parse_row(
     date_obj = (date_prop or {}).get("date") if isinstance(date_prop, dict) else None
     date_val = _parse_date(date_obj.get("start") if date_obj else None)
 
-    model_prop = _find_model_property(props)
+    # Сначала как в sync_notion_full (в т.ч. ключи с лишними пробелами), затем расширенный поиск
+    model_prop = _legacy_model_property(props) or _find_model_property(props)
     model_name = None
     if model_prop:
         model_name = await _model_name_from_property(
@@ -287,6 +311,18 @@ async def _parse_row(
                 continue
             kn = _norm_prop_name(key)
             if "модел" not in kn:
+                continue
+            model_name = await _model_name_from_property(
+                val, client, headers, model_cache, notion_page_id
+            )
+            if model_name:
+                break
+    # Если основная колонка — relation с пустым API, но есть rollup-копия имени
+    if not model_name:
+        for key, val in props.items():
+            if not isinstance(val, dict) or val.get("type") != "rollup":
+                continue
+            if val is model_prop:
                 continue
             model_name = await _model_name_from_property(
                 val, client, headers, model_cache, notion_page_id
@@ -378,7 +414,39 @@ async def _parse_row(
     return date_val, model_name, chatter, amount, shift_id, shift_name
 
 
-async def _query_all_pages(client: httpx.AsyncClient, headers: dict, database_id: str) -> list[dict]:
+async def _resolve_page_to_nested_database_id(
+    client: httpx.AsyncClient,
+    headers: dict[str, str],
+    page_id: str,
+) -> str | None:
+    """Если передан URL страницы с вложенной базой — вернуть id базы (как sync_notion_full._resolve_page_to_database_id)."""
+    block_id = page_id.replace("-", "")
+    r = await client.get(
+        f"https://api.notion.com/v1/blocks/{block_id}/children",
+        headers=headers,
+        params={"page_size": 50},
+        timeout=20.0,
+    )
+    if r.status_code != 200:
+        return None
+    data = r.json()
+    if data.get("object") == "error":
+        return None
+    for block in data.get("results") or []:
+        if block.get("type") == "child_database":
+            bid = block.get("id")
+            if bid:
+                return bid
+    return None
+
+
+async def _query_all_pages(
+    client: httpx.AsyncClient,
+    headers: dict,
+    database_id: str,
+    *,
+    _retried_resolve: bool = False,
+) -> list[dict]:
     out: list[dict] = []
     cursor = None
     url = f"https://api.notion.com/v1/databases/{database_id}/query"
@@ -389,6 +457,20 @@ async def _query_all_pages(client: httpx.AsyncClient, headers: dict, database_id
         r = await client.post(url, headers=headers, json=body, timeout=60.0)
         data = r.json()
         if data.get("object") == "error":
+            msg = str(data.get("message") or "")
+            if (
+                not _retried_resolve
+                and ("page, not a database" in msg or "not a database" in msg.lower())
+            ):
+                nested = await _resolve_page_to_nested_database_id(client, headers, database_id)
+                if nested:
+                    canon = normalize_notion_db_id(nested) or nested
+                    logger.info(
+                        "notion: id %s was a page, using nested database %s",
+                        database_id[:8],
+                        canon[:8],
+                    )
+                    return await _query_all_pages(client, headers, canon, _retried_resolve=True)
             logger.warning("notion query error db=%s: %s", database_id[:8], data.get("message"))
             break
         out.extend(data.get("results") or [])
@@ -424,6 +506,9 @@ async def sync_notion_transactions_for_tenant(
     """
     Импорт страниц из всех настроенных баз Notion в transactions.
     Возвращает счётчики: inserted, updated, skipped, pages, databases.
+
+    Env: NOTION_SYNC_ALLOW_EMPTY_MODEL=1 — импортировать строки без разрешённой модели с model=\"—\"
+    (если интеграция не видит связанную базу моделей; лучше выдать доступ в Notion).
     """
     token = notion_token.strip()
     if not token:
@@ -450,6 +535,12 @@ async def sync_notion_transactions_for_tenant(
     chatter_cache: dict[str, str] = {}
     shift_cache: dict[str, str] = {}
 
+    allow_empty_model = os.getenv("NOTION_SYNC_ALLOW_EMPTY_MODEL", "").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+    )
+
     async with httpx.AsyncClient() as client:
         for raw_db in db_ids:
             canon = normalize_notion_db_id(raw_db) or raw_db
@@ -475,9 +566,12 @@ async def sync_notion_transactions_for_tenant(
                     skipped_parse += 1
                     continue
                 if not model_name or not str(model_name).strip():
-                    skipped += 1
-                    skipped_no_model += 1
-                    continue
+                    if allow_empty_model:
+                        model_name = "—"
+                    else:
+                        skipped += 1
+                        skipped_no_model += 1
+                        continue
 
                 synced_at = datetime.utcnow()
                 stmt = select(Transaction).where(
