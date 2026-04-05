@@ -268,28 +268,50 @@ function EconomicDonut({ eco, revenue }: { eco: EconomicBreakdown; revenue: numb
 
 // ── Chatter Bar ───────────────────────────────────────────────────────────────
 
+function fmtAxis(v: number): string {
+  if (v >= 1_000_000) return `$${(v / 1_000_000).toFixed(1)}M`
+  if (v >= 1_000)     return `$${(v / 1_000).toFixed(0)}k`
+  return `$${v}`
+}
+
 function ChatterBar({ chatters }: { chatters: ChatterShare[] }) {
   const top = chatters.slice(0, 15)
-  const data = top.map((c) => ({ name: c.chatter, revenue: c.revenue, share: c.share_pct }))
+  // Sort descending, cap revenue at a sane max to avoid rendering bugs
+  const maxRev = Math.max(...top.map((c) => c.revenue))
+  const data = top
+    .sort((a, b) => b.revenue - a.revenue)
+    .map((c) => ({ name: c.chatter, revenue: c.revenue, share: c.share_pct }))
+
   return (
     <div className="bg-slate-800/50 border border-slate-700/50 rounded-xl p-5">
       <p className="text-sm font-semibold text-slate-300 mb-4">Выручка по чаттерам (топ {top.length})</p>
-      <ResponsiveContainer width="100%" height={Math.max(220, top.length * 28)}>
-        <BarChart data={data} layout="vertical" margin={{ top: 0, right: 64, left: 8, bottom: 0 }}>
+      <ResponsiveContainer width="100%" height={Math.max(240, top.length * 30)}>
+        <BarChart data={data} layout="vertical" margin={{ top: 0, right: 80, left: 8, bottom: 0 }}>
           <CartesianGrid horizontal={false} stroke="#334155" strokeOpacity={0.4} />
-          <XAxis type="number" tick={{ fontSize: 11, fill: '#64748b' }}
-            tickFormatter={(v: number) => `$${(v / 1000).toFixed(0)}k`} axisLine={false} tickLine={false} />
-          <YAxis type="category" dataKey="name" tick={{ fontSize: 11, fill: '#94a3b8' }}
-            axisLine={false} tickLine={false} width={110} />
+          <XAxis
+            type="number"
+            domain={[0, maxRev * 1.08]}
+            tick={{ fontSize: 11, fill: '#64748b' }}
+            tickFormatter={fmtAxis}
+            axisLine={false} tickLine={false}
+          />
+          <YAxis
+            type="category" dataKey="name"
+            tick={{ fontSize: 11, fill: '#94a3b8' }}
+            axisLine={false} tickLine={false} width={120}
+          />
           <Tooltip
             contentStyle={{ background: '#1e293b', border: '1px solid #334155', borderRadius: 8, fontSize: 12 }}
+            cursor={{ fill: 'rgba(99,102,241,0.08)' }}
             formatter={(v, _, entry) => [
               `${typeof v === 'number' ? formatCurrency(v) : v} (${(entry?.payload as { share?: number })?.share ?? 0}%)`,
               'Выручка',
             ]}
           />
-          <Bar dataKey="revenue" radius={[0, 4, 4, 0]}>
-            {data.map((_, i) => <Cell key={i} fill={MODEL_COLORS[i % MODEL_COLORS.length]} fillOpacity={0.8} />)}
+          <Bar dataKey="revenue" radius={[0, 4, 4, 0]} maxBarSize={28}
+            label={{ position: 'right', formatter: (v: number) => formatCurrency(v), fill: '#64748b', fontSize: 11 }}
+          >
+            {data.map((_, i) => <Cell key={i} fill={MODEL_COLORS[i % MODEL_COLORS.length]} fillOpacity={0.85} />)}
           </Bar>
         </BarChart>
       </ResponsiveContainer>
