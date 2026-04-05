@@ -194,12 +194,18 @@ class PlansResponse(BaseModel):
 
 # ── Structure ─────────────────────────────────────────────────────────────────
 
+class ChatterInModel(BaseModel):
+    chatter: str
+    revenue: float
+
+
 class ModelShare(BaseModel):
     model: str
     revenue: float
     share_pct: float
     plan_amount: float
     plan_completion: float  # 0.0 if no plan
+    chatters: list[ChatterInModel] = []
 
 
 class ChatterShare(BaseModel):

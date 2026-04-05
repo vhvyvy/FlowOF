@@ -6,6 +6,7 @@ import { useStructure } from '@/lib/hooks/useStructure'
 import { useMonthStore } from '@/lib/hooks/useMonth'
 import { formatCurrency } from '@/lib/utils'
 import type { ModelShare, ChatterShare, EconomicBreakdown } from '@/types'
+import { useMemo } from 'react'
 import {
   PieChart, Pie, Cell, Tooltip, ResponsiveContainer,
   BarChart, Bar, XAxis, YAxis, CartesianGrid,
@@ -127,6 +128,118 @@ function EconomicDonut({ eco, revenue }: { eco: EconomicBreakdown; revenue: numb
           ))}
         </div>
       </div>
+    </div>
+  )
+}
+
+// ── Hierarchical Treemap (model → chatters) ───────────────────────────────────
+
+function blueColor(value: number, min: number, max: number): string {
+  const t = max > min ? (value - min) / (max - min) : 0
+  // Dark navy (#0f2a4a) → bright blue (#3b9eff)
+  const r = Math.round(15  + t * (59  - 15))
+  const g = Math.round(42  + t * (158 - 42))
+  const b = Math.round(74  + t * (255 - 74))
+  return `rgb(${r},${g},${b})`
+}
+
+interface HTreemapCellProps {
+  x?: number; y?: number; width?: number; height?: number
+  name?: string; value?: number; depth?: number
+  minVal?: number; maxVal?: number; isModel?: boolean
+}
+
+function HTreemapCell(props: HTreemapCellProps) {
+  const { x = 0, y = 0, width = 0, height = 0, name = '', value = 0, depth = 0, minVal = 0, maxVal = 1, isModel } = props
+  if (width < 4 || height < 4) return null
+
+  if (depth === 1) {
+    // Model (parent) — dark header bar
+    return (
+      <g>
+        <rect x={x} y={y} width={width} height={height} fill="#1e293b" stroke="#334155" strokeWidth={2} rx={4} />
+        {width > 40 && (
+          <text x={x + width / 2} y={y + 14} textAnchor="middle" fill="#94a3b8" fontSize={Math.min(12, width / 10)} fontWeight={600}>
+            {name.length > Math.floor(width / 8) ? name.slice(0, Math.floor(width / 8)) + '…' : name}
+          </text>
+        )}
+      </g>
+    )
+  }
+
+  if (depth === 2) {
+    // Chatter (child) — blue gradient cell
+    const color = blueColor(value, minVal, maxVal)
+    const textColor = value > (minVal + maxVal) / 2 ? '#e2e8f0' : '#bfdbfe'
+    return (
+      <g>
+        <rect x={x + 1} y={y + 1} width={width - 2} height={height - 2} fill={color} stroke="#1e293b" strokeWidth={1} rx={2} />
+        {width > 30 && height > 20 && (
+          <text x={x + width / 2} y={y + height / 2 + (height > 36 ? -6 : 4)} textAnchor="middle" fill={textColor} fontSize={Math.min(11, width / 9)} fontWeight={500}>
+            {name.length > Math.floor(width / 7) ? name.slice(0, Math.floor(width / 7)) + '…' : name}
+          </text>
+        )}
+        {width > 40 && height > 36 && (
+          <text x={x + width / 2} y={y + height / 2 + 10} textAnchor="middle" fill={textColor} fontSize={10} opacity={0.75}>
+            {formatCurrency(value)}
+          </text>
+        )}
+      </g>
+    )
+  }
+
+  return null
+}
+
+function HierarchicalTreemap({ models }: { models: ModelShare[] }) {
+  const { treeData, minVal, maxVal } = useMemo(() => {
+    let minVal = Infinity, maxVal = 0
+    const children = models
+      .filter((m) => m.chatters && m.chatters.length > 0)
+      .map((m) => {
+        const kids = m.chatters.map((c) => {
+          if (c.revenue < minVal) minVal = c.revenue
+          if (c.revenue > maxVal) maxVal = c.revenue
+          return { name: c.chatter, value: c.revenue }
+        })
+        return { name: m.model, children: kids }
+      })
+    return { treeData: [{ name: 'root', children }], minVal: minVal === Infinity ? 0 : minVal, maxVal }
+  }, [models])
+
+  // Custom content needs minVal/maxVal via closure
+  const CustomContent = (props: HTreemapCellProps) => (
+    <HTreemapCell {...props} minVal={minVal} maxVal={maxVal} />
+  )
+
+  return (
+    <div className="bg-slate-800/50 border border-slate-700/50 rounded-xl p-5">
+      <div className="flex items-center justify-between mb-4">
+        <p className="text-sm font-semibold text-slate-300">Карта: анкеты → чаттеры</p>
+        {/* Legend */}
+        <div className="flex items-center gap-2 text-xs text-slate-500">
+          <span>Мало</span>
+          <div className="flex gap-px">
+            {[0, 0.2, 0.4, 0.6, 0.8, 1].map((t) => (
+              <div key={t} className="w-5 h-3 rounded-sm" style={{ background: blueColor(t, 0, 1) }} />
+            ))}
+          </div>
+          <span>Много</span>
+        </div>
+      </div>
+      <ResponsiveContainer width="100%" height={360}>
+        <Treemap
+          data={treeData}
+          dataKey="value"
+          aspectRatio={16 / 9}
+          content={<CustomContent />}
+        >
+          <Tooltip
+            contentStyle={{ background: '#1e293b', border: '1px solid #334155', borderRadius: 8, fontSize: 12 }}
+            formatter={(v) => [typeof v === 'number' ? formatCurrency(v) : String(v), 'Выручка']}
+          />
+        </Treemap>
+      </ResponsiveContainer>
     </div>
   )
 }
@@ -277,6 +390,13 @@ export default function StructurePage() {
             ) : null}
           </div>
         </div>
+
+        {/* Hierarchical treemap: model → chatters */}
+        {isLoading ? (
+          <Skeleton className="h-[412px] w-full rounded-xl" />
+        ) : data && data.models.some((m) => m.chatters?.length > 0) ? (
+          <HierarchicalTreemap models={data.models} />
+        ) : null}
 
         {/* Chatter bar chart */}
         {isLoading ? (

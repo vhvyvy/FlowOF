@@ -9,7 +9,7 @@ from sqlalchemy import select, func, and_
 from database import get_db
 from dependencies import get_current_tenant
 from models import Tenant, Transaction, Plan, Expense
-from schemas import StructureResponse, ModelShare, ChatterShare, EconomicBreakdown
+from schemas import StructureResponse, ModelShare, ChatterShare, ChatterInModel, EconomicBreakdown
 from economics import load_settings, compute_economics
 
 logger = logging.getLogger("skynet.structure")
@@ -42,6 +42,32 @@ async def get_structure(
         model_rows = model_result.all()
         total_revenue = sum(float(r.revenue or 0) for r in model_rows)
 
+        # Revenue by model AND chatter (for hierarchical treemap)
+        model_chatter_result = await db.execute(
+            select(
+                Transaction.model,
+                Transaction.chatter,
+                func.sum(Transaction.amount).label("revenue"),
+            )
+            .where(and_(
+                Transaction.tenant_id == tenant.id,
+                Transaction.date >= start,
+                Transaction.date <= end,
+                Transaction.chatter.isnot(None),
+            ))
+            .group_by(Transaction.model, Transaction.chatter)
+            .order_by(Transaction.model, func.sum(Transaction.amount).desc())
+        )
+        model_chatter_rows = model_chatter_result.all()
+
+        # Build chatter-per-model index
+        from collections import defaultdict
+        chatters_by_model: dict[str, list[ChatterInModel]] = defaultdict(list)
+        for r in model_chatter_rows:
+            chatters_by_model[r.model or "Unknown"].append(
+                ChatterInModel(chatter=r.chatter or "Unknown", revenue=round(float(r.revenue or 0), 2))
+            )
+
         # Plans for this period
         plan_result = await db.execute(
             select(Plan.model, Plan.plan_amount).where(
@@ -55,12 +81,14 @@ async def get_structure(
             rev = float(r.revenue or 0)
             plan_amt = plans.get(r.model, 0.0)
             completion = round(rev / plan_amt * 100, 1) if plan_amt > 0 else 0.0
+            model_name = r.model or "Unknown"
             models.append(ModelShare(
-                model=r.model or "Unknown",
+                model=model_name,
                 revenue=round(rev, 2),
                 share_pct=round(rev / total_revenue * 100, 1) if total_revenue > 0 else 0.0,
                 plan_amount=plan_amt,
                 plan_completion=completion,
+                chatters=chatters_by_model.get(model_name, []),
             ))
 
         # Revenue by chatter

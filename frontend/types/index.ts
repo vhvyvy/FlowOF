@@ -172,12 +172,18 @@ export interface PlansResponse {
 
 // ── Structure ─────────────────────────────────────────────────────────────────
 
+export interface ChatterInModel {
+  chatter: string
+  revenue: number
+}
+
 export interface ModelShare {
   model: string
   revenue: number
   share_pct: number
   plan_amount: number
   plan_completion: number
+  chatters: ChatterInModel[]
 }
 
 export interface ChatterShare {
