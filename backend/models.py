@@ -37,6 +37,8 @@ class Transaction(Base):
     shift_id = Column(String(100), nullable=True)
     shift_name = Column(String(255), nullable=True)
     notion_id = Column(String(255), nullable=True)
+    # Which Notion database this row was synced from (for team routing)
+    notion_database_id = Column(String(64), nullable=True, index=True)
     team_id = Column(Integer, ForeignKey("teams_mt.id"), nullable=True, index=True)
 
 

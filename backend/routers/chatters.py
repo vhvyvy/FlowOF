@@ -9,7 +9,7 @@ from sqlalchemy import select, func, and_
 from database import get_db
 from dependencies import get_current_tenant
 from models import Tenant, Transaction, Plan, AppSetting, Team
-from team_helpers import list_teams, ensure_default_team, team_transaction_clause
+from team_helpers import list_teams, ensure_default_team, team_transaction_clause, team_inherits_global_economics
 from economics import _tier_for_model
 
 RETENTION_RATE = 0.025  # 2.5% удерживается агентством при use_retention=1
@@ -53,7 +53,7 @@ async def get_chatters(
 
         tier_cap: float | None = None
         default_frac: float | None = None
-        if selected_team is not None and not selected_team.inherit_economics:
+        if selected_team is not None and not team_inherits_global_economics(selected_team):
             tier_cap = float(selected_team.chatter_max_pct) / 100 if selected_team.chatter_max_pct else None
             default_frac = float(selected_team.default_chatter_pct) / 100 if selected_team.default_chatter_pct else tier_cap
 

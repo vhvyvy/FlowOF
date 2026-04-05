@@ -44,6 +44,12 @@ def team_transaction_clause(team_id: int | None, default_team_id: int | None):
     return Transaction.team_id == team_id
 
 
+def team_inherits_global_economics(team) -> bool:
+    """NULL / missing → inherit global settings (как основная команда)."""
+    v = getattr(team, "inherit_economics", None)
+    return True if v is None else bool(v)
+
+
 def normalize_notion_db_id(raw: str | None) -> str | None:
     if not raw:
         return None

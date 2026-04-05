@@ -1,5 +1,6 @@
 import logging
 from fastapi import APIRouter, Depends, HTTPException
+from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, and_
 
@@ -7,7 +8,8 @@ from database import get_db
 from dependencies import get_current_tenant
 from models import Tenant, Team
 from schemas import TeamOut, TeamCreate, TeamUpdate
-from team_helpers import list_teams, ensure_default_team, normalize_notion_db_id
+from team_helpers import list_teams, ensure_default_team, normalize_notion_db_id, team_inherits_global_economics
+from team_bootstrap import assign_transactions_by_notion_database, backfill_notion_database_id_from_notion_api
 
 logger = logging.getLogger("skynet.teams")
 router = APIRouter(prefix="/api/v1", tags=["teams"])
@@ -19,7 +21,7 @@ def _to_out(t: Team) -> TeamOut:
         name=t.name,
         sort_order=t.sort_order or 0,
         notion_database_id=t.notion_database_id,
-        inherit_economics=bool(t.inherit_economics),
+        inherit_economics=team_inherits_global_economics(t),
         chatter_max_pct=float(t.chatter_max_pct) if t.chatter_max_pct is not None else None,
         default_chatter_pct=float(t.default_chatter_pct) if t.default_chatter_pct is not None else None,
         admin_percent_total=float(t.admin_percent_total) if t.admin_percent_total is not None else None,
@@ -90,3 +92,31 @@ async def update_team(
     await db.commit()
     await db.refresh(t)
     return _to_out(t)
+
+
+class TeamReconcileOut(BaseModel):
+    assigned_rows: int
+    backfilled_pages: int
+
+
+@router.post("/teams/reconcile-notion", response_model=TeamReconcileOut)
+async def reconcile_notion_transactions(
+    tenant: Tenant = Depends(get_current_tenant),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    1) Подтянуть parent.database_id из Notion по notion_id страницы (нужен notion_token у тенанта).
+    2) Проставить team_id по совпадению notion_database_id транзакции с командой.
+    """
+    tr = await db.execute(select(Tenant).where(Tenant.id == tenant.id))
+    row = tr.scalar_one()
+    backfilled = 0
+    if row.notion_token and row.notion_token.strip():
+        try:
+            backfilled = await backfill_notion_database_id_from_notion_api(
+                db, tenant.id, row.notion_token, limit=200
+            )
+        except Exception as e:
+            logger.warning("notion backfill failed: %s", e)
+    assigned = await assign_transactions_by_notion_database(db)
+    return TeamReconcileOut(assigned_rows=assigned, backfilled_pages=backfilled)

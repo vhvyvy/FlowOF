@@ -10,7 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from economics import compute_actual_chatter_cut
 from models import Transaction
 from schemas import OverviewTeamSlice
-from team_helpers import team_transaction_clause
+from team_helpers import team_transaction_clause, team_inherits_global_economics
 
 
 def month_range(year: int, month: int):
@@ -64,7 +64,8 @@ async def aggregate_teams(
         clause = team_transaction_clause(team.id, default_team_id)
         rev_t = await sum_revenue(db, tenant_id, start, end, clause)
 
-        if team.inherit_economics:
+        inherit = team_inherits_global_economics(team)
+        if inherit:
             cap = None
             dfrac = None
         else:
@@ -75,13 +76,13 @@ async def aggregate_teams(
             db, tenant_id, year, month, ur,
             team_id=team.id,
             default_team_id=default_team_id,
-            tier_cap=cap if not team.inherit_economics else None,
-            default_chatter_frac=dfrac if not team.inherit_economics else None,
+            tier_cap=cap if not inherit else None,
+            default_chatter_frac=dfrac if not inherit else None,
         )
         gross_sum += cg
         net_sum += cn
 
-        if team.inherit_economics:
+        if inherit:
             ap = float(settings.get("admin_percent", "9")) / 100
         else:
             ap = float(team.admin_percent_total or 0) / 100

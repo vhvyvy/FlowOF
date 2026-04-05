@@ -125,6 +125,19 @@ function TeamsSection() {
     },
   })
 
+  const reconcileMut = useMutation({
+    mutationFn: () =>
+      api
+        .post<{ assigned_rows: number; backfilled_pages: number }>('/api/v1/teams/reconcile-notion')
+        .then((r) => r.data),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['teams'] })
+      qc.invalidateQueries({ queryKey: ['overview'] })
+      qc.invalidateQueries({ queryKey: ['finance'] })
+      qc.invalidateQueries({ queryKey: ['chatters'] })
+    },
+  })
+
   return (
     <div className="bg-slate-800/60 border border-slate-700/50 rounded-xl px-5 py-5 space-y-4">
       <div className="flex items-center gap-2">
@@ -132,10 +145,26 @@ function TeamsSection() {
         <p className="text-xs font-semibold text-slate-400 uppercase tracking-widest">Команды</p>
       </div>
       <p className="text-xs text-slate-500">
-        Первая команда («Основная») наследует проценты из блока выше. Для второй команды можно задать потолок чаттерам
-        (например 22%) и суммарный % админам (например 8% = 2×4%). Укажите ID базы Notion с транзакциями этой команды —
-        при синке подставляйте <code className="text-slate-400">team_id</code> в импорте.
+        Вторая команда создаётся на сервере автоматически (ID базы из вашего сообщения). Кнопка ниже подтягивает из Notion
+        к какой базе относится каждая страница-транзакция и проставляет команду. Нужен{' '}
+        <span className="text-slate-400">notion_token</span> у агентства (админка / тенант).
       </p>
+      <button
+        type="button"
+        onClick={() => reconcileMut.mutate()}
+        disabled={reconcileMut.isPending}
+        className="text-sm px-4 py-2 rounded-lg bg-slate-700 hover:bg-slate-600 border border-slate-600 text-slate-200 disabled:opacity-50"
+      >
+        {reconcileMut.isPending
+          ? 'Сопоставление…'
+          : 'Сопоставить транзакции с командами (Notion)'}
+      </button>
+      {reconcileMut.isSuccess && reconcileMut.data && (
+        <p className="text-xs text-emerald-400">
+          Обновлено страниц из API: {reconcileMut.data.backfilled_pages}, привязано строк:{' '}
+          {reconcileMut.data.assigned_rows}
+        </p>
+      )}
       {isLoading ? (
         <Skeleton className="h-16 w-full" />
       ) : (

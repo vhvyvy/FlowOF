@@ -11,7 +11,7 @@ from dependencies import get_current_tenant
 from models import Tenant, Transaction, Expense, Team
 from schemas import OverviewResponse, DailyRevenue, EconomicBreakdown, OverviewTeamSlice
 from economics import load_settings, compute_economics, compute_actual_chatter_cut
-from team_helpers import list_teams, ensure_default_team, team_transaction_clause
+from team_helpers import list_teams, ensure_default_team, team_transaction_clause, team_inherits_global_economics
 from team_economics import sum_revenue, aggregate_teams
 
 logger = logging.getLogger("skynet.overview")
@@ -74,7 +74,8 @@ async def get_overview(
                 db_expenses * (revenue / revenue_full) if revenue_full > 0 else 0.0
             )
 
-            if selected_team.inherit_economics:
+            sel_inherit = team_inherits_global_economics(selected_team)
+            if sel_inherit:
                 cap = None
                 dfrac = None
             else:
@@ -93,10 +94,10 @@ async def get_overview(
                 db, tenant.id, year, month, ur,
                 team_id=selected_team.id,
                 default_team_id=default_team_id,
-                tier_cap=cap if not selected_team.inherit_economics else None,
-                default_chatter_frac=dfrac if not selected_team.inherit_economics else None,
+                tier_cap=cap if not sel_inherit else None,
+                default_chatter_frac=dfrac if not sel_inherit else None,
             )
-            if selected_team.inherit_economics:
+            if sel_inherit:
                 ap = float(settings.get("admin_percent", "9")) / 100
             else:
                 ap = float(selected_team.admin_percent_total or 0) / 100
@@ -133,7 +134,7 @@ async def get_overview(
             prev_rev = await sum_revenue(db, tenant.id, prev_start, prev_end, p_clause)
             prev_full = await sum_revenue(db, tenant.id, prev_start, prev_end, None)
             prev_db_use = prev_db_exp * (prev_rev / prev_full) if prev_full > 0 else 0.0
-            if selected_team.inherit_economics:
+            if sel_inherit:
                 p_cap = None
                 p_dfrac = None
             else:
@@ -151,10 +152,10 @@ async def get_overview(
                 db, tenant.id, prev_year, prev_month, ur,
                 team_id=selected_team.id,
                 default_team_id=default_team_id,
-                tier_cap=p_cap if not selected_team.inherit_economics else None,
-                default_chatter_frac=p_dfrac if not selected_team.inherit_economics else None,
+                tier_cap=p_cap if not sel_inherit else None,
+                default_chatter_frac=p_dfrac if not sel_inherit else None,
             )
-            if selected_team.inherit_economics:
+            if sel_inherit:
                 pap = float(settings.get("admin_percent", "9")) / 100
             else:
                 pap = float(selected_team.admin_percent_total or 0) / 100
