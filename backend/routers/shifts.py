@@ -8,7 +8,7 @@ from sqlalchemy import select, func, and_, case, or_
 
 from database import get_db
 from dependencies import get_current_tenant
-from economics import load_settings
+from economics import load_settings, safe_float_setting
 from models import ChatterKpi, ChatterMapping, Plan, Tenant, Transaction
 from schemas import ShiftRow, ShiftsResponse
 
@@ -123,7 +123,7 @@ async def get_shifts(
     try:
         start, end = _month_range(year, month)
         settings = await load_settings(db, tenant.id)
-        admin_pct = float(settings.get("admin_percent", "9")) / 100
+        admin_pct = safe_float_setting(settings, "admin_percent", "9") / 100
 
         _has_shift = or_(
             and_(Transaction.shift_name.isnot(None), Transaction.shift_name != ""),

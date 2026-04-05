@@ -7,7 +7,7 @@ from datetime import date
 from sqlalchemy import select, func, and_
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from economics import compute_actual_chatter_cut
+from economics import compute_actual_chatter_cut, safe_float_setting
 from models import Transaction
 from schemas import OverviewTeamSlice
 from team_helpers import team_transaction_clause, team_inherits_global_economics
@@ -49,8 +49,8 @@ async def aggregate_teams(
     ur: bool,
 ) -> tuple[float, float, float, float, list[OverviewTeamSlice]]:
     start, end = month_range(year, month)
-    m_pct = float(settings.get("model_percent", "23")) / 100
-    w_pct = float(settings.get("withdraw_percent", "6")) / 100
+    m_pct = safe_float_setting(settings, "model_percent", "23") / 100
+    w_pct = safe_float_setting(settings, "withdraw_percent", "6") / 100
     uw = settings.get("use_withdraw", "1") == "1"
 
     total_rev = await sum_revenue(db, tenant_id, start, end, None)
@@ -83,7 +83,7 @@ async def aggregate_teams(
         net_sum += cn
 
         if inherit:
-            ap = float(settings.get("admin_percent", "9")) / 100
+            ap = safe_float_setting(settings, "admin_percent", "9") / 100
         else:
             ap = float(team.admin_percent_total or 0) / 100
         adm = rev_t * ap

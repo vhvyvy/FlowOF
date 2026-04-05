@@ -10,7 +10,7 @@ from database import get_db
 from dependencies import get_current_tenant
 from models import Tenant, Transaction, Expense, Team
 from schemas import FinanceResponse, PnlRow, WaterfallItem, EconomicBreakdown
-from economics import load_settings, compute_economics, compute_actual_chatter_cut
+from economics import load_settings, compute_economics, compute_actual_chatter_cut, safe_float_setting
 from team_helpers import list_teams, ensure_default_team, team_transaction_clause, team_inherits_global_economics
 from team_economics import sum_revenue, aggregate_teams
 
@@ -113,7 +113,7 @@ async def get_finance(
                 default_chatter_frac=dfrac if not fin_inherit else None,
             )
             if fin_inherit:
-                ap = float(settings.get("admin_percent", "9")) / 100
+                ap = safe_float_setting(settings, "admin_percent", "9") / 100
             else:
                 ap = float(selected_team.admin_percent_total or 0) / 100
             admin_override = total_revenue * ap
@@ -214,5 +214,5 @@ async def get_finance(
     except HTTPException:
         raise
     except Exception as e:
-        logger.error("finance error tenant=%d: %s", tenant.id, e)
+        logger.exception("finance error tenant=%d", tenant.id)
         raise HTTPException(status_code=500, detail="Ошибка загрузки данных")

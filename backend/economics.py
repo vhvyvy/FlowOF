@@ -70,12 +70,28 @@ def _tier_for_model(
     return max(floor, t)
 
 
+def safe_float_setting(settings: dict[str, str], key: str, default: str) -> float:
+    """DB may store "" or garbage; never crash finance/overview on bad values."""
+    try:
+        return float(str(settings.get(key, default) or default).strip())
+    except (TypeError, ValueError):
+        return float(default)
+
+
 async def load_settings(db: AsyncSession, tenant_id: int) -> dict[str, str]:
     result = await db.execute(
         select(AppSetting).where(AppSetting.tenant_id == tenant_id)
     )
     rows = result.scalars().all()
-    return {**DEFAULTS, **{r.key: r.value for r in rows}}
+    out = dict(DEFAULTS)
+    for r in rows:
+        if r.value is None:
+            continue
+        s = str(r.value).strip()
+        if s == "":
+            continue
+        out[r.key] = s
+    return out
 
 
 async def compute_actual_chatter_cut(
@@ -146,10 +162,10 @@ def compute_economics(
     If actual_chatter_gross/net provided (from plan-based tier calc), uses those.
     Otherwise falls back to flat chatter_percent from settings.
     """
-    m_pct  = float(settings.get("model_percent",    "23")) / 100
-    c_pct  = float(settings.get("chatter_percent",  "25")) / 100
-    a_pct  = float(settings.get("admin_percent",    "9"))  / 100
-    w_pct  = float(settings.get("withdraw_percent", "6"))  / 100
+    m_pct  = safe_float_setting(settings, "model_percent", "23") / 100
+    c_pct  = safe_float_setting(settings, "chatter_percent", "25") / 100
+    a_pct  = safe_float_setting(settings, "admin_percent", "9") / 100
+    w_pct  = safe_float_setting(settings, "withdraw_percent", "6") / 100
     uw     = settings.get("use_withdraw",  "1") == "1"
     ur     = settings.get("use_retention", "1") == "1"
 
@@ -159,7 +175,7 @@ def compute_economics(
         eff_admin_pct = round(admin_cut / revenue * 100, 1) if revenue > 0 else 0.0
     else:
         admin_cut = revenue * a_pct
-        eff_admin_pct = float(settings.get("admin_percent", "9"))
+        eff_admin_pct = safe_float_setting(settings, "admin_percent", "9")
     withdraw = revenue * w_pct if uw else 0.0
 
     # Chatter cut: plan-based tiers if available, else flat setting
@@ -193,10 +209,10 @@ def compute_economics(
         "total_costs":        round(total_costs, 2),
         "profit":             round(profit, 2),
         "margin":             margin,
-        "model_pct":          float(settings.get("model_percent",    "23")),
+        "model_pct":          safe_float_setting(settings, "model_percent", "23"),
         "chatter_pct":        eff_chatter_pct,   # actual effective %
         "admin_pct":          eff_admin_pct,
-        "withdraw_pct":       float(settings.get("withdraw_percent", "6")),
+        "withdraw_pct":       safe_float_setting(settings, "withdraw_percent", "6"),
         "use_withdraw":       uw,
         "use_retention":      ur,
     }

@@ -10,7 +10,7 @@ from database import get_db
 from dependencies import get_current_tenant
 from models import Tenant, Transaction, Expense, Team
 from schemas import OverviewResponse, DailyRevenue, EconomicBreakdown, OverviewTeamSlice
-from economics import load_settings, compute_economics, compute_actual_chatter_cut
+from economics import load_settings, compute_economics, compute_actual_chatter_cut, safe_float_setting
 from team_helpers import list_teams, ensure_default_team, team_transaction_clause, team_inherits_global_economics
 from team_economics import sum_revenue, aggregate_teams
 
@@ -98,7 +98,7 @@ async def get_overview(
                 default_chatter_frac=dfrac if not sel_inherit else None,
             )
             if sel_inherit:
-                ap = float(settings.get("admin_percent", "9")) / 100
+                ap = safe_float_setting(settings, "admin_percent", "9") / 100
             else:
                 ap = float(selected_team.admin_percent_total or 0) / 100
             admin_override = revenue * ap
@@ -156,7 +156,7 @@ async def get_overview(
                 default_chatter_frac=p_dfrac if not sel_inherit else None,
             )
             if sel_inherit:
-                pap = float(settings.get("admin_percent", "9")) / 100
+                pap = safe_float_setting(settings, "admin_percent", "9") / 100
             else:
                 pap = float(selected_team.admin_percent_total or 0) / 100
             prev_admin = prev_rev * pap
