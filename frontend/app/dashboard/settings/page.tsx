@@ -147,6 +147,8 @@ function TeamsSection() {
           inserted: number
           updated: number
           skipped: number
+          skipped_no_model?: number
+          skipped_parse?: number
           databases: number
           assigned_rows: number
           message: string

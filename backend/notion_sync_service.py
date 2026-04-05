@@ -89,12 +89,29 @@ async def _parse_row(
     date_val = _parse_date(date_obj.get("start") if date_obj else None)
 
     model_prop = props.get("Модель") or props.get("модель") or props.get("Model") or props.get("model")
-    model_rel = (model_prop or {}).get("relation", []) if isinstance(model_prop, dict) else []
+    if not model_prop or not isinstance(model_prop, dict):
+        for key, val in props.items():
+            lk = str(key).lower()
+            if "модел" in lk or lk == "model":
+                model_prop = val
+                break
     model_name = None
+    model_rel = (model_prop or {}).get("relation", []) if isinstance(model_prop, dict) else []
     if model_rel:
         model_name = await _page_title(client, headers, model_rel[0]["id"], model_cache)
     if not model_name and model_rel:
         model_name = "—"
+    # Не только relation: часто «Модель» = select / rich_text / title
+    if not model_name and isinstance(model_prop, dict):
+        mt = model_prop.get("type")
+        if mt == "select" and model_prop.get("select"):
+            model_name = (model_prop["select"].get("name") or "").strip() or None
+        elif mt == "rich_text" and model_prop.get("rich_text"):
+            model_name = (model_prop["rich_text"][0].get("plain_text") or "").strip() or None
+        elif mt == "title" and model_prop.get("title"):
+            model_name = (model_prop["title"][0].get("plain_text") or "").strip() or None
+        elif mt == "multi_select" and model_prop.get("multi_select"):
+            model_name = (model_prop["multi_select"][0].get("name") or "").strip() or None
 
     chatter = None
     cp = props.get("Чаттер") or props.get("Chatter") or props.get("чаттер") or {}
@@ -246,6 +263,8 @@ async def sync_notion_transactions_for_tenant(
     }
 
     inserted = updated = skipped = 0
+    skipped_no_model = 0
+    skipped_parse = 0
     model_cache: dict[str, str] = {}
     chatter_cache: dict[str, str] = {}
     shift_cache: dict[str, str] = {}
@@ -272,9 +291,11 @@ async def sync_notion_transactions_for_tenant(
                 except Exception as e:
                     logger.debug("parse row skip: %s", e)
                     skipped += 1
+                    skipped_parse += 1
                     continue
                 if not model_name or not str(model_name).strip():
                     skipped += 1
+                    skipped_no_model += 1
                     continue
 
                 synced_at = datetime.utcnow()
@@ -326,6 +347,8 @@ async def sync_notion_transactions_for_tenant(
         "inserted": inserted,
         "updated": updated,
         "skipped": skipped,
+        "skipped_no_model": skipped_no_model,
+        "skipped_parse": skipped_parse,
         "databases": len(db_ids),
         "assigned_rows": n,
     }

@@ -46,12 +46,15 @@ async def post_sync_notion_transactions(
         )
         msg = (
             f"Готово: +{stats['inserted']} новых, обновлено {stats['updated']}, "
-            f"пропущено {stats['skipped']}, баз {stats['databases']}, team_id проставлен строк: {stats['assigned_rows']}"
+            f"пропущено {stats['skipped']} (без модели: {stats.get('skipped_no_model', 0)}, ошибка разбора: {stats.get('skipped_parse', 0)}), "
+            f"баз {stats['databases']}, team_id проставлен строк: {stats['assigned_rows']}"
         )
         return NotionSyncResult(
             inserted=stats["inserted"],
             updated=stats["updated"],
             skipped=stats["skipped"],
+            skipped_no_model=stats.get("skipped_no_model", 0),
+            skipped_parse=stats.get("skipped_parse", 0),
             databases=stats["databases"],
             assigned_rows=stats["assigned_rows"],
             message=msg,

@@ -256,6 +256,8 @@ class NotionSyncResult(BaseModel):
     inserted: int
     updated: int
     skipped: int
+    skipped_no_model: int = 0
+    skipped_parse: int = 0
     databases: int
     assigned_rows: int
     message: str
