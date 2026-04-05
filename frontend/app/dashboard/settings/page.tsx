@@ -5,7 +5,7 @@ import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import api from '@/lib/api'
 import { Header } from '@/components/layout/Header'
 import { Skeleton } from '@/components/ui/skeleton'
-import { Save, RefreshCw, AlertCircle, CheckCircle2, Key, Eye, EyeOff, Users } from 'lucide-react'
+import { Save, RefreshCw, AlertCircle, CheckCircle2, Key, Eye, EyeOff, Users, Pencil, Trash2, Check, X } from 'lucide-react'
 import type { TeamOut } from '@/types'
 
 interface Settings {
@@ -103,11 +103,21 @@ function TeamsSection() {
   const [notionId, setNotionId] = useState('')
   const [chatterMax, setChatterMax] = useState(22)
   const [adminTotal, setAdminTotal] = useState(8)
+  const [editingId, setEditingId] = useState<number | null>(null)
+  const [editingName, setEditingName] = useState('')
+  const [deletingId, setDeletingId] = useState<number | null>(null)
 
   const { data: teams, isLoading } = useQuery({
     queryKey: ['teams'],
     queryFn: () => api.get<TeamOut[]>('/api/v1/teams').then((r) => r.data),
   })
+
+  const invalidate = () => {
+    qc.invalidateQueries({ queryKey: ['teams'] })
+    qc.invalidateQueries({ queryKey: ['overview'] })
+    qc.invalidateQueries({ queryKey: ['finance'] })
+    qc.invalidateQueries({ queryKey: ['chatters'] })
+  }
 
   const createMut = useMutation({
     mutationFn: () =>
@@ -119,12 +129,18 @@ function TeamsSection() {
         default_chatter_pct: chatterMax,
         admin_percent_total: adminTotal,
       }),
-    onSuccess: () => {
-      qc.invalidateQueries({ queryKey: ['teams'] })
-      qc.invalidateQueries({ queryKey: ['overview'] })
-      qc.invalidateQueries({ queryKey: ['finance'] })
-      qc.invalidateQueries({ queryKey: ['chatters'] })
-    },
+    onSuccess: invalidate,
+  })
+
+  const renameMut = useMutation({
+    mutationFn: ({ id, newName }: { id: number; newName: string }) =>
+      api.patch(`/api/v1/teams/${id}`, { name: newName }),
+    onSuccess: () => { setEditingId(null); invalidate() },
+  })
+
+  const deleteMut = useMutation({
+    mutationFn: (id: number) => api.delete(`/api/v1/teams/${id}`),
+    onSuccess: () => { setDeletingId(null); invalidate() },
   })
 
   const reconcileMut = useMutation({
@@ -132,12 +148,7 @@ function TeamsSection() {
       api
         .post<{ assigned_rows: number; backfilled_pages: number }>('/api/v1/teams/reconcile-notion')
         .then((r) => r.data),
-    onSuccess: () => {
-      qc.invalidateQueries({ queryKey: ['teams'] })
-      qc.invalidateQueries({ queryKey: ['overview'] })
-      qc.invalidateQueries({ queryKey: ['finance'] })
-      qc.invalidateQueries({ queryKey: ['chatters'] })
-    },
+    onSuccess: invalidate,
   })
 
   const notionImportMut = useMutation({
@@ -154,13 +165,10 @@ function TeamsSection() {
           message: string
         }>('/api/v1/sync/notion-transactions')
         .then((r) => r.data),
-    onSuccess: () => {
-      qc.invalidateQueries({ queryKey: ['teams'] })
-      qc.invalidateQueries({ queryKey: ['overview'] })
-      qc.invalidateQueries({ queryKey: ['finance'] })
-      qc.invalidateQueries({ queryKey: ['chatters'] })
-    },
+    onSuccess: invalidate,
   })
+
+  const defaultTeamId = teams?.[0]?.id
 
   return (
     <div className="bg-slate-800/60 border border-slate-700/50 rounded-xl px-5 py-5 space-y-4">
@@ -173,24 +181,24 @@ function TeamsSection() {
         к какой базе относится каждая страница-транзакция и проставляет команду. Нужен{' '}
         <span className="text-slate-400">notion_token</span> у агентства (админка / тенант).
       </p>
-      <button
-        type="button"
-        onClick={() => reconcileMut.mutate()}
-        disabled={reconcileMut.isPending}
-        className="text-sm px-4 py-2 rounded-lg bg-slate-700 hover:bg-slate-600 border border-slate-600 text-slate-200 disabled:opacity-50"
-      >
-        {reconcileMut.isPending
-          ? 'Сопоставление…'
-          : 'Сопоставить транзакции с командами (Notion)'}
-      </button>
-      <button
-        type="button"
-        onClick={() => notionImportMut.mutate()}
-        disabled={notionImportMut.isPending}
-        className="text-sm px-4 py-2 rounded-lg bg-indigo-600 hover:bg-indigo-500 border border-indigo-500 text-white disabled:opacity-50 ml-2"
-      >
-        {notionImportMut.isPending ? 'Загрузка из Notion…' : 'Загрузить транзакции из Notion в базу'}
-      </button>
+      <div className="flex flex-wrap gap-2">
+        <button
+          type="button"
+          onClick={() => reconcileMut.mutate()}
+          disabled={reconcileMut.isPending}
+          className="text-sm px-4 py-2 rounded-lg bg-slate-700 hover:bg-slate-600 border border-slate-600 text-slate-200 disabled:opacity-50"
+        >
+          {reconcileMut.isPending ? 'Сопоставление…' : 'Сопоставить транзакции с командами (Notion)'}
+        </button>
+        <button
+          type="button"
+          onClick={() => notionImportMut.mutate()}
+          disabled={notionImportMut.isPending}
+          className="text-sm px-4 py-2 rounded-lg bg-indigo-600 hover:bg-indigo-500 border border-indigo-500 text-white disabled:opacity-50"
+        >
+          {notionImportMut.isPending ? 'Загрузка из Notion…' : 'Загрузить транзакции из Notion в базу'}
+        </button>
+      </div>
       {notionImportMut.isSuccess && notionImportMut.data && (
         <p className="text-xs text-emerald-400">{notionImportMut.data.message}</p>
       )}
@@ -206,28 +214,100 @@ function TeamsSection() {
           {reconcileMut.data.assigned_rows}
         </p>
       )}
+
       {isLoading ? (
         <Skeleton className="h-16 w-full" />
       ) : (
         <ul className="space-y-2">
-          {teams?.map((t) => (
-            <li
-              key={t.id}
-              className="flex flex-wrap items-center justify-between gap-2 text-sm bg-slate-700/30 rounded-lg px-3 py-2"
-            >
-              <span className="font-medium text-slate-200">{t.name}</span>
-              <span className="text-xs text-slate-500">
-                {t.inherit_economics
-                  ? 'экономика как в настройках'
-                  : `чаттер ≤${t.chatter_max_pct ?? '—'}%, админы ${t.admin_percent_total ?? '—'}%`}
-              </span>
-              {t.notion_database_id && (
-                <code className="text-[10px] text-slate-500 truncate max-w-full">{t.notion_database_id}</code>
-              )}
-            </li>
-          ))}
+          {teams?.map((t, idx) => {
+            const isDefault = t.id === defaultTeamId
+            const isEditing = editingId === t.id
+            const isDeleting = deletingId === t.id
+            return (
+              <li
+                key={t.id}
+                className="flex flex-wrap items-center gap-2 text-sm bg-slate-700/30 rounded-lg px-3 py-2"
+              >
+                {isEditing ? (
+                  <>
+                    <input
+                      autoFocus
+                      value={editingName}
+                      onChange={(e) => setEditingName(e.target.value)}
+                      onKeyDown={(e) => {
+                        if (e.key === 'Enter') renameMut.mutate({ id: t.id, newName: editingName })
+                        if (e.key === 'Escape') setEditingId(null)
+                      }}
+                      className="flex-1 min-w-0 bg-slate-700 border border-indigo-500 rounded px-2 py-0.5 text-sm text-slate-200 focus:outline-none"
+                    />
+                    <button
+                      onClick={() => renameMut.mutate({ id: t.id, newName: editingName })}
+                      disabled={renameMut.isPending || !editingName.trim()}
+                      className="p-1 text-emerald-400 hover:text-emerald-300 disabled:opacity-50"
+                      title="Сохранить"
+                    >
+                      <Check className="h-4 w-4" />
+                    </button>
+                    <button
+                      onClick={() => setEditingId(null)}
+                      className="p-1 text-slate-500 hover:text-slate-300"
+                      title="Отмена"
+                    >
+                      <X className="h-4 w-4" />
+                    </button>
+                  </>
+                ) : isDeleting ? (
+                  <>
+                    <span className="flex-1 text-rose-300 text-xs">Удалить «{t.name}»? Транзакции перейдут в основную.</span>
+                    <button
+                      onClick={() => deleteMut.mutate(t.id)}
+                      disabled={deleteMut.isPending}
+                      className="text-xs px-2 py-1 rounded bg-rose-600 hover:bg-rose-500 text-white disabled:opacity-50"
+                    >
+                      {deleteMut.isPending ? '…' : 'Да, удалить'}
+                    </button>
+                    <button
+                      onClick={() => setDeletingId(null)}
+                      className="text-xs px-2 py-1 rounded bg-slate-600 hover:bg-slate-500 text-slate-200"
+                    >
+                      Отмена
+                    </button>
+                  </>
+                ) : (
+                  <>
+                    <span className="flex-1 font-medium text-slate-200">{t.name}</span>
+                    <span className="text-xs text-slate-500">
+                      {t.inherit_economics
+                        ? 'экономика как в настройках'
+                        : `чаттер ≤${t.chatter_max_pct ?? '—'}%, админы ${t.admin_percent_total ?? '—'}%`}
+                    </span>
+                    {t.notion_database_id && (
+                      <code className="text-[10px] text-slate-500 truncate max-w-full">{t.notion_database_id}</code>
+                    )}
+                    <button
+                      onClick={() => { setEditingId(t.id); setEditingName(t.name) }}
+                      className="ml-auto p-1 text-slate-500 hover:text-slate-300"
+                      title="Переименовать"
+                    >
+                      <Pencil className="h-3.5 w-3.5" />
+                    </button>
+                    {!isDefault && (
+                      <button
+                        onClick={() => setDeletingId(t.id)}
+                        className="p-1 text-slate-500 hover:text-rose-400"
+                        title="Удалить команду"
+                      >
+                        <Trash2 className="h-3.5 w-3.5" />
+                      </button>
+                    )}
+                  </>
+                )}
+              </li>
+            )
+          })}
         </ul>
       )}
+
       {teams && teams.length >= 1 && (
         <div className="border-t border-slate-700/50 pt-4 space-y-3">
           <p className="text-xs text-slate-400">Добавить команду с отдельной экономикой</p>

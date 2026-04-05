@@ -2,11 +2,11 @@ import logging
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, and_
+from sqlalchemy import select, and_, update
 
 from database import get_db
 from dependencies import get_current_tenant
-from models import Tenant, Team
+from models import Tenant, Team, Transaction
 from schemas import TeamOut, TeamCreate, TeamUpdate
 from team_helpers import list_teams, ensure_default_team, normalize_notion_db_id, team_inherits_global_economics
 from team_bootstrap import assign_transactions_by_notion_database, backfill_notion_database_id_from_notion_api
@@ -92,6 +92,38 @@ async def update_team(
     await db.commit()
     await db.refresh(t)
     return _to_out(t)
+
+
+@router.delete("/teams/{team_id}", status_code=204)
+async def delete_team(
+    team_id: int,
+    tenant: Tenant = Depends(get_current_tenant),
+    db: AsyncSession = Depends(get_db),
+):
+    teams = await list_teams(db, tenant.id)
+    if not teams:
+        raise HTTPException(status_code=404, detail="Команда не найдена")
+
+    # Первая команда (основная) — нельзя удалять
+    if teams[0].id == team_id:
+        raise HTTPException(status_code=400, detail="Основную команду удалить нельзя")
+
+    r = await db.execute(
+        select(Team).where(and_(Team.id == team_id, Team.tenant_id == tenant.id))
+    )
+    t = r.scalar_one_or_none()
+    if t is None:
+        raise HTTPException(status_code=404, detail="Команда не найдена")
+
+    # Открепить транзакции этой команды (team_id → NULL)
+    await db.execute(
+        update(Transaction)
+        .where(Transaction.tenant_id == tenant.id, Transaction.team_id == team_id)
+        .values(team_id=None)
+    )
+    await db.delete(t)
+    await db.commit()
+    logger.info("team deleted id=%d tenant=%d", team_id, tenant.id)
 
 
 class TeamReconcileOut(BaseModel):
