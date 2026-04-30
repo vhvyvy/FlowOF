@@ -1,0 +1,23 @@
+name: API sync run-all
+
+on:
+  schedule:
+    - cron: "15 5 * * *"
+  workflow_dispatch:
+
+jobs:
+  trigger:
+    runs-on: ubuntu-latest
+    steps:
+      - name: POST /api/v1/sync/run-all
+        env:
+          SYNC_CRON_SECRET: ${{ secrets.SYNC_CRON_SECRET }}
+          API_BASE_URL: ${{ secrets.API_BASE_URL }}
+        run: |
+          if [ -z "${API_BASE_URL}" ] || [ -z "${SYNC_CRON_SECRET}" ]; then
+            echo "Set repository secrets: API_BASE_URL (e.g. https://api.example.com), SYNC_CRON_SECRET"
+            exit 1
+          fi
+          BASE="${API_BASE_URL%/}"
+          curl -sfS -X POST "${BASE}/api/v1/sync/run-all" \
+            -H "X-Sync-Secret: ${SYNC_CRON_SECRET}"

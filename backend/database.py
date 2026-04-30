@@ -27,13 +27,32 @@ DATABASE_URL: str = _raw_url
 if not DATABASE_URL:
     logger.warning("DATABASE_URL is not set — database calls will fail at runtime")
 
+
+def _asyncpg_connect_args(url: str) -> dict:
+    """
+    Neon/Railway обычно требуют TLS; локальный Postgres чаще без SSL.
+    Принудительно: DATABASE_SSL=1 | require | 0 | off
+    """
+    if not url or "placeholder" in url:
+        return {}
+    explicit = os.getenv("DATABASE_SSL", "").strip().lower()
+    if explicit in ("1", "true", "yes", "require", "on"):
+        return {"ssl": "require"}
+    if explicit in ("0", "false", "no", "off"):
+        return {}
+    u = url.lower()
+    if "localhost" in u or "127.0.0.1" in u:
+        return {}
+    return {"ssl": "require"}
+
+
 engine = create_async_engine(
     DATABASE_URL or "postgresql+asyncpg://placeholder/placeholder",
     echo=False,
     pool_size=5,
     max_overflow=10,
     pool_pre_ping=True,
-    connect_args={"ssl": "require"} if DATABASE_URL else {},
+    connect_args=_asyncpg_connect_args(DATABASE_URL),
 )
 
 AsyncSessionLocal = async_sessionmaker(

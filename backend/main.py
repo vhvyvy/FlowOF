@@ -60,7 +60,25 @@ app.add_middleware(
 
 # ── Routers ───────────────────────────────────────────────────────────────────
 
-from routers import auth, overview, finance, chatters, events, plans, kpi, ai, admin, settings, structure, shifts, teams, sync, onboarding  # noqa: E402
+from routers import (  # noqa: E402
+    auth,
+    overview,
+    finance,
+    chatters,
+    events,
+    plans,
+    kpi,
+    ai,
+    admin,
+    settings,
+    structure,
+    shifts,
+    teams,
+    sync,
+    onboarding,
+    import_data,
+    sheets_stub,
+)
 from database import engine, Base, AsyncSessionLocal  # noqa: E402
 
 app.include_router(auth.router)
@@ -78,6 +96,8 @@ app.include_router(shifts.router)
 app.include_router(teams.router)
 app.include_router(sync.router)
 app.include_router(onboarding.router)
+app.include_router(import_data.router)
+app.include_router(sheets_stub.router)
 
 
 # ── Startup: create missing tables ───────────────────────────────────────────
@@ -116,6 +136,23 @@ async def _create_tables():
                 await assign_transactions_by_notion_database(db)
     except Exception as exc:
         logger.warning("startup teams/bootstrap warning (non-fatal): %s", exc, exc_info=True)
+
+    try:
+        from scheduler import setup_scheduler
+
+        setup_scheduler()
+    except Exception as exc:
+        logger.warning("scheduler setup (non-fatal): %s", exc)
+
+
+@app.on_event("shutdown")
+async def _shutdown_scheduler():
+    try:
+        from scheduler import shutdown_scheduler
+
+        shutdown_scheduler()
+    except Exception:
+        pass
 
 
 # ── Health ────────────────────────────────────────────────────────────────────

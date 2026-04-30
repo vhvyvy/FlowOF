@@ -1,4 +1,4 @@
-import axios from 'axios'
+import axios, { type AxiosError } from 'axios'
 
 /** Call per request — avoids server bundle pinning baseURL to localhost before hydration. */
 export function resolveApiBaseURL(): string {
@@ -43,3 +43,28 @@ api.interceptors.response.use(
 )
 
 export default api
+
+/** Сообщение для UI из ответа FastAPI (detail: string | ValidationError[]) или сетевой ошибки. */
+export function formatApiError(err: unknown): string {
+  const ax = err as AxiosError<{ detail?: unknown }>
+  const d = ax.response?.data?.detail
+  if (typeof d === 'string') return d
+  if (Array.isArray(d) && d.length > 0) {
+    const first = d[0] as { msg?: string }
+    if (typeof first?.msg === 'string') return first.msg
+  }
+  const code = ax.code
+  const msg = ax.message
+  if (!ax.response && (code === 'ERR_NETWORK' || msg === 'Network Error')) {
+    const base = typeof window !== 'undefined' ? resolveApiBaseURL() : ''
+    if (!base && typeof window !== 'undefined') {
+      const h = window.location.hostname
+      if (h !== 'localhost' && h !== '127.0.0.1') {
+        return 'Не задан NEXT_PUBLIC_API_URL на фронте — укажите URL бэкенда в переменных окружения.'
+      }
+    }
+    return 'Нет связи с API. Запустите бэкенд (локально: http://localhost:8000) или проверьте NEXT_PUBLIC_API_URL.'
+  }
+  if (typeof msg === 'string' && msg) return msg
+  return 'Не удалось выполнить запрос.'
+}

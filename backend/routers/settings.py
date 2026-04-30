@@ -7,6 +7,7 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from database import get_db
 from dependencies import get_current_tenant
 from models import Tenant, AppSetting
+from services.notion_unify import mirror_notion_credentials_to_tenant_source
 from pydantic import BaseModel
 from typing import Optional
 from schemas import SettingUpsert, SettingsResponse
@@ -78,6 +79,7 @@ async def update_profile(
             t.onlymonster_account_ids = body.onlymonster_account_ids.strip() or None
         if body.notion_token is not None:
             t.notion_token = body.notion_token.strip() or None
+        await mirror_notion_credentials_to_tenant_source(db, t)
         await db.commit()
         await db.refresh(t)
         key = t.onlymonster_key or ""

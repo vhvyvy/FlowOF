@@ -119,6 +119,7 @@ export interface TeamOut {
   name: string
   sort_order: number
   notion_database_id: string | null
+  color_key: string | null
   inherit_economics: boolean
   chatter_max_pct: number | null
   default_chatter_pct: number | null

@@ -3,6 +3,7 @@
 import { useState } from 'react'
 import { useRouter } from 'next/navigation'
 import Link from 'next/link'
+import { formatApiError } from '@/lib/api'
 import { register } from '@/lib/auth'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
@@ -24,10 +25,7 @@ export default function RegisterPage() {
       await register({ email: email.trim(), password, agency_name: agencyName.trim() })
       router.replace('/onboarding')
     } catch (err: unknown) {
-      const msg =
-        (err as { response?: { data?: { detail?: string } } })?.response?.data?.detail ??
-        'Не удалось создать аккаунт.'
-      setError(typeof msg === 'string' ? msg : 'Ошибка регистрации')
+      setError(formatApiError(err))
     } finally {
       setLoading(false)
     }

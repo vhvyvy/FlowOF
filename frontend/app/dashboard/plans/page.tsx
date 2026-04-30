@@ -2,7 +2,7 @@
 
 import { useState, useEffect } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
-import api from '@/lib/api'
+import api, { formatApiError } from '@/lib/api'
 import { useMonthStore } from '@/lib/hooks/useMonth'
 import { Header } from '@/components/layout/Header'
 import { Skeleton } from '@/components/ui/skeleton'
@@ -80,6 +80,7 @@ export default function PlansPage() {
   const [saved, setSaved] = useState(false)
   const [saving, setSaving] = useState(false)
   const [saveError, setSaveError] = useState(false)
+  const [saveErrorText, setSaveErrorText] = useState('')
 
   const { data, isLoading, error } = useQuery<PlansResponse>({
     queryKey: ['plans', month, year],
@@ -95,6 +96,7 @@ export default function PlansPage() {
   const handleSave = async () => {
     setSaving(true)
     setSaveError(false)
+    setSaveErrorText('')
     try {
       const promises = Object.entries(edits).map(([model, plan_amount]) =>
         api.put(`/api/v1/plans/${year}/${month}`, { model, plan_amount })
@@ -105,8 +107,9 @@ export default function PlansPage() {
       setEdits({})
       setSaved(true)
       setTimeout(() => setSaved(false), 3000)
-    } catch {
+    } catch (e: unknown) {
       setSaveError(true)
+      setSaveErrorText(formatApiError(e))
     } finally {
       setSaving(false)
     }
@@ -275,7 +278,7 @@ export default function PlansPage() {
           )}
           {saveError && (
             <span className="flex items-center gap-1.5 text-red-400 text-sm">
-              <AlertCircle className="h-4 w-4" /> Ошибка сохранения
+              <AlertCircle className="h-4 w-4" /> {saveErrorText || 'Ошибка сохранения'}
             </span>
           )}
         </div>

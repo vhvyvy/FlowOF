@@ -70,7 +70,7 @@ async def register(body: RegisterRequest, db: AsyncSession = Depends(get_db)):
         active=True,
     )
     db.add(tenant)
-    await db.commit()
+    await db.flush()
     await db.refresh(tenant)
 
     token = create_access_token(tenant.id, tenant.email)

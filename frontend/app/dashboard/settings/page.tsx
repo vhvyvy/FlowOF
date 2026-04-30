@@ -3,6 +3,7 @@
 import { useState, useEffect } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import api from '@/lib/api'
+import { TEAM_COLOR_OPTIONS, teamColor } from '@/lib/teamColors'
 import { Header } from '@/components/layout/Header'
 import { Skeleton } from '@/components/ui/skeleton'
 import { Save, RefreshCw, AlertCircle, CheckCircle2, Key, Eye, EyeOff, Users, Pencil, Trash2, Check, X } from 'lucide-react'
@@ -106,6 +107,13 @@ function TeamsSection() {
   const [editingId, setEditingId] = useState<number | null>(null)
   const [editingName, setEditingName] = useState('')
   const [deletingId, setDeletingId] = useState<number | null>(null)
+  const [teamDrafts, setTeamDrafts] = useState<Record<number, {
+    color_key: string | null
+    chatter_max_pct: number | null
+    default_chatter_pct: number | null
+    admin_percent_total: number | null
+    inherit_economics: boolean
+  }>>({})
 
   const { data: teams, isLoading } = useQuery({
     queryKey: ['teams'],
@@ -136,6 +144,18 @@ function TeamsSection() {
     mutationFn: ({ id, newName }: { id: number; newName: string }) =>
       api.patch(`/api/v1/teams/${id}`, { name: newName }),
     onSuccess: () => { setEditingId(null); invalidate() },
+  })
+
+  const updateEcoMut = useMutation({
+    mutationFn: (payload: {
+      id: number
+      color_key: string | null
+      chatter_max_pct: number | null
+      default_chatter_pct: number | null
+      admin_percent_total: number | null
+      inherit_economics: boolean
+    }) => api.patch(`/api/v1/teams/${payload.id}`, payload),
+    onSuccess: invalidate,
   })
 
   const deleteMut = useMutation({
@@ -169,6 +189,22 @@ function TeamsSection() {
   })
 
   const defaultTeamId = teams?.[0]?.id
+
+  useEffect(() => {
+    if (!teams) return
+    const next: typeof teamDrafts = {}
+    for (const t of teams) {
+      next[t.id] = {
+        color_key: t.color_key ?? null,
+        chatter_max_pct: t.chatter_max_pct ?? null,
+        default_chatter_pct: t.default_chatter_pct ?? null,
+        admin_percent_total: t.admin_percent_total ?? null,
+        inherit_economics: t.inherit_economics,
+      }
+    }
+    setTeamDrafts(next)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [teams])
 
   return (
     <div className="bg-slate-800/60 border border-slate-700/50 rounded-xl px-5 py-5 space-y-4">
@@ -219,14 +255,22 @@ function TeamsSection() {
         <Skeleton className="h-16 w-full" />
       ) : (
         <ul className="space-y-2">
-          {teams?.map((t, idx) => {
+          {teams?.map((t) => {
             const isDefault = t.id === defaultTeamId
             const isEditing = editingId === t.id
             const isDeleting = deletingId === t.id
+            const d = teamDrafts[t.id] ?? {
+              color_key: t.color_key ?? null,
+              chatter_max_pct: t.chatter_max_pct ?? null,
+              default_chatter_pct: t.default_chatter_pct ?? null,
+              admin_percent_total: t.admin_percent_total ?? null,
+              inherit_economics: t.inherit_economics,
+            }
+            const c = teamColor(t.id, d.color_key)
             return (
               <li
                 key={t.id}
-                className="flex flex-wrap items-center gap-2 text-sm bg-slate-700/30 rounded-lg px-3 py-2"
+                className={`flex flex-wrap items-center gap-2 text-sm rounded-lg px-3 py-2 border ${c.bg} ${c.border}`}
               >
                 {isEditing ? (
                   <>
@@ -300,6 +344,111 @@ function TeamsSection() {
                         <Trash2 className="h-3.5 w-3.5" />
                       </button>
                     )}
+                    <div className="w-full grid grid-cols-1 md:grid-cols-5 gap-2 mt-2">
+                      <label className="text-[11px] text-slate-500">
+                        Цвет
+                        <select
+                          className="mt-1 w-full bg-slate-700 border border-slate-600 rounded px-2 py-1 text-xs text-slate-200"
+                          value={d.color_key ?? ''}
+                          onChange={(e) =>
+                            setTeamDrafts((prev) => ({
+                              ...prev,
+                              [t.id]: { ...d, color_key: e.target.value || null },
+                            }))
+                          }
+                        >
+                          <option value="">Авто</option>
+                          {TEAM_COLOR_OPTIONS.map((opt) => (
+                            <option key={opt.key} value={opt.key}>
+                              {opt.key}
+                            </option>
+                          ))}
+                        </select>
+                      </label>
+                      <label className="text-[11px] text-slate-500">
+                        Макс чаттер %
+                        <input
+                          type="number"
+                          value={d.chatter_max_pct ?? ''}
+                          onChange={(e) =>
+                            setTeamDrafts((prev) => ({
+                              ...prev,
+                              [t.id]: {
+                                ...d,
+                                chatter_max_pct: e.target.value === '' ? null : Number(e.target.value),
+                              },
+                            }))
+                          }
+                          className="mt-1 w-full bg-slate-700 border border-slate-600 rounded px-2 py-1 text-xs text-slate-200"
+                        />
+                      </label>
+                      <label className="text-[11px] text-slate-500">
+                        Дефолт чаттер %
+                        <input
+                          type="number"
+                          value={d.default_chatter_pct ?? ''}
+                          onChange={(e) =>
+                            setTeamDrafts((prev) => ({
+                              ...prev,
+                              [t.id]: {
+                                ...d,
+                                default_chatter_pct: e.target.value === '' ? null : Number(e.target.value),
+                              },
+                            }))
+                          }
+                          className="mt-1 w-full bg-slate-700 border border-slate-600 rounded px-2 py-1 text-xs text-slate-200"
+                        />
+                      </label>
+                      <label className="text-[11px] text-slate-500">
+                        Админы %
+                        <input
+                          type="number"
+                          value={d.admin_percent_total ?? ''}
+                          onChange={(e) =>
+                            setTeamDrafts((prev) => ({
+                              ...prev,
+                              [t.id]: {
+                                ...d,
+                                admin_percent_total: e.target.value === '' ? null : Number(e.target.value),
+                              },
+                            }))
+                          }
+                          className="mt-1 w-full bg-slate-700 border border-slate-600 rounded px-2 py-1 text-xs text-slate-200"
+                        />
+                      </label>
+                      <div className="flex items-end gap-2">
+                        <button
+                          type="button"
+                          onClick={() =>
+                            updateEcoMut.mutate({
+                              id: t.id,
+                              color_key: d.color_key,
+                              chatter_max_pct: d.chatter_max_pct,
+                              default_chatter_pct: d.default_chatter_pct,
+                              admin_percent_total: d.admin_percent_total,
+                              inherit_economics: d.inherit_economics,
+                            })
+                          }
+                          disabled={updateEcoMut.isPending}
+                          className="text-xs px-2 py-1 rounded bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 text-white"
+                        >
+                          {updateEcoMut.isPending ? '…' : 'Сохранить'}
+                        </button>
+                        <label className="text-[11px] text-slate-500 flex items-center gap-1">
+                          <input
+                            type="checkbox"
+                            checked={d.inherit_economics}
+                            onChange={(e) =>
+                              setTeamDrafts((prev) => ({
+                                ...prev,
+                                [t.id]: { ...d, inherit_economics: e.target.checked },
+                              }))
+                            }
+                          />
+                          Наследовать
+                        </label>
+                      </div>
+                    </div>
                   </>
                 )}
               </li>

@@ -14,10 +14,10 @@ from typing import Any
 from urllib.parse import quote
 
 import httpx
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from models import Team, Transaction
+from models import SyncLog, Team, Tenant, Transaction
 from team_bootstrap import assign_transactions_by_notion_database
 from team_helpers import list_teams, normalize_notion_db_id
 
@@ -522,6 +522,18 @@ async def sync_notion_transactions_for_tenant(
             "или notion_database_id у команд в /api/v1/teams"
         )
 
+    sync_started = datetime.utcnow()
+    sync_log = SyncLog(
+        tenant_id=tenant_id,
+        source_type="notion",
+        started_at=sync_started,
+        status="running",
+        rows_imported=0,
+        rows_skipped=0,
+    )
+    db.add(sync_log)
+    await db.flush()
+
     headers = {
         "Authorization": f"Bearer {token}",
         "Notion-Version": NOTION_VERSION,
@@ -607,6 +619,15 @@ async def sync_notion_transactions_for_tenant(
                     )
                     inserted += 1
             await asyncio.sleep(0.2)
+
+    fin = datetime.utcnow()
+    sync_log.finished_at = fin
+    sync_log.status = "success"
+    sync_log.rows_imported = inserted + updated
+    sync_log.rows_skipped = skipped
+    await db.execute(
+        update(Tenant).where(Tenant.id == tenant_id).values(last_sync_at=fin)
+    )
 
     await db.commit()
     n = await assign_transactions_by_notion_database(db)

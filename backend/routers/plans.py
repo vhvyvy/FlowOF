@@ -4,8 +4,7 @@ from datetime import date
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, func, and_
-from sqlalchemy.dialects.postgresql import insert as pg_insert
+from sqlalchemy import select, func, and_, update
 
 from database import get_db
 from dependencies import get_current_tenant
@@ -97,22 +96,30 @@ async def upsert_plan(
     db: AsyncSession = Depends(get_db),
 ):
     try:
-        stmt = (
-            pg_insert(Plan)
-            .values(
-                tenant_id=tenant.id,
-                year=year,
-                month=month,
-                model=body.model.strip(),
-                plan_amount=body.plan_amount,
+        model_name = body.model.strip()
+        upd = (
+            update(Plan)
+            .where(
+                and_(
+                    Plan.tenant_id == tenant.id,
+                    Plan.year == year,
+                    Plan.month == month,
+                    Plan.model == model_name,
+                )
             )
-            .on_conflict_do_update(
-                index_elements=["tenant_id", "year", "month", "model"],
-                set_={"plan_amount": body.plan_amount},
-            )
+            .values(plan_amount=body.plan_amount)
         )
-        await db.execute(stmt)
-        await db.commit()
+        res = await db.execute(upd)
+        if (res.rowcount or 0) == 0:
+            db.add(
+                Plan(
+                    tenant_id=tenant.id,
+                    year=year,
+                    month=month,
+                    model=model_name,
+                    plan_amount=body.plan_amount,
+                )
+            )
     except Exception as e:
         logger.error("plans upsert error tenant=%d: %s", tenant.id, e)
         raise HTTPException(status_code=500, detail="Ошибка сохранения плана")

@@ -99,6 +99,7 @@ class TeamOut(BaseModel):
     name: str
     sort_order: int
     notion_database_id: Optional[str] = None
+    color_key: Optional[str] = None
     inherit_economics: bool
     chatter_max_pct: Optional[float] = None
     default_chatter_pct: Optional[float] = None
@@ -109,6 +110,7 @@ class TeamCreate(BaseModel):
     name: str
     sort_order: int = 1
     notion_database_id: Optional[str] = None
+    color_key: Optional[str] = None
     inherit_economics: bool = False
     chatter_max_pct: Optional[float] = None
     default_chatter_pct: Optional[float] = None
@@ -119,6 +121,7 @@ class TeamUpdate(BaseModel):
     name: Optional[str] = None
     sort_order: Optional[int] = None
     notion_database_id: Optional[str] = None
+    color_key: Optional[str] = None
     inherit_economics: Optional[bool] = None
     chatter_max_pct: Optional[float] = None
     default_chatter_pct: Optional[float] = None

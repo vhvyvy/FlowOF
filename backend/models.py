@@ -90,6 +90,8 @@ class Team(Base):
     sort_order = Column(Integer, default=0)
     # Notion database ID for this team's transactions (no hyphens or with — normalized in API)
     notion_database_id = Column(String(64), nullable=True)
+    # Optional UI color key for team highlighting in shared dashboards/charts
+    color_key = Column(String(32), nullable=True)
     # If True, use global app_settings for chatter tiers and admin % (applied to this team's revenue)
     inherit_economics = Column(Boolean, default=True)
     # When inherit_economics is False: cap chatter tier at this % (e.g. 22)

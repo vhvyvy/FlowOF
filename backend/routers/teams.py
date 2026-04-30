@@ -21,6 +21,7 @@ def _to_out(t: Team) -> TeamOut:
         name=t.name,
         sort_order=t.sort_order or 0,
         notion_database_id=t.notion_database_id,
+        color_key=t.color_key,
         inherit_economics=team_inherits_global_economics(t),
         chatter_max_pct=float(t.chatter_max_pct) if t.chatter_max_pct is not None else None,
         default_chatter_pct=float(t.default_chatter_pct) if t.default_chatter_pct is not None else None,
@@ -50,6 +51,7 @@ async def create_team(
         name=body.name.strip(),
         sort_order=body.sort_order,
         notion_database_id=normalize_notion_db_id(body.notion_database_id),
+        color_key=(body.color_key or "").strip() or None,
         inherit_economics=body.inherit_economics,
         chatter_max_pct=body.chatter_max_pct,
         default_chatter_pct=body.default_chatter_pct,
@@ -81,6 +83,8 @@ async def update_team(
         t.sort_order = body.sort_order
     if body.notion_database_id is not None:
         t.notion_database_id = normalize_notion_db_id(body.notion_database_id)
+    if body.color_key is not None:
+        t.color_key = body.color_key.strip() or None
     if body.inherit_economics is not None:
         t.inherit_economics = body.inherit_economics
     if body.chatter_max_pct is not None:
