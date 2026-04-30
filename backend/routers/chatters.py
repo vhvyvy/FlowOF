@@ -51,11 +51,17 @@ async def get_chatters(
             if selected_team is None:
                 raise HTTPException(status_code=404, detail="Команда не найдена")
 
-        tier_cap: float | None = None
-        default_frac: float | None = None
-        if selected_team is not None and not team_inherits_global_economics(selected_team):
-            tier_cap = float(selected_team.chatter_max_pct) / 100 if selected_team.chatter_max_pct else None
-            default_frac = float(selected_team.default_chatter_pct) / 100 if selected_team.default_chatter_pct else tier_cap
+        team_map = {t.id: t for t in teams}
+
+        def _team_tier_cfg(tid: int | None) -> tuple[float | None, float | None]:
+            if tid is None:
+                return None, None
+            t = team_map.get(tid)
+            if t is None or team_inherits_global_economics(t):
+                return None, None
+            cap = float(t.chatter_max_pct) / 100 if t.chatter_max_pct else None
+            dfrac = float(t.default_chatter_pct) / 100 if t.default_chatter_pct else cap
+            return cap, dfrac
 
         # Plans for this period
         # Fetch use_retention setting
@@ -88,17 +94,44 @@ async def get_chatters(
             if tc is not None:
                 mcond.append(tc)
 
-        model_rev_result = await db.execute(
-            select(Transaction.model, func.sum(Transaction.amount).label("rev"))
-            .where(and_(*mcond))
-            .group_by(Transaction.model)
-        )
-        model_revenue = {r.model: float(r.rev or 0) for r in model_rev_result.all()}
+        if selected_team is not None:
+            model_rev_result = await db.execute(
+                select(
+                    Transaction.model,
+                    Transaction.team_id,
+                    func.sum(Transaction.amount).label("rev"),
+                )
+                .where(and_(*mcond))
+                .group_by(Transaction.model, Transaction.team_id)
+            )
+            model_revenue_team = {
+                (r.team_id, r.model): float(r.rev or 0) for r in model_rev_result.all()
+            }
+            model_revenue = {}
+            for (_, model), rev in model_revenue_team.items():
+                model_revenue[model] = model_revenue.get(model, 0.0) + rev
+        else:
+            model_rev_result = await db.execute(
+                select(
+                    Transaction.model,
+                    Transaction.team_id,
+                    func.sum(Transaction.amount).label("rev"),
+                )
+                .where(and_(*mcond))
+                .group_by(Transaction.model, Transaction.team_id)
+            )
+            model_revenue_team = {
+                (r.team_id, r.model): float(r.rev or 0) for r in model_rev_result.all()
+            }
+            model_revenue = {}
+            for (_, model), rev in model_revenue_team.items():
+                model_revenue[model] = model_revenue.get(model, 0.0) + rev
 
-        model_tier: dict[str, float] = {}
-        for model, rev in model_revenue.items():
+        model_tier: dict[tuple[int | None, str], float] = {}
+        for (tid, model), rev in model_revenue_team.items():
             plan_amt = plan_rows.get(model, 0.0)
-            model_tier[model] = _tier_for_model(rev, plan_amt, tier_cap, default_frac)
+            cap, dfrac = _team_tier_cfg(tid)
+            model_tier[(tid, model)] = _tier_for_model(rev, plan_amt, cap, dfrac)
 
         cm_cond = [
             Transaction.tenant_id == tenant.id,
@@ -115,11 +148,12 @@ async def get_chatters(
             select(
                 Transaction.chatter,
                 Transaction.model,
+                Transaction.team_id,
                 func.sum(Transaction.amount).label("revenue"),
                 func.count(Transaction.id).label("txn_count"),
             )
             .where(and_(*cm_cond))
-            .group_by(Transaction.chatter, Transaction.model)
+            .group_by(Transaction.chatter, Transaction.model, Transaction.team_id)
         )
         chatter_model_rows = chatter_model_result.all()
 
@@ -128,10 +162,12 @@ async def get_chatters(
         # Hard floor: no model tier can be below 20%
         chatter_data: dict[str, dict] = {}
         for r in chatter_model_rows:
+            tid = r.team_id if r.team_id is not None else default_team_id
+            team_name = (team_map.get(tid).name if team_map.get(tid) else "Основная команда")
             name = r.chatter or "Unknown"
             rev = float(r.revenue or 0)
             txns = int(r.txn_count or 0)
-            tier = model_tier.get(r.model, DEFAULT_TIER)
+            tier = model_tier.get((tid, r.model), DEFAULT_TIER)
             cut = rev * tier
             plan_amt = plan_rows.get(r.model, 0.0)
             plan_comp = (model_revenue.get(r.model, 0) / plan_amt * 100) if plan_amt > 0 else 0.0
@@ -151,7 +187,14 @@ async def get_chatters(
             )
 
             if name not in chatter_data:
-                chatter_data[name] = {"revenue": 0.0, "txn_count": 0, "chatter_cut": 0.0, "models": []}
+                chatter_data[name] = {
+                    "revenue": 0.0,
+                    "txn_count": 0,
+                    "chatter_cut": 0.0,
+                    "models": [],
+                    "team_id": tid,
+                    "team_name": team_name,
+                }
             chatter_data[name]["revenue"] += rev
             chatter_data[name]["txn_count"] += txns
             chatter_data[name]["chatter_cut"] += net_cut  # net after retention
@@ -189,6 +232,8 @@ async def get_chatters(
             rows.append(
                 ChatterRow(
                     name=name,
+                    team_id=d.get("team_id"),
+                    team_name=d.get("team_name"),
                     revenue=round(rev, 2),
                     transactions=txns,
                     rpc=rpc,

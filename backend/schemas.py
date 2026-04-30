@@ -187,6 +187,8 @@ class ChatterModelBreakdown(BaseModel):
 
 class ChatterRow(BaseModel):
     name: str
+    team_id: Optional[int] = None
+    team_name: Optional[str] = None
     revenue: float
     transactions: int
     rpc: float

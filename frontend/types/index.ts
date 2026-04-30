@@ -143,6 +143,8 @@ export interface ChatterModelBreakdown {
 
 export interface ChatterRow {
   name: string
+  team_id?: number | null
+  team_name?: string | null
   revenue: number
   transactions: number
   rpc: number

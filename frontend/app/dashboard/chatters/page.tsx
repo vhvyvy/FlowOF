@@ -165,7 +165,7 @@ export default function ChattersPage() {
   const tier        = tierStyle(completion >= 100 ? 25 : completion >= 90 ? 24 : completion >= 80 ? 23 : completion >= 70 ? 22 : completion >= 60 ? 21 : 20)
 
   const activeChatter = openPopover
-    ? data?.chatters.find((c) => c.name === openPopover) ?? null
+    ? data?.chatters.find((c) => `${c.name}::${c.team_id ?? 0}` === openPopover) ?? null
     : null
 
   return (
@@ -223,6 +223,9 @@ export default function ChattersPage() {
                 <thead>
                   <tr className="border-b border-slate-700/50 bg-slate-700/20">
                     <th className="text-left px-5 py-3 text-xs font-semibold text-slate-400 uppercase tracking-wide">Чаттер</th>
+                    {teamId === 'all' && (
+                      <th className="text-left px-5 py-3 text-xs font-semibold text-slate-400 uppercase tracking-wide">Команда</th>
+                    )}
                     <th className="text-right px-5 py-3 text-xs font-semibold text-slate-400 uppercase tracking-wide">Выручка</th>
                     <th className="text-right px-5 py-3 text-xs font-semibold text-slate-400 uppercase tracking-wide">Транзакции</th>
                     <th className="text-right px-5 py-3 text-xs font-semibold text-slate-400 uppercase tracking-wide">RPC</th>
@@ -233,21 +236,25 @@ export default function ChattersPage() {
                 </thead>
                 <tbody className="divide-y divide-slate-700/30">
                   {data.chatters.map((chatter) => {
+                    const rowKey = `${chatter.name}::${chatter.team_id ?? 0}`
                     const status = STATUS_BADGE[chatter.status]
                     const ts = tierStyle(chatter.chatter_pct)
-                    const isOpen = openPopover === chatter.name
+                    const isOpen = openPopover === rowKey
                     return (
-                      <tr key={chatter.name} className="hover:bg-slate-700/20 transition-colors">
+                      <tr key={rowKey} className="hover:bg-slate-700/20 transition-colors">
                         <td className="px-5 py-3 text-sm font-medium text-slate-200">{chatter.name}</td>
+                        {teamId === 'all' && (
+                          <td className="px-5 py-3 text-sm text-slate-400">{chatter.team_name ?? '—'}</td>
+                        )}
                         <td className="px-5 py-3 text-sm text-slate-300 text-right">{formatCurrency(chatter.revenue)}</td>
                         <td className="px-5 py-3 text-sm text-slate-300 text-right">{chatter.transactions}</td>
                         <td className="px-5 py-3 text-sm text-slate-300 text-right">${chatter.rpc}</td>
                         <td className="px-5 py-3 text-right">
                           <button
-                            ref={(el) => { btnRefs.current[chatter.name] = el }}
+                            ref={(el) => { btnRefs.current[rowKey] = el }}
                             onClick={(e) => {
                               anchorRef.current = e.currentTarget
-                              setOpenPopover(isOpen ? null : chatter.name)
+                              setOpenPopover(isOpen ? null : rowKey)
                             }}
                             className={`inline-flex items-center gap-1 text-sm font-bold px-2 py-0.5 rounded-lg border transition-all cursor-pointer hover:brightness-125 active:scale-95 ${ts.bg} ${ts.color} ${isOpen ? 'ring-1 ring-offset-1 ring-offset-slate-800 ring-current' : ''}`}
                           >
