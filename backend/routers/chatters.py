@@ -104,9 +104,9 @@ async def get_chatters(
                 .where(and_(*mcond))
                 .group_by(Transaction.model, Transaction.team_id)
             )
-            model_revenue_team: dict[tuple[int | None, str], float] = {}
+            model_revenue_team: dict[tuple[int, str], float] = {}
             for r in model_rev_result.all():
-                tid = r.team_id
+                tid = r.team_id if r.team_id is not None else default_team_id
                 m = _norm_model_name(r.model)
                 key = (tid, m)
                 model_revenue_team[key] = model_revenue_team.get(key, 0.0) + float(r.rev or 0)
@@ -125,7 +125,7 @@ async def get_chatters(
             )
             model_revenue_team = {}
             for r in model_rev_result.all():
-                tid = r.team_id
+                tid = r.team_id if r.team_id is not None else default_team_id
                 m = _norm_model_name(r.model)
                 key = (tid, m)
                 model_revenue_team[key] = model_revenue_team.get(key, 0.0) + float(r.rev or 0)
@@ -133,7 +133,7 @@ async def get_chatters(
             for (_, model), rev in model_revenue_team.items():
                 model_revenue[model] = model_revenue.get(model, 0.0) + rev
 
-        model_tier: dict[tuple[int | None, str], float] = {}
+        model_tier: dict[tuple[int, str], float] = {}
         for (tid, model), rev in model_revenue_team.items():
             plan_amt = plan_rows.get(model, 0.0)
             cap, dfrac = _team_tier_cfg(tid)
@@ -177,7 +177,9 @@ async def get_chatters(
             tier = model_tier.get((tid, mnorm), DEFAULT_TIER)
             cut = rev * tier
             plan_amt = plan_rows.get(mnorm, 0.0)
-            plan_comp = (model_revenue.get(mnorm, 0) / plan_amt * 100) if plan_amt > 0 else 0.0
+            # Доля выполнения плана для этой команды и модели — как в расчёте тира (не смесь команд).
+            team_plan_rev = model_revenue_team.get((tid, mnorm), 0.0)
+            plan_comp = (team_plan_rev / plan_amt * 100) if plan_amt > 0 else 0.0
 
             retention = cut * RETENTION_RATE if use_retention else 0.0
             net_cut = cut - retention
