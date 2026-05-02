@@ -37,6 +37,8 @@ DEFAULTS = {
     "withdraw_percent": "6",
     "use_withdraw": "1",
     "use_retention": "1",
+    # Глобальные расходы Notion: ID баз через запятую (не привязаны к команде)
+    "notion_expenses_database_ids": "",
 }
 
 

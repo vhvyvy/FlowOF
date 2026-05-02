@@ -12,17 +12,35 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from datetime import datetime
 
-from models import Expense, SyncLog
+from models import AppSetting, Expense, SyncLog
 from notion_sync_service import NOTION_VERSION, _norm_prop_name, _parse_date
+from team_helpers import normalize_notion_db_id
 
 logger = logging.getLogger("flowof.notion_expenses")
 
 
-def _cfg_expense_db_ids() -> list[str]:
-    raw = (os.getenv("NOTION_EXPENSES_DATABASE_ID") or "").strip()
+async def _cfg_expense_db_ids(db: AsyncSession, tenant_id: int) -> list[str]:
+    r = await db.execute(
+        select(AppSetting.value).where(
+            AppSetting.tenant_id == tenant_id,
+            AppSetting.key == "notion_expenses_database_ids",
+        )
+    )
+    raw = (r.scalar_one_or_none() or "").strip()
+    if not raw:
+        raw = (os.getenv("NOTION_EXPENSES_DATABASE_ID") or "").strip()
     if not raw:
         return []
-    return [x.strip().replace("-", "") for x in raw.split(",") if x.strip()]
+    out: list[str] = []
+    for part in raw.split(","):
+        p = part.strip()
+        if not p:
+            continue
+        canon = normalize_notion_db_id(p) or p.replace("-", "")
+        canon = canon.replace("-", "")
+        if canon and canon not in out:
+            out.append(canon)
+    return out
 
 
 def _pick_prop(props: dict[str, Any], keys: tuple[str, ...]) -> dict[str, Any] | None:
@@ -117,7 +135,7 @@ async def sync_notion_expenses_for_tenant(
     tenant_id: int,
     notion_token: str,
 ) -> dict[str, int]:
-    db_ids = _cfg_expense_db_ids()
+    db_ids = await _cfg_expense_db_ids(db, tenant_id)
     if not db_ids:
         return {"inserted": 0, "updated": 0, "skipped": 0, "databases": 0}
 

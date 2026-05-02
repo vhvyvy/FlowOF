@@ -16,6 +16,8 @@ interface Settings {
   withdraw_percent: string
   use_withdraw: string
   use_retention: string
+  /** ID баз Notion с расходами, через запятую; глобально для агентства, не по командам */
+  notion_expenses_database_ids: string
 }
 
 const DEFAULTS: Settings = {
@@ -25,6 +27,7 @@ const DEFAULTS: Settings = {
   withdraw_percent: '6',
   use_withdraw: '1',
   use_retention: '1',
+  notion_expenses_database_ids: '',
 }
 
 function SliderRow({
@@ -98,6 +101,37 @@ interface ProfileOut {
   notion_token_preview?: string | null
 }
 
+function GlobalExpensesNotionSection({
+  value,
+  onChange,
+}: {
+  value: string
+  onChange: (v: string) => void
+}) {
+  return (
+    <div className="bg-slate-800/60 border border-amber-500/20 rounded-xl px-5 py-5 space-y-3">
+      <p className="text-xs font-semibold text-amber-200/90 uppercase tracking-widest">Глобальные расходы (Notion)</p>
+      <p className="text-xs text-slate-500">
+        Расходы относятся ко всему агентству, не к отдельной команде. Укажите
+        ID баз(ы) Notion, где лежат строки расходов. Несколько ID — через запятую. После сохранения общих настроек
+        нажмите «Загрузить транзакции из Notion в базу» в блоке «Команды» — подтянутся и выручка, и расходы.
+      </p>
+      <textarea
+        value={value}
+        onChange={(e) => onChange(e.target.value)}
+        placeholder="Напр. a1b2c3d4e5f6…, ещё одна база…"
+        rows={2}
+        className="w-full bg-slate-700/80 border border-slate-600 rounded-lg px-3 py-2 text-sm font-mono text-slate-200 placeholder-slate-500"
+      />
+      <p className="text-[11px] text-slate-600">
+        В таблице расходов должны быть колонки с <span className="text-slate-500">датой</span> и{' '}
+        <span className="text-slate-500">суммой</span> (как в Notion). Альтернатива для сервера: переменная{' '}
+        <code className="text-slate-500">NOTION_EXPENSES_DATABASE_ID</code>.
+      </p>
+    </div>
+  )
+}
+
 function TeamsSection() {
   const qc = useQueryClient()
   const [name, setName] = useState('Команда 2')
@@ -113,6 +147,7 @@ function TeamsSection() {
     default_chatter_pct: number | null
     admin_percent_total: number | null
     inherit_economics: boolean
+    notion_database_id: string | null
   }>>({})
 
   const { data: teams, isLoading } = useQuery({
@@ -154,7 +189,16 @@ function TeamsSection() {
       default_chatter_pct: number | null
       admin_percent_total: number | null
       inherit_economics: boolean
-    }) => api.patch(`/api/v1/teams/${payload.id}`, payload),
+      notion_database_id: string | null
+    }) =>
+      api.patch(`/api/v1/teams/${payload.id}`, {
+        color_key: payload.color_key,
+        chatter_max_pct: payload.chatter_max_pct,
+        default_chatter_pct: payload.default_chatter_pct,
+        admin_percent_total: payload.admin_percent_total,
+        inherit_economics: payload.inherit_economics,
+        notion_database_id: payload.notion_database_id?.trim() || null,
+      }),
     onSuccess: invalidate,
   })
 
@@ -200,6 +244,7 @@ function TeamsSection() {
         default_chatter_pct: t.default_chatter_pct ?? null,
         admin_percent_total: t.admin_percent_total ?? null,
         inherit_economics: t.inherit_economics,
+        notion_database_id: t.notion_database_id ?? null,
       }
     }
     setTeamDrafts(next)
@@ -213,9 +258,9 @@ function TeamsSection() {
         <p className="text-xs font-semibold text-slate-400 uppercase tracking-widest">Команды</p>
       </div>
       <p className="text-xs text-slate-500">
-        Вторая команда создаётся на сервере автоматически (ID базы из вашего сообщения). Кнопка ниже подтягивает из Notion
-        к какой базе относится каждая страница-транзакция и проставляет команду. Нужен{' '}
-        <span className="text-slate-400">notion_token</span> у агентства (админка / тенант).
+        У каждой команды своя база <span className="text-slate-400">транзакций</span> в Notion и свои проценты (если не
+        включено «Наследовать»). Глобальные проценты по умолчанию — в блоке «Распределение выручки» ниже. Для импорта
+        нужен Notion token в «Интеграциях».
       </p>
       <div className="flex flex-wrap gap-2">
         <button
@@ -254,12 +299,13 @@ function TeamsSection() {
       {isLoading ? (
         <Skeleton className="h-16 w-full" />
       ) : (
-        <ul className="space-y-2">
+        <div className="space-y-4">
           {teams?.map((t) => {
             const isDefault = t.id === defaultTeamId
             const isEditing = editingId === t.id
             const isDeleting = deletingId === t.id
             const d = teamDrafts[t.id] ?? {
+              notion_database_id: t.notion_database_id ?? null,
               color_key: t.color_key ?? null,
               chatter_max_pct: t.chatter_max_pct ?? null,
               default_chatter_pct: t.default_chatter_pct ?? null,
@@ -268,9 +314,9 @@ function TeamsSection() {
             }
             const c = teamColor(t.id, d.color_key)
             return (
-              <li
+              <div
                 key={t.id}
-                className={`flex flex-wrap items-center gap-2 text-sm rounded-lg px-3 py-2 border ${c.bg} ${c.border}`}
+                className={`flex flex-col gap-3 text-sm rounded-xl px-4 py-4 border ${c.bg} ${c.border}`}
               >
                 {isEditing ? (
                   <>
@@ -319,32 +365,46 @@ function TeamsSection() {
                   </>
                 ) : (
                   <>
-                    <span className="flex-1 font-medium text-slate-200">{t.name}</span>
-                    <span className="text-xs text-slate-500">
-                      {t.inherit_economics
-                        ? 'экономика как в настройках'
-                        : `чаттер ≤${t.chatter_max_pct ?? '—'}%, админы ${t.admin_percent_total ?? '—'}%`}
-                    </span>
-                    {t.notion_database_id && (
-                      <code className="text-[10px] text-slate-500 truncate max-w-full">{t.notion_database_id}</code>
-                    )}
-                    <button
-                      onClick={() => { setEditingId(t.id); setEditingName(t.name) }}
-                      className="ml-auto p-1 text-slate-500 hover:text-slate-300"
-                      title="Переименовать"
-                    >
-                      <Pencil className="h-3.5 w-3.5" />
-                    </button>
-                    {!isDefault && (
+                    <div className="flex flex-wrap items-center gap-2 w-full">
+                      <span className="flex-1 min-w-0 font-medium text-slate-200">{t.name}</span>
+                      <span className="text-xs text-slate-500">
+                        {t.inherit_economics
+                          ? 'экономика как в настройках'
+                          : `чаттер ≤${t.chatter_max_pct ?? '—'}%, админы ${t.admin_percent_total ?? '—'}%`}
+                      </span>
                       <button
-                        onClick={() => setDeletingId(t.id)}
-                        className="p-1 text-slate-500 hover:text-rose-400"
-                        title="Удалить команду"
+                        onClick={() => { setEditingId(t.id); setEditingName(t.name) }}
+                        className="p-1 text-slate-500 hover:text-slate-300"
+                        title="Переименовать"
                       >
-                        <Trash2 className="h-3.5 w-3.5" />
+                        <Pencil className="h-3.5 w-3.5" />
                       </button>
-                    )}
-                    <div className="w-full grid grid-cols-1 md:grid-cols-5 gap-2 mt-2">
+                      {!isDefault && (
+                        <button
+                          onClick={() => setDeletingId(t.id)}
+                          className="p-1 text-slate-500 hover:text-rose-400"
+                          title="Удалить команду"
+                        >
+                          <Trash2 className="h-3.5 w-3.5" />
+                        </button>
+                      )}
+                    </div>
+                    <label className="text-[11px] text-slate-500 w-full block">
+                      Notion: database ID (транзакции этой команды)
+                      <input
+                        type="text"
+                        value={d.notion_database_id ?? ''}
+                        onChange={(e) =>
+                          setTeamDrafts((prev) => ({
+                            ...prev,
+                            [t.id]: { ...d, notion_database_id: e.target.value.trim() || null },
+                          }))
+                        }
+                        placeholder="32-символьный ID базы Notion"
+                        className="mt-1 w-full bg-slate-700/80 border border-slate-600 rounded-lg px-2 py-1.5 text-xs font-mono text-slate-200"
+                      />
+                    </label>
+                    <div className="w-full grid grid-cols-1 md:grid-cols-5 gap-2">
                       <label className="text-[11px] text-slate-500">
                         Цвет
                         <select
@@ -422,6 +482,7 @@ function TeamsSection() {
                           onClick={() =>
                             updateEcoMut.mutate({
                               id: t.id,
+                              notion_database_id: d.notion_database_id,
                               color_key: d.color_key,
                               chatter_max_pct: d.chatter_max_pct,
                               default_chatter_pct: d.default_chatter_pct,
@@ -451,10 +512,10 @@ function TeamsSection() {
                     </div>
                   </>
                 )}
-              </li>
+              </div>
             )
           })}
-        </ul>
+        </div>
       )}
 
       {teams && teams.length >= 1 && (
@@ -660,6 +721,8 @@ export default function SettingsPage() {
     mutationFn: (s: Settings) => api.put('/api/v1/settings', s),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ['settings'] })
+      qc.invalidateQueries({ queryKey: ['overview'] })
+      qc.invalidateQueries({ queryKey: ['finance'] })
       setSaved(true)
       setTimeout(() => setSaved(false), 3000)
     },
@@ -693,11 +756,23 @@ export default function SettingsPage() {
     <div className="flex flex-col h-full">
       <Header title="Настройки" />
       <div className="flex-1 overflow-y-auto p-6">
-      <div className="max-w-xl space-y-6">
+      <div className="max-w-3xl space-y-6">
 
-      {/* Sliders */}
+      <IntegrationsSection />
+
+      <GlobalExpensesNotionSection
+        value={local.notion_expenses_database_ids}
+        onChange={(v) => set('notion_expenses_database_ids', v)}
+      />
+
+      <TeamsSection />
+
+      {/* Sliders — глобальные проценты по умолчанию */}
       <div className="bg-slate-800/60 border border-slate-700/50 rounded-xl px-5">
         <p className="text-xs font-semibold text-slate-400 uppercase tracking-widest pt-5 pb-2">Распределение выручки</p>
+        <p className="text-[11px] text-slate-500 pb-2">
+          Базовые доли для агентства; у команды могут быть свои значения, если отключено «Наследовать».
+        </p>
         <SliderRow label="Модель" hint="Доля модели от выручки" value={model} onChange={(v) => set('model_percent', String(v))} />
         <SliderRow label="Чаттеры" hint="Доля чаттеров от выручки" value={chatter} onChange={(v) => set('chatter_percent', String(v))} />
         <SliderRow label="Админы" hint="Доля администраторов" value={admin} onChange={(v) => set('admin_percent', String(v))} />
@@ -752,11 +827,6 @@ export default function SettingsPage() {
           </div>
         )}
       </div>
-
-      <TeamsSection />
-
-      {/* Integrations */}
-      <IntegrationsSection />
 
       {/* Actions */}
       <div className="flex items-center gap-4">
