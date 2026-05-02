@@ -27,6 +27,12 @@ PLAN_TIERS = [
 DEFAULT_TIER  = 0.25   # no plan → 25%
 RETENTION_RATE = 0.025  # 2.5%
 
+
+def _norm_model_name(m: str | None) -> str:
+    """Совмещаем планы и транзакции, если в Notion в имени модели лишние пробелы."""
+    s = (m or "").strip()
+    return s if s else "Unknown"
+
 DEFAULTS: dict[str, str] = {
     "model_percent":    "23",
     "chatter_percent":  "25",
@@ -128,14 +134,17 @@ async def compute_actual_chatter_cut(
         .where(and_(*conditions))
         .group_by(Transaction.model)
     )
-    model_revenue = {r.model: float(r.rev or 0) for r in model_rev_result.all()}
+    model_revenue: dict[str, float] = {}
+    for r in model_rev_result.all():
+        k = _norm_model_name(r.model)
+        model_revenue[k] = model_revenue.get(k, 0.0) + float(r.rev or 0)
 
     plan_result = await db.execute(
         select(Plan.model, Plan.plan_amount).where(
             and_(Plan.tenant_id == tenant_id, Plan.year == year, Plan.month == month)
         )
     )
-    plan_rows = {r.model: float(r.plan_amount or 0) for r in plan_result.all()}
+    plan_rows = {_norm_model_name(r.model): float(r.plan_amount or 0) for r in plan_result.all()}
 
     gross = 0.0
     for model, rev in model_revenue.items():

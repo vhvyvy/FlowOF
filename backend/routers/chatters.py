@@ -10,7 +10,7 @@ from database import get_db
 from dependencies import get_current_tenant
 from models import Tenant, Transaction, Plan, AppSetting, Team
 from team_helpers import list_teams, ensure_default_team, team_transaction_clause, team_inherits_global_economics
-from economics import _tier_for_model
+from economics import _tier_for_model, _norm_model_name
 
 RETENTION_RATE = 0.025  # 2.5% удерживается агентством при use_retention=1
 from schemas import ChattersResponse, ChatterRow, ChatterModelBreakdown
@@ -82,7 +82,7 @@ async def get_chatters(
                 )
             )
         )
-        plan_rows = {r.model: float(r.plan_amount or 0) for r in plan_result.all()}
+        plan_rows = {_norm_model_name(r.model): float(r.plan_amount or 0) for r in plan_result.all()}
 
         mcond = [
             Transaction.tenant_id == tenant.id,
@@ -104,9 +104,12 @@ async def get_chatters(
                 .where(and_(*mcond))
                 .group_by(Transaction.model, Transaction.team_id)
             )
-            model_revenue_team = {
-                (r.team_id, r.model): float(r.rev or 0) for r in model_rev_result.all()
-            }
+            model_revenue_team: dict[tuple[int | None, str], float] = {}
+            for r in model_rev_result.all():
+                tid = r.team_id
+                m = _norm_model_name(r.model)
+                key = (tid, m)
+                model_revenue_team[key] = model_revenue_team.get(key, 0.0) + float(r.rev or 0)
             model_revenue = {}
             for (_, model), rev in model_revenue_team.items():
                 model_revenue[model] = model_revenue.get(model, 0.0) + rev
@@ -120,9 +123,12 @@ async def get_chatters(
                 .where(and_(*mcond))
                 .group_by(Transaction.model, Transaction.team_id)
             )
-            model_revenue_team = {
-                (r.team_id, r.model): float(r.rev or 0) for r in model_rev_result.all()
-            }
+            model_revenue_team = {}
+            for r in model_rev_result.all():
+                tid = r.team_id
+                m = _norm_model_name(r.model)
+                key = (tid, m)
+                model_revenue_team[key] = model_revenue_team.get(key, 0.0) + float(r.rev or 0)
             model_revenue = {}
             for (_, model), rev in model_revenue_team.items():
                 model_revenue[model] = model_revenue.get(model, 0.0) + rev
@@ -167,16 +173,17 @@ async def get_chatters(
             name = r.chatter or "Unknown"
             rev = float(r.revenue or 0)
             txns = int(r.txn_count or 0)
-            tier = model_tier.get((tid, r.model), DEFAULT_TIER)
+            mnorm = _norm_model_name(r.model)
+            tier = model_tier.get((tid, mnorm), DEFAULT_TIER)
             cut = rev * tier
-            plan_amt = plan_rows.get(r.model, 0.0)
-            plan_comp = (model_revenue.get(r.model, 0) / plan_amt * 100) if plan_amt > 0 else 0.0
+            plan_amt = plan_rows.get(mnorm, 0.0)
+            plan_comp = (model_revenue.get(mnorm, 0) / plan_amt * 100) if plan_amt > 0 else 0.0
 
             retention = cut * RETENTION_RATE if use_retention else 0.0
             net_cut = cut - retention
 
             breakdown_entry = ChatterModelBreakdown(
-                model=r.model or "Unknown",
+                model=mnorm,
                 revenue=round(rev, 2),
                 tier_pct=round(tier * 100, 1),
                 cut=round(cut, 2),
