@@ -204,7 +204,13 @@ export default function ChattersPage() {
                 </p>
                 <p className="text-xs text-slate-400 mt-0.5">
                   Выполнение плана: <span className={`font-semibold ${planCompletionColor(completion)}`}>{completion}%</span>
-                  <span className="ml-2 text-slate-500">· Тиры: ≥100%→25%, ≥90%→24%, ≥80%→23%, ≥70%→22%, ≥60%→21%, {'<60%'}→20% (мин.) · Нет плана→25%</span>
+                  <span className="ml-2 text-slate-500">
+                    · Тиры от <span className="text-slate-400">выручки по анкете</span>: ≥100%→25%, ≥90%→24%, ≥80%→23%, ≥70%→22%, ≥60%→21%, {'<60%'}→20% (мин.) · Нет плана→25%
+                  </span>
+                </p>
+                <p className="text-[11px] text-slate-500 mt-1.5 max-w-4xl leading-relaxed">
+                  В таблице колонка «% к выплате» — это доля от выручки чаттера{' '}
+                  <span className="text-slate-400">после retention −2.5%</span> от начисленного по тиру (поэтому при тире 25% в строке часто ~24,4%, не ровно 25%).
                 </p>
               </div>
             </div>
@@ -229,7 +235,12 @@ export default function ChattersPage() {
                     <th className="text-right px-5 py-3 text-xs font-semibold text-slate-400 uppercase tracking-wide">Выручка</th>
                     <th className="text-right px-5 py-3 text-xs font-semibold text-slate-400 uppercase tracking-wide">Транзакции</th>
                     <th className="text-right px-5 py-3 text-xs font-semibold text-slate-400 uppercase tracking-wide">RPC</th>
-                    <th className="text-right px-5 py-3 text-xs font-semibold text-slate-400 uppercase tracking-wide">% выплаты</th>
+                    <th
+                      className="text-right px-5 py-3 text-xs font-semibold text-slate-400 uppercase tracking-wide"
+                      title="Доля от выручки после retention −2.5% с начисления чаттеру (нетто к выплате)"
+                    >
+                      % к выплате <span className="normal-case font-normal text-slate-500">(нетто)</span>
+                    </th>
                     <th className="text-right px-5 py-3 text-xs font-semibold text-slate-400 uppercase tracking-wide">Выплата</th>
                     <th className="text-center px-5 py-3 text-xs font-semibold text-slate-400 uppercase tracking-wide">Статус</th>
                   </tr>
