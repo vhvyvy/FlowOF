@@ -2,11 +2,12 @@
 
 import { useState, useEffect } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
+import type { UseMutationResult } from '@tanstack/react-query'
 import api from '@/lib/api'
 import { TEAM_COLOR_OPTIONS, teamColor } from '@/lib/teamColors'
 import { Header } from '@/components/layout/Header'
 import { Skeleton } from '@/components/ui/skeleton'
-import { Save, RefreshCw, AlertCircle, CheckCircle2, Key, Eye, EyeOff, Users, Pencil, Trash2, Check, X } from 'lucide-react'
+import { Save, RefreshCw, AlertCircle, CheckCircle2, Key, Eye, EyeOff, Users, Pencil, Trash2, Check, X, CloudDownload } from 'lucide-react'
 import type { TeamOut } from '@/types'
 
 interface Settings {
@@ -28,6 +29,39 @@ const DEFAULTS: Settings = {
   use_withdraw: '1',
   use_retention: '1',
   notion_expenses_database_ids: '',
+}
+
+interface NotionSyncResult {
+  inserted: number
+  updated: number
+  skipped: number
+  skipped_no_model?: number
+  skipped_parse?: number
+  databases: number
+  assigned_rows: number
+  message: string
+}
+
+type NotionImportMutation = UseMutationResult<NotionSyncResult, Error, void, unknown>
+
+function useNotionImportMutation(): NotionImportMutation {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: () =>
+      api.post<NotionSyncResult>('/api/v1/sync/notion-transactions').then((r) => r.data),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['teams'] })
+      qc.invalidateQueries({ queryKey: ['overview'] })
+      qc.invalidateQueries({ queryKey: ['finance'] })
+      qc.invalidateQueries({ queryKey: ['chatters'] })
+    },
+  })
+}
+
+function syncErrorDetail(err: unknown): string {
+  return (
+    (err as { response?: { data?: { detail?: string } } })?.response?.data?.detail ?? 'Ошибка импорта'
+  )
 }
 
 function SliderRow({
@@ -104,17 +138,27 @@ interface ProfileOut {
 function GlobalExpensesNotionSection({
   value,
   onChange,
+  notionImport,
+  onSaveThenImport,
+  savePending,
+  saveDisabled,
 }: {
   value: string
   onChange: (v: string) => void
+  notionImport: NotionImportMutation
+  /** Сохраняет настройки на сервер, затем запускает тот же импорт, что и кнопка ниже (актуальные ID расходов). */
+  onSaveThenImport: () => void
+  savePending: boolean
+  saveDisabled: boolean
 }) {
+  const busy = notionImport.isPending || savePending
   return (
     <div className="bg-slate-800/60 border border-amber-500/20 rounded-xl px-5 py-5 space-y-3">
       <p className="text-xs font-semibold text-amber-200/90 uppercase tracking-widest">Глобальные расходы (Notion)</p>
       <p className="text-xs text-slate-500">
-        Расходы относятся ко всему агентству, не к отдельной команде. Укажите
-        ID баз(ы) Notion, где лежат строки расходов. Несколько ID — через запятую. После сохранения общих настроек
-        нажмите «Загрузить транзакции из Notion в базу» в блоке «Команды» — подтянутся и выручка, и расходы.
+        Расходы относятся ко всему агентству. Укажите ID баз(ы) с расходами; несколько ID — через запятую.
+        Кнопка «Сохранить» внизу страницы <span className="text-slate-400">только записывает настройки</span> в базу —{' '}
+        строки из Notion сами не подтягиваются, пока вы не нажмёте загрузку ниже (или в блоке «Команды»).
       </p>
       <textarea
         value={value}
@@ -123,6 +167,45 @@ function GlobalExpensesNotionSection({
         rows={2}
         className="w-full bg-slate-700/80 border border-slate-600 rounded-lg px-3 py-2 text-sm font-mono text-slate-200 placeholder-slate-500"
       />
+      <div className="flex flex-wrap gap-2 items-center">
+        <button
+          type="button"
+          onClick={() => notionImport.mutate()}
+          disabled={busy}
+          className="inline-flex items-center gap-2 text-sm px-4 py-2 rounded-lg bg-indigo-600 hover:bg-indigo-500 border border-indigo-500 text-white disabled:opacity-50"
+        >
+          {notionImport.isPending && !savePending ? (
+            <RefreshCw className="h-4 w-4 animate-spin" />
+          ) : (
+            <CloudDownload className="h-4 w-4" />
+          )}
+          Загрузить из Notion (транзакции + расходы)
+        </button>
+        <button
+          type="button"
+          onClick={onSaveThenImport}
+          disabled={busy || saveDisabled}
+          className="text-sm px-4 py-2 rounded-lg bg-slate-700 hover:bg-slate-600 border border-slate-600 text-slate-200 disabled:opacity-50"
+        >
+          {savePending ? (
+            <span className="inline-flex items-center gap-2">
+              <RefreshCw className="h-4 w-4 animate-spin" /> Сохранение…
+            </span>
+          ) : notionImport.isPending ? (
+            <span className="inline-flex items-center gap-2">
+              <RefreshCw className="h-4 w-4 animate-spin" /> Загрузка из Notion…
+            </span>
+          ) : (
+            'Сохранить ID и загрузить из Notion'
+          )}
+        </button>
+      </div>
+      {notionImport.isSuccess && notionImport.data && (
+        <p className="text-xs text-emerald-400 whitespace-pre-wrap">{notionImport.data.message}</p>
+      )}
+      {notionImport.isError && (
+        <p className="text-xs text-red-400">{syncErrorDetail(notionImport.error)}</p>
+      )}
       <p className="text-[11px] text-slate-600">
         В таблице расходов должны быть колонки с <span className="text-slate-500">датой</span> и{' '}
         <span className="text-slate-500">суммой</span> (как в Notion). Альтернатива для сервера: переменная{' '}
@@ -132,7 +215,7 @@ function GlobalExpensesNotionSection({
   )
 }
 
-function TeamsSection() {
+function TeamsSection({ notionImport }: { notionImport: NotionImportMutation }) {
   const qc = useQueryClient()
   const [name, setName] = useState('Команда 2')
   const [notionId, setNotionId] = useState('')
@@ -215,23 +298,6 @@ function TeamsSection() {
     onSuccess: invalidate,
   })
 
-  const notionImportMut = useMutation({
-    mutationFn: () =>
-      api
-        .post<{
-          inserted: number
-          updated: number
-          skipped: number
-          skipped_no_model?: number
-          skipped_parse?: number
-          databases: number
-          assigned_rows: number
-          message: string
-        }>('/api/v1/sync/notion-transactions')
-        .then((r) => r.data),
-    onSuccess: invalidate,
-  })
-
   const defaultTeamId = teams?.[0]?.id
 
   useEffect(() => {
@@ -273,21 +339,18 @@ function TeamsSection() {
         </button>
         <button
           type="button"
-          onClick={() => notionImportMut.mutate()}
-          disabled={notionImportMut.isPending}
+          onClick={() => notionImport.mutate()}
+          disabled={notionImport.isPending}
           className="text-sm px-4 py-2 rounded-lg bg-indigo-600 hover:bg-indigo-500 border border-indigo-500 text-white disabled:opacity-50"
         >
-          {notionImportMut.isPending ? 'Загрузка из Notion…' : 'Загрузить транзакции из Notion в базу'}
+          {notionImport.isPending ? 'Загрузка из Notion…' : 'Загрузить транзакции из Notion в базу'}
         </button>
       </div>
-      {notionImportMut.isSuccess && notionImportMut.data && (
-        <p className="text-xs text-emerald-400">{notionImportMut.data.message}</p>
+      {notionImport.isSuccess && notionImport.data && (
+        <p className="text-xs text-emerald-400 whitespace-pre-wrap">{notionImport.data.message}</p>
       )}
-      {notionImportMut.isError && (
-        <p className="text-xs text-red-400">
-          {(notionImportMut.error as { response?: { data?: { detail?: string } } })?.response?.data
-            ?.detail ?? 'Ошибка импорта'}
-        </p>
+      {notionImport.isError && (
+        <p className="text-xs text-red-400">{syncErrorDetail(notionImport.error)}</p>
       )}
       {reconcileMut.isSuccess && reconcileMut.data && (
         <p className="text-xs text-emerald-400">
@@ -707,6 +770,7 @@ function IntegrationsSection() {
 
 export default function SettingsPage() {
   const qc = useQueryClient()
+  const notionImport = useNotionImportMutation()
   const [local, setLocal] = useState<Settings>(DEFAULTS)
   const [saved, setSaved] = useState(false)
 
@@ -743,6 +807,14 @@ export default function SettingsPage() {
   const agencyPct = 100 - totalDeductions + retentionBonus
   const overLimit = totalDeductions > 100
 
+  const saveThenImportFromNotion = () => {
+    mutation.mutate(local, {
+      onSuccess: () => {
+        notionImport.mutate()
+      },
+    })
+  }
+
   if (isLoading) return (
     <div className="flex flex-col h-full">
       <Header title="Настройки" />
@@ -763,9 +835,13 @@ export default function SettingsPage() {
       <GlobalExpensesNotionSection
         value={local.notion_expenses_database_ids}
         onChange={(v) => set('notion_expenses_database_ids', v)}
+        notionImport={notionImport}
+        onSaveThenImport={saveThenImportFromNotion}
+        savePending={mutation.isPending}
+        saveDisabled={overLimit}
       />
 
-      <TeamsSection />
+      <TeamsSection notionImport={notionImport} />
 
       {/* Sliders — глобальные проценты по умолчанию */}
       <div className="bg-slate-800/60 border border-slate-700/50 rounded-xl px-5">
@@ -829,27 +905,33 @@ export default function SettingsPage() {
       </div>
 
       {/* Actions */}
-      <div className="flex items-center gap-4">
-        <button
-          onClick={() => mutation.mutate(local)}
-          disabled={mutation.isPending || overLimit}
-          className="flex items-center gap-2 px-5 py-2.5 rounded-lg bg-indigo-600 hover:bg-indigo-700 disabled:opacity-50 disabled:cursor-not-allowed text-white text-sm font-medium transition-colors"
-        >
-          {mutation.isPending
-            ? <RefreshCw className="h-4 w-4 animate-spin" />
-            : <Save className="h-4 w-4" />}
-          Сохранить
-        </button>
-        {saved && (
-          <span className="flex items-center gap-1.5 text-emerald-400 text-sm">
-            <CheckCircle2 className="h-4 w-4" /> Сохранено
-          </span>
-        )}
-        {mutation.isError && (
-          <span className="flex items-center gap-1.5 text-red-400 text-sm">
-            <AlertCircle className="h-4 w-4" /> Ошибка
-          </span>
-        )}
+      <div className="space-y-2">
+        <div className="flex flex-wrap items-center gap-4">
+          <button
+            onClick={() => mutation.mutate(local)}
+            disabled={mutation.isPending || overLimit}
+            className="flex items-center gap-2 px-5 py-2.5 rounded-lg bg-indigo-600 hover:bg-indigo-700 disabled:opacity-50 disabled:cursor-not-allowed text-white text-sm font-medium transition-colors"
+          >
+            {mutation.isPending
+              ? <RefreshCw className="h-4 w-4 animate-spin" />
+              : <Save className="h-4 w-4" />}
+            Сохранить
+          </button>
+          {saved && (
+            <span className="flex items-center gap-1.5 text-emerald-400 text-sm">
+              <CheckCircle2 className="h-4 w-4" /> Сохранено
+            </span>
+          )}
+          {mutation.isError && (
+            <span className="flex items-center gap-1.5 text-red-400 text-sm">
+              <AlertCircle className="h-4 w-4" /> Ошибка
+            </span>
+          )}
+        </div>
+        <p className="text-[11px] text-slate-500 max-w-xl">
+          Сохранение не запускает импорт из Notion. Чтобы подтянуть транзакции и расходы в базу, нажмите «Загрузить из
+          Notion» в блоке «Глобальные расходы» выше или в «Команды», либо «Сохранить ID и загрузить из Notion».
+        </p>
       </div>
       </div>
       </div>
