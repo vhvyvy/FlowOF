@@ -163,7 +163,7 @@ function GlobalExpensesNotionSection({
       <textarea
         value={value}
         onChange={(e) => onChange(e.target.value)}
-        placeholder="Напр. a1b2c3d4e5f6…, ещё одна база…"
+        placeholder="Можно вставить ссылку из Notion или 32-символьный ID; несколько — через запятую"
         rows={2}
         className="w-full bg-slate-700/80 border border-slate-600 rounded-lg px-3 py-2 text-sm font-mono text-slate-200 placeholder-slate-500"
       />
@@ -463,7 +463,7 @@ function TeamsSection({ notionImport }: { notionImport: NotionImportMutation }) 
                             [t.id]: { ...d, notion_database_id: e.target.value.trim() || null },
                           }))
                         }
-                        placeholder="32-символьный ID базы Notion"
+                        placeholder="Ссылка из Notion или 32-символьный ID"
                         className="mt-1 w-full bg-slate-700/80 border border-slate-600 rounded-lg px-2 py-1.5 text-xs font-mono text-slate-200"
                       />
                     </label>

@@ -36,9 +36,14 @@ async def _cfg_expense_db_ids(db: AsyncSession, tenant_id: int) -> list[str]:
         p = part.strip()
         if not p:
             continue
-        canon = normalize_notion_db_id(p) or p.replace("-", "")
-        canon = canon.replace("-", "")
-        if canon and canon not in out:
+        # normalize_notion_db_id handles full URLs, UUID with dashes, bare hex32
+        canon = normalize_notion_db_id(p)
+        if not canon:
+            continue
+        # Notion API принимает UUID без дефисов или с — оба варианта работают.
+        # Храним без дефисов для единообразия.
+        canon_nodash = canon.replace("-", "")
+        if canon_nodash not in [x.replace("-", "") for x in out]:
             out.append(canon)
     return out
 
