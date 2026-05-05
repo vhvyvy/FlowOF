@@ -654,6 +654,18 @@ async def sync_notion_transactions_for_tenant(
                         shift_cache,
                     )
                     date_val, model_name, chatter, amount, shift_id, shift_name = parsed
+                    # Диагностика: если chatter не найден — логируем свойства строки
+                    if chatter is None:
+                        props_debug = row.get("properties") or {}
+                        chatter_keys = {
+                            k: {"type": v.get("type") if isinstance(v, dict) else type(v).__name__}
+                            for k, v in props_debug.items()
+                        }
+                        logger.warning(
+                            "chatter=None for page %s | props: %s",
+                            (notion_id or "")[:8],
+                            chatter_keys,
+                        )
                 except Exception as e:
                     logger.debug("parse row skip: %s", e)
                     skipped += 1

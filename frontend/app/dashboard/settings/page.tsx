@@ -298,6 +298,21 @@ function TeamsSection({ notionImport }: { notionImport: NotionImportMutation }) 
     onSuccess: invalidate,
   })
 
+  const [debugResult, setDebugResult] = useState<Record<string, unknown> | null>(null)
+  const [debugLoading, setDebugLoading] = useState(false)
+  const runDebug = async () => {
+    setDebugLoading(true)
+    setDebugResult(null)
+    try {
+      const r = await api.get<Record<string, unknown>>('/api/v1/sync/debug-chatter-fields')
+      setDebugResult(r.data)
+    } catch (e: unknown) {
+      setDebugResult({ error: (e as { message?: string })?.message ?? String(e) })
+    } finally {
+      setDebugLoading(false)
+    }
+  }
+
   const defaultTeamId = teams?.[0]?.id
 
   useEffect(() => {
@@ -358,6 +373,23 @@ function TeamsSection({ notionImport }: { notionImport: NotionImportMutation }) 
           {reconcileMut.data.assigned_rows}
         </p>
       )}
+
+      {/* Диагностика: почему чаттер не парсится */}
+      <div className="pt-1">
+        <button
+          type="button"
+          onClick={runDebug}
+          disabled={debugLoading}
+          className="text-xs px-3 py-1.5 rounded-lg bg-slate-700/60 hover:bg-slate-600/60 border border-slate-600/50 text-slate-400 hover:text-slate-200 disabled:opacity-50"
+        >
+          {debugLoading ? 'Диагностика…' : '🔍 Диагностика: почему чаттер не парсится?'}
+        </button>
+        {debugResult && (
+          <div className="mt-2 p-3 bg-slate-900 rounded-lg border border-slate-700 text-xs font-mono text-slate-300 overflow-auto max-h-72 whitespace-pre-wrap">
+            {JSON.stringify(debugResult, null, 2)}
+          </div>
+        )}
+      </div>
 
       {isLoading ? (
         <Skeleton className="h-16 w-full" />
