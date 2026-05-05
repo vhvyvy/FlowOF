@@ -4,7 +4,7 @@ from datetime import date
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, func, and_
+from sqlalchemy import select, func, and_, case
 
 from database import get_db
 from dependencies import get_current_tenant
@@ -209,7 +209,34 @@ async def get_chatters(
             chatter_data[name]["chatter_cut"] += net_cut  # net after retention
             chatter_data[name]["models"].append(breakdown_entry)
 
-        total_revenue = sum(d["revenue"] for d in chatter_data.values())
+        # Полная выручка за период (включая транзакции без чаттера) — как в Overview.
+        all_rev_result = await db.execute(
+            select(
+                func.coalesce(func.sum(Transaction.amount), 0).label("total"),
+                func.coalesce(
+                    func.sum(
+                        case(
+                            (Transaction.chatter.isnot(None), Transaction.amount),
+                            else_=0,
+                        )
+                    ),
+                    0,
+                ).label("assigned"),
+            ).where(and_(
+                Transaction.tenant_id == tenant.id,
+                Transaction.date >= start,
+                Transaction.date <= end,
+                *(
+                    [team_transaction_clause(selected_team.id, default_team_id)]
+                    if selected_team is not None and team_transaction_clause(selected_team.id, default_team_id) is not None
+                    else []
+                ),
+            ))
+        )
+        _rev_row = all_rev_result.one()
+        total_revenue = float(_rev_row.total or 0)
+        assigned_revenue = float(_rev_row.assigned or 0)
+        unassigned_revenue = round(total_revenue - assigned_revenue, 2)
 
         # Build response rows sorted by revenue desc
         rows: list[ChatterRow] = []
@@ -265,6 +292,8 @@ async def get_chatters(
         return ChattersResponse(
             chatters=rows,
             total_revenue=round(total_revenue, 2),
+            assigned_revenue=round(assigned_revenue, 2),
+            unassigned_revenue=round(unassigned_revenue, 2),
             plan_completion=round(weighted * 100, 1),
         )
 

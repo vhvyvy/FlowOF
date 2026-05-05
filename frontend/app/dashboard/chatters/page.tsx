@@ -10,7 +10,7 @@ import { useMonthStore } from '@/lib/hooks/useMonth'
 import { useTeamStore } from '@/lib/hooks/useTeam'
 import { formatCurrency } from '@/lib/utils'
 import type { ChatterStatus, ChatterModelBreakdown } from '@/types'
-import { DollarSign, Users, Target, TrendingUp, X } from 'lucide-react'
+import { DollarSign, Users, Target, TrendingUp, X, AlertCircle } from 'lucide-react'
 
 const STATUS_BADGE: Record<ChatterStatus, { label: string; variant: 'success' | 'default' | 'warning' | 'danger' }> = {
   top:  { label: 'Топ',    variant: 'success' },
@@ -160,9 +160,10 @@ export default function ChattersPage() {
   const btnRefs = useRef<Record<string, HTMLButtonElement | null>>({})
   const anchorRef = useRef<HTMLElement | null>(null)
 
-  const completion  = data?.plan_completion ?? 0
-  const totalPayout = data?.chatters.reduce((s, c) => s + c.chatter_cut, 0) ?? 0
-  const tier        = tierStyle(completion >= 100 ? 25 : completion >= 90 ? 24 : completion >= 80 ? 23 : completion >= 70 ? 22 : completion >= 60 ? 21 : 20)
+  const completion        = data?.plan_completion ?? 0
+  const totalPayout       = data?.chatters.reduce((s, c) => s + c.chatter_cut, 0) ?? 0
+  const unassignedRevenue = data?.unassigned_revenue ?? 0
+  const tier              = tierStyle(completion >= 100 ? 25 : completion >= 90 ? 24 : completion >= 80 ? 23 : completion >= 70 ? 22 : completion >= 60 ? 21 : 20)
 
   const activeChatter = openPopover
     ? data?.chatters.find((c) => `${c.name}::${c.team_id ?? 0}` === openPopover) ?? null
@@ -192,6 +193,23 @@ export default function ChattersPage() {
             </>
           ) : null}
         </div>
+
+        {/* Warning: transactions without chatter */}
+        {!isLoading && unassignedRevenue > 0 && (
+          <div className="flex items-start gap-3 px-5 py-3.5 rounded-xl border border-amber-500/30 bg-amber-500/10">
+            <AlertCircle className="h-4 w-4 text-amber-400 mt-0.5 shrink-0" />
+            <div>
+              <p className="text-sm font-semibold text-amber-300">
+                {formatCurrency(unassignedRevenue)} выручки без чаттера
+              </p>
+              <p className="text-xs text-slate-400 mt-0.5">
+                Эти транзакции не привязаны к конкретному чаттеру (поле пустое) — в таблице не отображаются,
+                но включены в общую выручку. Нажмите «Сопоставить транзакции с командами» в Настройках,
+                затем убедитесь, что в Notion у каждой транзакции заполнено поле чаттера, и сделайте повторный импорт.
+              </p>
+            </div>
+          </div>
+        )}
 
         {/* Active tier banner */}
         {!isLoading && data && (

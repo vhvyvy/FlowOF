@@ -157,6 +157,8 @@ export interface ChatterRow {
 export interface ChattersResponse {
   chatters: ChatterRow[]
   total_revenue: number
+  assigned_revenue: number
+  unassigned_revenue: number
   plan_completion: number
 }
 

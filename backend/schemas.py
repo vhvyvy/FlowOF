@@ -200,7 +200,9 @@ class ChatterRow(BaseModel):
 
 class ChattersResponse(BaseModel):
     chatters: list[ChatterRow]
-    total_revenue: float
+    total_revenue: float          # все транзакции периода (включая без чаттера)
+    assigned_revenue: float = 0.0 # только транзакции с заполненным chatter
+    unassigned_revenue: float = 0.0
     plan_completion: float
 
 
