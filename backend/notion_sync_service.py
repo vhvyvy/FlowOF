@@ -48,6 +48,9 @@ def _format_notion_page_id(page_id: str) -> str:
     return f"{pid[0:8]}-{pid[8:12]}-{pid[12:16]}-{pid[16:20]}-{pid[20:32]}"
 
 
+_NOACCESS = "__no_access__"  # sentinel cached when page is inaccessible
+
+
 async def _page_title(
     client: httpx.AsyncClient,
     headers: dict[str, str],
@@ -55,23 +58,33 @@ async def _page_title(
     cache: dict[str, str],
 ) -> str | None:
     if page_id in cache:
-        return cache[page_id]
+        v = cache[page_id]
+        return None if v == _NOACCESS else v
     fmt = _format_notion_page_id(page_id)
-    # Как в sync_notion_full.get_page_title: пробуем канонический UUID и сырой id из API
     data: dict | None = None
+    _timeout = httpx.Timeout(connect=3.0, read=5.0, write=3.0, pool=3.0)
     for url_id in (fmt, page_id):
         if not url_id:
             continue
-        r = await client.get(
-            f"https://api.notion.com/v1/pages/{url_id}",
-            headers=headers,
-            timeout=30.0,
-        )
+        try:
+            r = await client.get(
+                f"https://api.notion.com/v1/pages/{url_id}",
+                headers=headers,
+                timeout=_timeout,
+            )
+        except Exception:
+            continue
+        if r.status_code == 403 or r.status_code == 404:
+            # Integration has no access — cache sentinel so we don't retry every row
+            cache[page_id] = _NOACCESS
+            logger.warning("Notion page %s inaccessible (HTTP %s) — integration may need access", url_id[:16], r.status_code)
+            return None
         if r.status_code != 200:
             continue
         data = r.json()
         break
     if not data:
+        cache[page_id] = _NOACCESS
         return None
     for p in data.get("properties", {}).values():
         if p.get("type") == "title" and p.get("title"):
@@ -79,6 +92,7 @@ async def _page_title(
             if t:
                 cache[page_id] = t
                 return t
+    cache[page_id] = _NOACCESS
     return None
 
 

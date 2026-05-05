@@ -59,9 +59,13 @@ function useNotionImportMutation(): NotionImportMutation {
 }
 
 function syncErrorDetail(err: unknown): string {
-  return (
-    (err as { response?: { data?: { detail?: string } } })?.response?.data?.detail ?? 'Ошибка импорта'
-  )
+  const e = err as { response?: { status?: number; data?: { detail?: string } }; message?: string }
+  const detail = e?.response?.data?.detail
+  if (detail) return detail
+  const status = e?.response?.status
+  if (status) return `Ошибка импорта (HTTP ${status})`
+  if (e?.message) return `Ошибка импорта: ${e.message}`
+  return 'Ошибка импорта'
 }
 
 function SliderRow({
