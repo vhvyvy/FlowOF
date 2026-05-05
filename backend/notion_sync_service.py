@@ -281,19 +281,54 @@ async def _parse_row(
 ) -> tuple[Any, ...]:
     notion_page_id = row.get("id")
     props = row.get("properties", {})
+
+    # ── Amount: exact names first, then fuzzy (contains "сумм" / "amount" / "оплат" / "выход") ──
     amount_prop = (
         props.get("Сумма выхода")
         or props.get("Сумма")
         or props.get("Amount")
         or props.get("Amount Spent")
-        or {}
+        or None
     )
+    if amount_prop is None:
+        for k, v in props.items():
+            kn = _norm_prop_name(k)
+            if isinstance(v, dict) and any(h in kn for h in ("сумм", "amount", "оплат", "выход")):
+                amount_prop = v
+                break
+    amount_prop = amount_prop or {}
+
+    def _extract_number(p: dict) -> float:
+        t = p.get("type")
+        try:
+            if t == "number":
+                return float(p.get("number") or 0)
+            if t == "formula":
+                f = p.get("formula") or {}
+                if f.get("type") == "number":
+                    return float(f.get("number") or 0)
+            if t == "rollup":
+                r = p.get("rollup") or {}
+                if r.get("type") == "number":
+                    return float(r.get("number") or 0)
+        except (TypeError, ValueError):
+            pass
+        return 0.0
+
     try:
-        amount = float(amount_prop.get("number") or 0) if isinstance(amount_prop, dict) else 0.0
+        amount = _extract_number(amount_prop) if isinstance(amount_prop, dict) else 0.0
     except (TypeError, ValueError):
         amount = 0.0
 
-    date_prop = props.get("Date") or props.get("date") or props.get("Transaction Date") or {}
+    # ── Date ──
+    date_prop = props.get("Date") or props.get("date") or props.get("Transaction Date") or None
+    if date_prop is None:
+        for k, v in props.items():
+            kn = _norm_prop_name(k)
+            if isinstance(v, dict) and v.get("type") == "date" and any(h in kn for h in ("date", "дата")):
+                date_prop = v
+                break
+    date_prop = date_prop or {}
     date_obj = (date_prop or {}).get("date") if isinstance(date_prop, dict) else None
     date_val = _parse_date(date_obj.get("start") if date_obj else None)
 
@@ -331,16 +366,63 @@ async def _parse_row(
                 break
 
     chatter = None
-    cp = props.get("Чаттер") or props.get("Chatter") or props.get("чаттер") or {}
-    ct = (cp or {}).get("type") if isinstance(cp, dict) else None
-    if ct == "rich_text" and (cp or {}).get("rich_text"):
-        chatter = cp["rich_text"][0].get("plain_text")
-    elif ct == "select" and (cp or {}).get("select"):
-        chatter = cp["select"].get("name")
-    elif ct == "people" and (cp or {}).get("people"):
-        chatter = cp["people"][0].get("name")
-    elif ct == "relation" and (cp or {}).get("relation"):
+    # Сначала точные имена, затем fuzzy (contains "чатт" or "chatt")
+    cp = (
+        props.get("Чаттер")
+        or props.get("Chatter")
+        or props.get("чаттер")
+        or props.get("chatter")
+        or None
+    )
+    if cp is None:
+        for k, v in props.items():
+            kn = _norm_prop_name(k)
+            if isinstance(v, dict) and any(h in kn for h in ("чатт", "chatt")):
+                cp = v
+                break
+    cp = cp or {}
+    ct = cp.get("type") if isinstance(cp, dict) else None
+
+    def _text_from_array(arr: list) -> str | None:
+        for item in arr:
+            t = (item.get("plain_text") or "").strip()
+            if t:
+                return t
+        return None
+
+    if ct == "rich_text":
+        chatter = _text_from_array(cp.get("rich_text") or [])
+    elif ct == "title":
+        chatter = _text_from_array(cp.get("title") or [])
+    elif ct == "select" and cp.get("select"):
+        chatter = (cp["select"].get("name") or "").strip() or None
+    elif ct == "multi_select" and cp.get("multi_select"):
+        chatter = (cp["multi_select"][0].get("name") or "").strip() or None
+    elif ct == "people" and cp.get("people"):
+        p0 = cp["people"][0]
+        chatter = (p0.get("name") or p0.get("id") or "").strip() or None
+    elif ct == "relation" and cp.get("relation"):
         chatter = await _page_title(client, headers, cp["relation"][0]["id"], chatter_cache)
+    elif ct == "formula":
+        f = cp.get("formula") or {}
+        ft = f.get("type")
+        if ft == "string":
+            chatter = (f.get("string") or "").strip() or None
+        elif ft == "number":
+            v = f.get("number")
+            chatter = str(int(v)) if v is not None else None
+    elif ct == "rollup":
+        ro = cp.get("rollup") or {}
+        arr = ro.get("array") or []
+        for item in arr:
+            it = item.get("type")
+            if it == "rich_text":
+                chatter = _text_from_array(item.get("rich_text") or [])
+            elif it == "select":
+                s = item.get("select") or {}
+                chatter = (s.get("name") or "").strip() or None
+            if chatter:
+                break
 
     def _extract_shift_from_prop(prop):
         if not isinstance(prop, dict):
