@@ -66,6 +66,8 @@ _PATCHES: list[tuple[str, bool]] = [
         "AND COALESCE(onboarding_completed, FALSE) = FALSE",
         False,
     ),
+    # Multi-DB on a team: notion_database_id can hold several IDs (comma/newline separated)
+    ("ALTER TABLE teams_mt ALTER COLUMN notion_database_id TYPE TEXT", False),
 ]
 
 

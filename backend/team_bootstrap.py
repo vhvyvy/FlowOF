@@ -73,23 +73,44 @@ async def bootstrap_teams(db: AsyncSession) -> None:
 
 async def assign_transactions_by_notion_database(db: AsyncSession) -> int:
     """
-    Проставить team_id там, где notion_database_id транзакции совпадает с командой.
+    Проставить team_id там, где notion_database_id транзакции присутствует в списке
+    notion_database_id команды (поле может содержать несколько ID через запятую/новую строку).
     Сравнение без учёта дефисов и регистра.
     """
-    result = await db.execute(
-        text("""
-        UPDATE transactions t
-        SET team_id = tm.id
-        FROM teams_mt tm
-        WHERE t.tenant_id = tm.tenant_id
-          AND tm.notion_database_id IS NOT NULL
-          AND t.notion_database_id IS NOT NULL
-          AND replace(replace(upper(trim(COALESCE(t.notion_database_id, ''))), '-', ''), ' ', '')
-              = replace(replace(upper(trim(COALESCE(tm.notion_database_id, ''))), '-', ''), ' ', '')
-        """)
-    )
+    from team_helpers import list_teams as _list_teams, split_notion_db_ids
+
+    r = await db.execute(text("SELECT DISTINCT tenant_id FROM teams_mt"))
+    tenant_ids = [row[0] for row in r.all()]
+
+    total = 0
+    for tid in tenant_ids:
+        teams = await _list_teams(db, tid)
+        # Build map: normalized-no-dashes-uppercase -> team_id
+        for tm in teams:
+            ids = split_notion_db_ids(tm.notion_database_id)
+            if not ids:
+                continue
+            norm_set = [i.replace("-", "").upper() for i in ids]
+            placeholders = ", ".join(f":db{i}" for i in range(len(norm_set)))
+            params: dict[str, str | int] = {f"db{i}": v for i, v in enumerate(norm_set)}
+            params["tid"] = tid
+            params["team_id"] = tm.id
+            result = await db.execute(
+                text(
+                    f"""
+                    UPDATE transactions
+                    SET team_id = :team_id
+                    WHERE tenant_id = :tid
+                      AND notion_database_id IS NOT NULL
+                      AND replace(replace(upper(trim(notion_database_id)), '-', ''), ' ', '')
+                          IN ({placeholders})
+                    """
+                ),
+                params,
+            )
+            total += result.rowcount or 0
     await db.commit()
-    return result.rowcount or 0
+    return total
 
 
 async def backfill_notion_database_id_from_notion_api(

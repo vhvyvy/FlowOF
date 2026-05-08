@@ -19,7 +19,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from models import SyncLog, Team, Tenant, Transaction
 from team_bootstrap import assign_transactions_by_notion_database
-from team_helpers import list_teams, normalize_notion_db_id
+from team_helpers import list_teams, normalize_notion_db_id, split_notion_db_ids
 
 logger = logging.getLogger("flowof.notion_sync")
 
@@ -581,13 +581,13 @@ def _collect_database_ids(teams: list[Team]) -> list[str]:
     ids: list[str] = []
     env_main = (os.getenv("NOTION_TRANSACTIONS_DATABASE_ID") or "").strip()
     if env_main:
-        n = normalize_notion_db_id(env_main)
-        if n:
-            ids.append(n)
+        # env может также содержать несколько через запятую
+        for n in split_notion_db_ids(env_main):
+            if n not in ids:
+                ids.append(n)
     for tm in teams:
-        if tm.notion_database_id:
-            n = normalize_notion_db_id(tm.notion_database_id)
-            if n and n not in ids:
+        for n in split_notion_db_ids(tm.notion_database_id):
+            if n not in ids:
                 ids.append(n)
     return ids
 

@@ -88,8 +88,9 @@ class Team(Base):
     tenant_id = Column(Integer, ForeignKey("tenants.id"), nullable=False, index=True)
     name = Column(String(255), nullable=False)
     sort_order = Column(Integer, default=0)
-    # Notion database ID for this team's transactions (no hyphens or with — normalized in API)
-    notion_database_id = Column(String(64), nullable=True)
+    # Notion database IDs for this team's transactions.
+    # MAY contain multiple IDs separated by commas/newlines (one per month).
+    notion_database_id = Column(Text, nullable=True)
     # Optional UI color key for team highlighting in shared dashboards/charts
     color_key = Column(String(32), nullable=True)
     # If True, use global app_settings for chatter tiers and admin % (applied to this team's revenue)

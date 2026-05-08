@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import re
-from urllib.parse import urlparse, urlunparse
+from urllib.parse import urlparse
 from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -104,3 +104,36 @@ def normalize_notion_db_id(raw: str | None) -> str | None:
     if m:
         return _format(m.group(1))
     return None
+
+
+_SPLIT_RE = re.compile(r'[,;\n\r\t]+')
+
+
+def split_notion_db_ids(raw: str | None) -> list[str]:
+    """
+    Разбить поле team.notion_database_id (может содержать несколько ID через запятую/перенос
+    строки/точку с запятой) на отдельные нормализованные ID.
+    """
+    if not raw:
+        return []
+    out: list[str] = []
+    seen: set[str] = set()
+    for part in _SPLIT_RE.split(raw):
+        n = normalize_notion_db_id(part)
+        if n and n not in seen:
+            seen.add(n)
+            out.append(n)
+    return out
+
+
+def normalize_team_notion_db_field(raw: str | None) -> str | None:
+    """
+    Нормализовать всё поле team.notion_database_id целиком:
+    - один ID → 'aaaa...-...-...'
+    - несколько → 'id1, id2, id3'
+    - пусто → None
+    """
+    ids = split_notion_db_ids(raw)
+    if not ids:
+        return None
+    return ", ".join(ids)

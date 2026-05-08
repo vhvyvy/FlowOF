@@ -2,7 +2,6 @@
 
 import { useState, useEffect } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
-import type { UseMutationResult } from '@tanstack/react-query'
 import api from '@/lib/api'
 import { TEAM_COLOR_OPTIONS, teamColor } from '@/lib/teamColors'
 import { Header } from '@/components/layout/Header'
@@ -31,31 +30,123 @@ const DEFAULTS: Settings = {
   notion_expenses_database_ids: '',
 }
 
-interface NotionSyncResult {
-  inserted: number
-  updated: number
-  skipped: number
-  skipped_no_model?: number
-  skipped_parse?: number
-  databases: number
-  assigned_rows: number
+interface SyncStartOut {
+  started: boolean
   message: string
 }
 
-type NotionImportMutation = UseMutationResult<NotionSyncResult, Error, void, unknown>
+interface SyncStatusOut {
+  status: 'idle' | 'running' | 'success' | 'error' | 'never'
+  started_at?: string | null
+  finished_at?: string | null
+  rows_imported: number
+  rows_skipped: number
+  message?: string | null
+}
+
+interface NotionImportMutation {
+  mutate: () => void
+  isPending: boolean
+  isRunning: boolean
+  isError: boolean
+  error: Error | null
+  syncStatus: SyncStatusOut | undefined
+  lastMessage: string | null
+}
 
 function useNotionImportMutation(): NotionImportMutation {
   const qc = useQueryClient()
-  return useMutation({
-    mutationFn: () =>
-      api.post<NotionSyncResult>('/api/v1/sync/notion-transactions').then((r) => r.data),
-    onSuccess: () => {
+  const statusQ = useQuery<SyncStatusOut>({
+    queryKey: ['sync-status'],
+    queryFn: () => api.get<SyncStatusOut>('/api/v1/sync/status').then((r) => r.data),
+    refetchInterval: (q) => {
+      const s = q.state.data?.status
+      return s === 'running' ? 1500 : 30000
+    },
+    refetchIntervalInBackground: true,
+  })
+  const syncStatus = statusQ.data
+  const isRunning = syncStatus?.status === 'running'
+  const lastSyncStatus = syncStatus?.status
+  const finishedAt = syncStatus?.finished_at
+
+  useEffect(() => {
+    if (lastSyncStatus === 'success' || lastSyncStatus === 'error') {
       qc.invalidateQueries({ queryKey: ['teams'] })
       qc.invalidateQueries({ queryKey: ['overview'] })
       qc.invalidateQueries({ queryKey: ['finance'] })
       qc.invalidateQueries({ queryKey: ['chatters'] })
+    }
+  }, [lastSyncStatus, finishedAt, qc])
+
+  const mut = useMutation<SyncStartOut, Error, void>({
+    mutationFn: () =>
+      api.post<SyncStartOut>('/api/v1/sync/notion-transactions').then((r) => r.data),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['sync-status'] })
     },
   })
+
+  return {
+    mutate: () => mut.mutate(),
+    isPending: mut.isPending,
+    isRunning,
+    isError: mut.isError,
+    error: mut.error,
+    syncStatus,
+    lastMessage: syncStatus?.message ?? null,
+  }
+}
+
+function SyncStatusBanner({ notionImport }: { notionImport: NotionImportMutation }) {
+  const status = notionImport.syncStatus
+  const isRunning = notionImport.isRunning
+  if (!status || status.status === 'never') {
+    if (notionImport.isPending) {
+      return (
+        <div className="flex items-center gap-2 text-xs text-indigo-300 bg-indigo-500/10 border border-indigo-500/30 rounded-lg px-3 py-2">
+          <RefreshCw className="h-3.5 w-3.5 animate-spin" />
+          Импорт запущен в фоне. Можно закрыть страницу — он не прервётся.
+        </div>
+      )
+    }
+    return null
+  }
+  if (isRunning) {
+    return (
+      <div className="flex items-center gap-2 text-xs text-indigo-300 bg-indigo-500/10 border border-indigo-500/30 rounded-lg px-3 py-2">
+        <RefreshCw className="h-3.5 w-3.5 animate-spin" />
+        <span>
+          Идёт синхронизация Notion…
+          {status.started_at && (
+            <span className="text-slate-500 ml-2">
+              (запущена {new Date(status.started_at).toLocaleTimeString('ru-RU')})
+            </span>
+          )}
+        </span>
+      </div>
+    )
+  }
+  if (status.status === 'success') {
+    return (
+      <div className="flex items-start gap-2 text-xs text-emerald-300 bg-emerald-500/5 border border-emerald-500/30 rounded-lg px-3 py-2 whitespace-pre-wrap">
+        <CheckCircle2 className="h-3.5 w-3.5 mt-0.5 shrink-0" />
+        <span>{status.message ?? 'Синхронизация завершена'}</span>
+      </div>
+    )
+  }
+  if (status.status === 'error') {
+    return (
+      <div className="flex items-start gap-2 text-xs text-red-300 bg-red-500/5 border border-red-500/30 rounded-lg px-3 py-2 whitespace-pre-wrap">
+        <AlertCircle className="h-3.5 w-3.5 mt-0.5 shrink-0" />
+        <div>
+          <p className="font-semibold mb-0.5">Ошибка синхронизации:</p>
+          <p className="font-mono text-[11px] opacity-90">{status.message ?? 'неизвестная ошибка'}</p>
+        </div>
+      </div>
+    )
+  }
+  return null
 }
 
 function syncErrorDetail(err: unknown): string {
@@ -155,7 +246,8 @@ function GlobalExpensesNotionSection({
   savePending: boolean
   saveDisabled: boolean
 }) {
-  const busy = notionImport.isPending || savePending
+  const isRunning = notionImport.isRunning || notionImport.isPending
+  const busy = isRunning || savePending
   return (
     <div className="bg-slate-800/60 border border-amber-500/20 rounded-xl px-5 py-5 space-y-3">
       <p className="text-xs font-semibold text-amber-200/90 uppercase tracking-widest">Глобальные расходы (Notion)</p>
@@ -178,7 +270,7 @@ function GlobalExpensesNotionSection({
           disabled={busy}
           className="inline-flex items-center gap-2 text-sm px-4 py-2 rounded-lg bg-indigo-600 hover:bg-indigo-500 border border-indigo-500 text-white disabled:opacity-50"
         >
-          {notionImport.isPending && !savePending ? (
+          {isRunning && !savePending ? (
             <RefreshCw className="h-4 w-4 animate-spin" />
           ) : (
             <CloudDownload className="h-4 w-4" />
@@ -195,7 +287,7 @@ function GlobalExpensesNotionSection({
             <span className="inline-flex items-center gap-2">
               <RefreshCw className="h-4 w-4 animate-spin" /> Сохранение…
             </span>
-          ) : notionImport.isPending ? (
+          ) : isRunning ? (
             <span className="inline-flex items-center gap-2">
               <RefreshCw className="h-4 w-4 animate-spin" /> Загрузка из Notion…
             </span>
@@ -204,12 +296,6 @@ function GlobalExpensesNotionSection({
           )}
         </button>
       </div>
-      {notionImport.isSuccess && notionImport.data && (
-        <p className="text-xs text-emerald-400 whitespace-pre-wrap">{notionImport.data.message}</p>
-      )}
-      {notionImport.isError && (
-        <p className="text-xs text-red-400">{syncErrorDetail(notionImport.error)}</p>
-      )}
       <p className="text-[11px] text-slate-600">
         В таблице расходов должны быть колонки с <span className="text-slate-500">датой</span> и{' '}
         <span className="text-slate-500">суммой</span> (как в Notion). Альтернатива для сервера: переменная{' '}
@@ -359,15 +445,18 @@ function TeamsSection({ notionImport }: { notionImport: NotionImportMutation }) 
         <button
           type="button"
           onClick={() => notionImport.mutate()}
-          disabled={notionImport.isPending}
+          disabled={notionImport.isRunning || notionImport.isPending}
           className="text-sm px-4 py-2 rounded-lg bg-indigo-600 hover:bg-indigo-500 border border-indigo-500 text-white disabled:opacity-50"
         >
-          {notionImport.isPending ? 'Загрузка из Notion…' : 'Загрузить транзакции из Notion в базу'}
+          {notionImport.isRunning || notionImport.isPending
+            ? 'Загрузка из Notion…'
+            : 'Загрузить транзакции из Notion в базу'}
         </button>
       </div>
-      {notionImport.isSuccess && notionImport.data && (
-        <p className="text-xs text-emerald-400 whitespace-pre-wrap">{notionImport.data.message}</p>
-      )}
+
+      {/* Единый банер статуса фоновой синхронизации */}
+      <SyncStatusBanner notionImport={notionImport} />
+
       {notionImport.isError && (
         <p className="text-xs text-red-400">{syncErrorDetail(notionImport.error)}</p>
       )}
@@ -490,18 +579,21 @@ function TeamsSection({ notionImport }: { notionImport: NotionImportMutation }) 
                     </div>
                     <label className="text-[11px] text-slate-500 w-full block">
                       Notion: database ID (транзакции этой команды)
-                      <input
-                        type="text"
+                      <textarea
                         value={d.notion_database_id ?? ''}
                         onChange={(e) =>
                           setTeamDrafts((prev) => ({
                             ...prev,
-                            [t.id]: { ...d, notion_database_id: e.target.value.trim() || null },
+                            [t.id]: { ...d, notion_database_id: e.target.value || null },
                           }))
                         }
-                        placeholder="Ссылка из Notion или 32-символьный ID"
-                        className="mt-1 w-full bg-slate-700/80 border border-slate-600 rounded-lg px-2 py-1.5 text-xs font-mono text-slate-200"
+                        placeholder="Несколько баз — через запятую или с новой строки. Каждый месяц добавляйте новую."
+                        rows={2}
+                        className="mt-1 w-full bg-slate-700/80 border border-slate-600 rounded-lg px-2 py-1.5 text-xs font-mono text-slate-200 leading-snug"
                       />
+                      <span className="block text-[10px] text-slate-600 mt-0.5">
+                        Примеры: <span className="text-slate-500">https://www.notion.so/...</span> или <span className="text-slate-500">317fad2b5c57804a84efce5a775c8224</span>. Для нового месяца — допишите ID в этом же поле.
+                      </span>
                     </label>
                     <div className="w-full grid grid-cols-1 md:grid-cols-5 gap-2">
                       <label className="text-[11px] text-slate-500">
@@ -627,12 +719,12 @@ function TeamsSection({ notionImport }: { notionImport: NotionImportMutation }) 
             placeholder="Название"
             className="w-full bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-sm text-slate-200"
           />
-          <input
-            type="text"
+          <textarea
             value={notionId}
             onChange={(e) => setNotionId(e.target.value)}
-            placeholder="Notion database ID (транзакции команды)"
-            className="w-full bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-sm font-mono text-slate-300"
+            placeholder="Notion database ID (транзакции команды). Несколько баз — через запятую или с новой строки."
+            rows={2}
+            className="w-full bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-sm font-mono text-slate-300 leading-snug"
           />
           <div className="grid grid-cols-2 gap-3">
             <label className="text-xs text-slate-500">

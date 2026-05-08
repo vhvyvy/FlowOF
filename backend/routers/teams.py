@@ -8,7 +8,12 @@ from database import get_db
 from dependencies import get_current_tenant
 from models import Tenant, Team, Transaction
 from schemas import TeamOut, TeamCreate, TeamUpdate
-from team_helpers import list_teams, ensure_default_team, normalize_notion_db_id, team_inherits_global_economics
+from team_helpers import (
+    list_teams,
+    ensure_default_team,
+    normalize_team_notion_db_field,
+    team_inherits_global_economics,
+)
 from team_bootstrap import assign_transactions_by_notion_database, backfill_notion_database_id_from_notion_api
 
 logger = logging.getLogger("flowof.teams")
@@ -50,7 +55,7 @@ async def create_team(
         tenant_id=tenant.id,
         name=body.name.strip(),
         sort_order=body.sort_order,
-        notion_database_id=normalize_notion_db_id(body.notion_database_id),
+        notion_database_id=normalize_team_notion_db_field(body.notion_database_id),
         color_key=(body.color_key or "").strip() or None,
         inherit_economics=body.inherit_economics,
         chatter_max_pct=body.chatter_max_pct,
@@ -82,7 +87,7 @@ async def update_team(
     if body.sort_order is not None:
         t.sort_order = body.sort_order
     if body.notion_database_id is not None:
-        t.notion_database_id = normalize_notion_db_id(body.notion_database_id)
+        t.notion_database_id = normalize_team_notion_db_field(body.notion_database_id)
     if body.color_key is not None:
         t.color_key = body.color_key.strip() or None
     if body.inherit_economics is not None:
