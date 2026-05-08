@@ -598,6 +598,7 @@ async def sync_notion_transactions_for_tenant(
     notion_token: str,
     *,
     shift_type: str = "relation",
+    existing_log_id: int | None = None,
 ) -> dict[str, int]:
     """
     Импорт страниц из всех настроенных баз Notion в transactions.
@@ -619,16 +620,34 @@ async def sync_notion_transactions_for_tenant(
         )
 
     sync_started = datetime.utcnow()
-    sync_log = SyncLog(
-        tenant_id=tenant_id,
-        source_type="notion",
-        started_at=sync_started,
-        status="running",
-        rows_imported=0,
-        rows_skipped=0,
-    )
-    db.add(sync_log)
-    await db.flush()
+    if existing_log_id is not None:
+        # Используем sync_log, созданный выше (в endpoint'е) — не дублируем строку.
+        sync_log = (
+            await db.execute(select(SyncLog).where(SyncLog.id == existing_log_id))
+        ).scalar_one_or_none()
+        if sync_log is None:
+            # Fallback — если кто-то удалил лог: создаём новый, чтобы не падать.
+            sync_log = SyncLog(
+                tenant_id=tenant_id,
+                source_type="notion",
+                started_at=sync_started,
+                status="running",
+                rows_imported=0,
+                rows_skipped=0,
+            )
+            db.add(sync_log)
+            await db.flush()
+    else:
+        sync_log = SyncLog(
+            tenant_id=tenant_id,
+            source_type="notion",
+            started_at=sync_started,
+            status="running",
+            rows_imported=0,
+            rows_skipped=0,
+        )
+        db.add(sync_log)
+        await db.flush()
 
     headers = {
         "Authorization": f"Bearer {token}",

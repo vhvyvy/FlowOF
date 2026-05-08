@@ -82,8 +82,10 @@ function useNotionImportMutation(): NotionImportMutation {
   const mut = useMutation<SyncStartOut, Error, void>({
     mutationFn: () =>
       api.post<SyncStartOut>('/api/v1/sync/notion-transactions').then((r) => r.data),
-    onSuccess: () => {
-      qc.invalidateQueries({ queryKey: ['sync-status'] })
+    onSuccess: async () => {
+      // Принудительно ждём свежий статус (running) сразу после старта,
+      // иначе UI может остаться на старом 'success' и пропустить запуск.
+      await qc.refetchQueries({ queryKey: ['sync-status'] })
     },
   })
 
@@ -128,10 +130,14 @@ function SyncStatusBanner({ notionImport }: { notionImport: NotionImportMutation
     )
   }
   if (status.status === 'success') {
+    const fallback =
+      status.rows_imported > 0 || status.rows_skipped > 0
+        ? `Синхронизация завершена. Импортировано: ${status.rows_imported}, пропущено: ${status.rows_skipped}`
+        : 'Синхронизация завершена. (Нет деталей — возможно, это старый запуск до обновления.)'
     return (
       <div className="flex items-start gap-2 text-xs text-emerald-300 bg-emerald-500/5 border border-emerald-500/30 rounded-lg px-3 py-2 whitespace-pre-wrap">
         <CheckCircle2 className="h-3.5 w-3.5 mt-0.5 shrink-0" />
-        <span>{status.message ?? 'Синхронизация завершена'}</span>
+        <span>{status.message || fallback}</span>
       </div>
     )
   }

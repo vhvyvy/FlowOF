@@ -1,15 +1,17 @@
 """Ручная синхронизация Notion → БД (Neon).
 
-Импорт делается в фоновой задаче, чтобы Railway/Cloudflare не обрезали HTTP-запрос
-по таймауту. Фронт опрашивает /sync/status и видит прогресс/итог/ошибку.
+Импорт делается в фоновой задаче (asyncio.create_task), чтобы Railway/Cloudflare
+не обрезали HTTP-запрос по таймауту. Фронт опрашивает /sync/status и видит
+прогресс/итог/ошибку.
 """
+import asyncio
 import logging
 import os
 from datetime import datetime
 from typing import Any
 
 import httpx
-from fastapi import APIRouter, BackgroundTasks, Depends, Header, HTTPException, Query
+from fastapi import APIRouter, Depends, Header, HTTPException, Query
 from pydantic import BaseModel
 from sqlalchemy import desc, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -27,27 +29,25 @@ router = APIRouter(prefix="/api/v1", tags=["sync"])
 
 # ───────────────────────────── Background runner ─────────────────────────────
 
-# Tenants currently running a sync (in-process lock to prevent double-clicks)
-_RUNNING_TENANTS: set[int] = set()
+# Tenants currently running a sync (in-process lock to prevent double-clicks).
+# Map: tenant_id -> sync_log.id (id создаётся синхронно в endpoint'е).
+_RUNNING_TENANTS: dict[int, int] = {}
+# Strong refs to keep asyncio.Tasks alive (избегаем GC во время работы).
+_BG_TASKS: set[asyncio.Task] = set()
 
 
-async def _run_notion_sync_bg(tenant_id: int, token: str, shift_type: str) -> None:
-    """
-    Долгоживущая задача: импорт транзакций + расходов с записью статуса в sync_log.
-    Открывает свою сессию БД, чтобы не зависеть от scope HTTP-запроса.
-    """
-    if tenant_id in _RUNNING_TENANTS:
-        logger.warning("notion sync already running for tenant=%s — skip", tenant_id)
-        return
-    _RUNNING_TENANTS.add(tenant_id)
+async def _run_notion_sync_bg(
+    tenant_id: int,
+    token: str,
+    shift_type: str,
+    log_id: int,
+) -> None:
+    """Импорт транзакций + расходов; обновляет sync_log по log_id."""
     try:
         async with AsyncSessionLocal() as db:
-            # sync_log записывается внутри sync_notion_transactions_for_tenant.
-            # Здесь оборачиваем верхним try/except чтобы при падении пометить running → error.
-            log_id: int | None = None
             try:
                 stats = await sync_notion_transactions_for_tenant(
-                    db, tenant_id, token, shift_type=shift_type
+                    db, tenant_id, token, shift_type=shift_type, existing_log_id=log_id
                 )
                 exp = await sync_notion_expenses_for_tenant(db, tenant_id, token)
                 msg = (
@@ -58,53 +58,25 @@ async def _run_notion_sync_bg(tenant_id: int, token: str, shift_type: str) -> No
                     f"Расходы: +{exp['inserted']} новых, обновлено {exp['updated']}, "
                     f"пропущено {exp['skipped']}."
                 )
-                # Найдём только что созданный sync_log (последний для этого тенанта) и сохраним сводку
-                last = await db.execute(
-                    select(SyncLog)
-                    .where(SyncLog.tenant_id == tenant_id)
-                    .order_by(desc(SyncLog.id))
-                    .limit(1)
-                )
-                row = last.scalar_one_or_none()
+                row = (await db.execute(select(SyncLog).where(SyncLog.id == log_id))).scalar_one_or_none()
                 if row:
                     row.status = "success"
-                    row.error_message = msg  # храним сводку в том же поле — фронт читает оттуда
+                    row.error_message = msg
                     row.finished_at = datetime.utcnow()
                     await db.commit()
             except Exception as e:
-                logger.exception("notion sync (bg) failed tenant=%s", tenant_id)
-                # Помечаем последний running лог как error
+                logger.exception("notion sync (bg) failed tenant=%s log=%s", tenant_id, log_id)
                 try:
-                    last = await db.execute(
-                        select(SyncLog)
-                        .where(SyncLog.tenant_id == tenant_id)
-                        .order_by(desc(SyncLog.id))
-                        .limit(1)
-                    )
-                    row = last.scalar_one_or_none()
-                    if row and row.status == "running":
+                    row = (await db.execute(select(SyncLog).where(SyncLog.id == log_id))).scalar_one_or_none()
+                    if row:
                         row.status = "error"
-                        row.error_message = str(e)[:2000]
+                        row.error_message = f"{type(e).__name__}: {e}"[:2000]
                         row.finished_at = datetime.utcnow()
                         await db.commit()
-                    else:
-                        # sync_log ещё не создавался (упало до flush) → создаём
-                        new_log = SyncLog(
-                            tenant_id=tenant_id,
-                            source_type="notion",
-                            started_at=datetime.utcnow(),
-                            finished_at=datetime.utcnow(),
-                            status="error",
-                            error_message=str(e)[:2000],
-                            rows_imported=0,
-                            rows_skipped=0,
-                        )
-                        db.add(new_log)
-                        await db.commit()
                 except Exception:
-                    logger.exception("failed to write error sync_log tenant=%s", tenant_id)
+                    logger.exception("failed to write error sync_log tenant=%s log=%s", tenant_id, log_id)
     finally:
-        _RUNNING_TENANTS.discard(tenant_id)
+        _RUNNING_TENANTS.pop(tenant_id, None)
 
 
 # ───────────────────────────── HTTP endpoints ─────────────────────────────
@@ -127,13 +99,13 @@ class SyncStartOut(BaseModel):
 
 @router.post("/sync/notion-transactions", response_model=SyncStartOut)
 async def post_sync_notion_transactions(
-    background_tasks: BackgroundTasks,
     shift_type: str = Query("relation", description="relation или select — тип поля смены в Notion"),
     tenant: Tenant = Depends(get_current_tenant),
     db: AsyncSession = Depends(get_db),
 ):
     """
-    Запускает импорт в фоне и сразу возвращает ответ. Прогресс/итог — через GET /sync/status.
+    Создаёт sync_log(running), стартует фоновую задачу и сразу возвращает ответ.
+    UI опрашивает GET /sync/status и видит running → success/error.
     """
     token = await resolve_notion_token_for_sync(db, tenant)
     if not token:
@@ -143,11 +115,32 @@ async def post_sync_notion_transactions(
         )
     if tenant.id in _RUNNING_TENANTS:
         return SyncStartOut(started=False, message="Синхронизация уже идёт. Проверяйте статус.")
+
     st = shift_type.strip().lower()
     if st not in ("relation", "select"):
         st = "relation"
-    background_tasks.add_task(_run_notion_sync_bg, tenant.id, token, st)
-    logger.info("notion sync queued tenant=%s shift_type=%s", tenant.id, st)
+
+    # 1) Создаём running sync_log СИНХРОННО, чтобы /sync/status сразу увидел running.
+    log = SyncLog(
+        tenant_id=tenant.id,
+        source_type="notion",
+        started_at=datetime.utcnow(),
+        status="running",
+        rows_imported=0,
+        rows_skipped=0,
+    )
+    db.add(log)
+    await db.commit()
+    await db.refresh(log)
+
+    _RUNNING_TENANTS[tenant.id] = log.id
+
+    # 2) Стартуем задачу немедленно, не дожидаясь возврата ответа.
+    task = asyncio.create_task(_run_notion_sync_bg(tenant.id, token, st, log.id))
+    _BG_TASKS.add(task)
+    task.add_done_callback(_BG_TASKS.discard)
+
+    logger.info("notion sync started tenant=%s log_id=%s shift_type=%s", tenant.id, log.id, st)
     return SyncStartOut(
         started=True,
         message="Импорт запущен в фоне. Можно закрыть страницу — он не прервётся.",
@@ -175,8 +168,8 @@ async def get_sync_status(
     last = r.scalar_one_or_none()
     if not last:
         return SyncStatusOut(status="never")
-    # Если в памяти процесса флаг running выставлен — явно сообщаем running, даже если
-    # лог ещё не успел переключиться (на случай гонки).
+    # In-memory флаг running закрывает гонку: если процесс знает, что задача жива,
+    # а в БД status уже не running по какой-то причине — всё равно говорим running.
     if tenant.id in _RUNNING_TENANTS and last.status not in ("success", "error"):
         return SyncStatusOut(
             status="running",
