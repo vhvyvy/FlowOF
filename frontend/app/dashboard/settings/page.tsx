@@ -155,6 +155,26 @@ function SyncStatusBanner({ notionImport }: { notionImport: NotionImportMutation
   return null
 }
 
+// Лёгкий клиентский парсер: показывает пользователю, какие ID будут распознаны.
+// Не заменяет серверную нормализацию, нужен только для предпросмотра в UI.
+const HEX32_RE = /[0-9a-fA-F]{32}/g
+function parseNotionIds(raw: string | null | undefined): string[] {
+  if (!raw) return []
+  const seen = new Set<string>()
+  const out: string[] = []
+  for (const part of raw.split(/[,;\n\r\t]+/)) {
+    const noDash = part.replace(/-/g, '')
+    const matches = noDash.match(HEX32_RE)
+    if (!matches) continue
+    // Берём ПОСЛЕДНИЙ матч в сегменте (ID всегда в конце URL/слага)
+    const id = matches[matches.length - 1].toLowerCase()
+    if (seen.has(id)) continue
+    seen.add(id)
+    out.push(`${id.slice(0, 8)}-${id.slice(8, 12)}-${id.slice(12, 16)}-${id.slice(16, 20)}-${id.slice(20, 32)}`)
+  }
+  return out
+}
+
 function syncErrorDetail(err: unknown): string {
   const e = err as { response?: { status?: number; data?: { detail?: string } }; message?: string }
   const detail = e?.response?.data?.detail
@@ -597,8 +617,40 @@ function TeamsSection({ notionImport }: { notionImport: NotionImportMutation }) 
                         rows={2}
                         className="mt-1 w-full bg-slate-700/80 border border-slate-600 rounded-lg px-2 py-1.5 text-xs font-mono text-slate-200 leading-snug"
                       />
-                      <span className="block text-[10px] text-slate-600 mt-0.5">
-                        Примеры: <span className="text-slate-500">https://www.notion.so/...</span> или <span className="text-slate-500">317fad2b5c57804a84efce5a775c8224</span>. Для нового месяца — допишите ID в этом же поле.
+                      {(() => {
+                        const ids = parseNotionIds(d.notion_database_id)
+                        const raw = (d.notion_database_id ?? '').trim()
+                        if (!raw) {
+                          return (
+                            <span className="block text-[10px] text-slate-600 mt-1">
+                              Поле пустое. Вставьте ссылку из Notion (или 32-символьный ID) и нажмите «Сохранить» в этой карточке.
+                            </span>
+                          )
+                        }
+                        if (ids.length === 0) {
+                          return (
+                            <span className="block text-[10px] text-rose-400 mt-1">
+                              ID не распознан. Откройте базу в Notion → … → Copy link to view.
+                            </span>
+                          )
+                        }
+                        return (
+                          <div className="mt-1.5 flex flex-wrap items-center gap-1.5">
+                            <span className="text-[10px] text-slate-500">Будет загружено баз: {ids.length}</span>
+                            {ids.map((id) => (
+                              <span
+                                key={id}
+                                className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-slate-700/70 text-slate-300 border border-slate-600/50"
+                                title={id}
+                              >
+                                {id.slice(0, 8)}…{id.slice(-4)}
+                              </span>
+                            ))}
+                          </div>
+                        )
+                      })()}
+                      <span className="block text-[10px] text-slate-600 mt-1">
+                        Примеры: <span className="text-slate-500">https://www.notion.so/…</span> или <span className="text-slate-500">317fad2b5c57804a84efce5a775c8224</span>. Для нового месяца — добавьте ID этой же команде через запятую/перенос строки.
                       </span>
                     </label>
                     <div className="w-full grid grid-cols-1 md:grid-cols-5 gap-2">
@@ -673,7 +725,7 @@ function TeamsSection({ notionImport }: { notionImport: NotionImportMutation }) 
                           className="mt-1 w-full bg-slate-700 border border-slate-600 rounded px-2 py-1 text-xs text-slate-200"
                         />
                       </label>
-                      <div className="flex items-end gap-2">
+                      <div className="flex items-end gap-2 flex-wrap">
                         <button
                           type="button"
                           onClick={() =>
@@ -691,6 +743,30 @@ function TeamsSection({ notionImport }: { notionImport: NotionImportMutation }) 
                           className="text-xs px-2 py-1 rounded bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 text-white"
                         >
                           {updateEcoMut.isPending ? '…' : 'Сохранить'}
+                        </button>
+                        <button
+                          type="button"
+                          onClick={async () => {
+                            await updateEcoMut.mutateAsync({
+                              id: t.id,
+                              notion_database_id: d.notion_database_id,
+                              color_key: d.color_key,
+                              chatter_max_pct: d.chatter_max_pct,
+                              default_chatter_pct: d.default_chatter_pct,
+                              admin_percent_total: d.admin_percent_total,
+                              inherit_economics: d.inherit_economics,
+                            })
+                            notionImport.mutate()
+                          }}
+                          disabled={updateEcoMut.isPending || notionImport.isPending || notionImport.isRunning}
+                          className="text-xs px-2 py-1 rounded bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 text-white"
+                          title="Сохранить ID и сразу загрузить транзакции из Notion"
+                        >
+                          {updateEcoMut.isPending
+                            ? '…'
+                            : notionImport.isPending || notionImport.isRunning
+                              ? 'Загрузка…'
+                              : 'Сохранить + загрузить'}
                         </button>
                         <label className="text-[11px] text-slate-500 flex items-center gap-1">
                           <input
