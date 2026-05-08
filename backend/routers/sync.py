@@ -193,22 +193,24 @@ async def debug_chatter_fields(
     db: AsyncSession = Depends(get_db),
 ):
     """
-    Берёт до 3 транзакций с chatter=NULL и запрашивает их свойства напрямую из Notion.
-    Возвращает dict: notion_id → {prop_name: {type, value_summary}}.
-    Помогает понять почему поле чаттера не парсится.
+    Берёт до 5 транзакций с chatter=NULL И самой большой суммой и запрашивает их свойства
+    напрямую из Notion. Возвращает dict: notion_id → {prop_name: {type, value_summary}}.
+    Помогает увидеть, где у крупных транзакций сидит чаттер.
     """
     token = await resolve_notion_token_for_sync(db, tenant)
     if not token:
         raise HTTPException(status_code=400, detail="Нет Notion token")
 
+    # Берём самые крупные суммы среди chatter=NULL — там сидят основные «потерянные» доходы.
     rows = (await db.execute(
-        select(Transaction.notion_id)
+        select(Transaction.notion_id, Transaction.amount, Transaction.date, Transaction.model)
         .where(
             Transaction.tenant_id == tenant.id,
             Transaction.chatter.is_(None),
             Transaction.notion_id.isnot(None),
         )
-        .limit(3)
+        .order_by(Transaction.amount.desc().nullslast())
+        .limit(5)
     )).all()
 
     if not rows:
@@ -221,14 +223,15 @@ async def debug_chatter_fields(
 
     result: dict[str, Any] = {}
     async with httpx.AsyncClient(timeout=20) as client:
-        for (nid,) in rows:
+        for (nid, amount, dt, model) in rows:
             raw = (nid or "").replace("-", "")
             if len(raw) != 32:
                 continue
             page_id = f"{raw[0:8]}-{raw[8:12]}-{raw[12:16]}-{raw[16:20]}-{raw[20:32]}"
             r = await client.get(f"https://api.notion.com/v1/pages/{page_id}", headers=headers)
+            label = f"${float(amount or 0):.2f} | {dt} | {model or '—'}"
             if r.status_code != 200:
-                result[page_id] = {"error": r.text[:200]}
+                result[f"{label} :: {page_id[:8]}"] = {"error": r.text[:200]}
                 continue
             props = r.json().get("properties") or {}
             summary: dict[str, Any] = {}
@@ -237,7 +240,7 @@ async def debug_chatter_fields(
                 val: Any = None
                 if t == "rich_text":
                     arr = v.get("rich_text") or []
-                    val = "".join(x.get("plain_text", "") for x in arr)[:80]
+                    val = "".join(x.get("plain_text", "") for x in arr)[:120]
                 elif t == "select":
                     val = (v.get("select") or {}).get("name")
                 elif t == "multi_select":
@@ -246,14 +249,40 @@ async def debug_chatter_fields(
                     val = [x.get("name") for x in v.get("people") or []]
                 elif t == "formula":
                     f = v.get("formula") or {}
-                    val = f"{f.get('type')}: {f.get(f.get('type'), '')}"
+                    ft = f.get("type")
+                    val = f"{ft}: {f.get(ft, '')}"
                 elif t == "relation":
-                    val = f"{len(v.get('relation') or [])} relations"
+                    rel_ids = [x.get("id") for x in v.get("relation") or []]
+                    if rel_ids:
+                        # Подтянем заголовки связанных страниц — это и есть «чаттер» как relation
+                        names: list[str] = []
+                        for rid in rel_ids[:3]:
+                            try:
+                                pr = await client.get(
+                                    f"https://api.notion.com/v1/pages/{rid}", headers=headers
+                                )
+                                if pr.status_code == 200:
+                                    pdata = pr.json().get("properties") or {}
+                                    title = ""
+                                    for pp in pdata.values():
+                                        if pp.get("type") == "title" and pp.get("title"):
+                                            title = "".join(
+                                                x.get("plain_text", "") for x in pp["title"]
+                                            )
+                                            break
+                                    names.append(title or f"<no title {rid[:8]}>")
+                                else:
+                                    names.append(f"<HTTP {pr.status_code} {rid[:8]}>")
+                            except Exception as ex:
+                                names.append(f"<err {ex}>")
+                        val = f"{len(rel_ids)} relations: {', '.join(names)}"
+                    else:
+                        val = "0 relations"
                 elif t == "rollup":
                     ro = v.get("rollup") or {}
                     val = f"rollup({ro.get('type')})"
                 elif t == "title":
-                    val = "".join(x.get("plain_text", "") for x in v.get("title") or [])[:80]
+                    val = "".join(x.get("plain_text", "") for x in v.get("title") or [])[:120]
                 elif t == "number":
                     val = v.get("number")
                 elif t == "date":
@@ -261,7 +290,7 @@ async def debug_chatter_fields(
                 else:
                     val = t
                 summary[k] = {"type": t, "value": val}
-            result[page_id] = summary
+            result[label] = summary
 
     return result
 
