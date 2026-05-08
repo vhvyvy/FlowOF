@@ -58,6 +58,24 @@ async def _run_notion_sync_bg(
                     f"Расходы: +{exp['inserted']} новых, обновлено {exp['updated']}, "
                     f"пропущено {exp['skipped']}."
                 )
+                # Если интеграция не имеет доступа к каким-то связанным базам
+                # (чаттеры/модели/смены) — сразу подсветим: это причина «$X без чаттера».
+                noacc_c = stats.get("noaccess_chatter", 0)
+                noacc_m = stats.get("noaccess_model", 0)
+                noacc_s = stats.get("noaccess_shift", 0)
+                if noacc_c or noacc_m or noacc_s:
+                    parts: list[str] = []
+                    if noacc_c:
+                        parts.append(f"чаттеров: {noacc_c}")
+                    if noacc_m:
+                        parts.append(f"моделей: {noacc_m}")
+                    if noacc_s:
+                        parts.append(f"смен: {noacc_s}")
+                    msg += (
+                        "\n⚠ Notion вернул 403/404 для связанных страниц ("
+                        + ", ".join(parts)
+                        + "). Откройте в Notion соответствующие базы → … → Connections → добавьте эту интеграцию."
+                    )
                 row = (await db.execute(select(SyncLog).where(SyncLog.id == log_id))).scalar_one_or_none()
                 if row:
                     row.status = "success"

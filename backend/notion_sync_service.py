@@ -56,7 +56,15 @@ async def _page_title(
     headers: dict[str, str],
     page_id: str,
     cache: dict[str, str],
+    *,
+    access_counter: dict | None = None,
+    counter_key: str = "noaccess_other",
 ) -> str | None:
+    """
+    Получить title связанной страницы.
+    access_counter — общий dict для подсчёта 403/404 (передавайте {} извне),
+    counter_key — куда инкрементировать (например 'noaccess_chatter').
+    """
     if page_id in cache:
         v = cache[page_id]
         return None if v == _NOACCESS else v
@@ -75,9 +83,13 @@ async def _page_title(
         except Exception:
             continue
         if r.status_code == 403 or r.status_code == 404:
-            # Integration has no access — cache sentinel so we don't retry every row
             cache[page_id] = _NOACCESS
-            logger.warning("Notion page %s inaccessible (HTTP %s) — integration may need access", url_id[:16], r.status_code)
+            if access_counter is not None:
+                access_counter[counter_key] = access_counter.get(counter_key, 0) + 1
+            logger.warning(
+                "Notion page %s inaccessible (HTTP %s) — integration needs access (%s)",
+                url_id[:16], r.status_code, counter_key,
+            )
             return None
         if r.status_code != 200:
             continue
@@ -226,6 +238,8 @@ async def _model_name_from_property(
     headers: dict[str, str],
     model_cache: dict[str, str],
     page_id: str | None = None,
+    *,
+    access_counter: dict | None = None,
 ) -> str | None:
     """Достаёт имя модели для relation / select / rollup / formula и др."""
     if not isinstance(model_prop, dict):
@@ -235,7 +249,10 @@ async def _model_name_from_property(
     if t == "relation":
         rids = await _relation_target_page_ids(client, headers, model_prop, page_id)
         if rids:
-            name = await _page_title(client, headers, rids[0], model_cache)
+            name = await _page_title(
+                client, headers, rids[0], model_cache,
+                access_counter=access_counter, counter_key="noaccess_model",
+            )
             return name or "—"
         return None
 
@@ -292,6 +309,8 @@ async def _parse_row(
     model_cache: dict[str, str],
     chatter_cache: dict[str, str],
     shift_cache: dict[str, str],
+    *,
+    access_counter: dict | None = None,
 ) -> tuple[Any, ...]:
     notion_page_id = row.get("id")
     props = row.get("properties", {})
@@ -351,7 +370,8 @@ async def _parse_row(
     model_name = None
     if model_prop:
         model_name = await _model_name_from_property(
-            model_prop, client, headers, model_cache, notion_page_id
+            model_prop, client, headers, model_cache, notion_page_id,
+            access_counter=access_counter,
         )
     # Несколько колонок с «модел» в названии (модель / Модель общее)
     if not model_name:
@@ -362,7 +382,8 @@ async def _parse_row(
             if "модел" not in kn:
                 continue
             model_name = await _model_name_from_property(
-                val, client, headers, model_cache, notion_page_id
+                val, client, headers, model_cache, notion_page_id,
+                access_counter=access_counter,
             )
             if model_name:
                 break
@@ -374,7 +395,8 @@ async def _parse_row(
             if val is model_prop:
                 continue
             model_name = await _model_name_from_property(
-                val, client, headers, model_cache, notion_page_id
+                val, client, headers, model_cache, notion_page_id,
+                access_counter=access_counter,
             )
             if model_name:
                 break
@@ -416,7 +438,10 @@ async def _parse_row(
         p0 = cp["people"][0]
         chatter = (p0.get("name") or p0.get("id") or "").strip() or None
     elif ct == "relation" and cp.get("relation"):
-        chatter = await _page_title(client, headers, cp["relation"][0]["id"], chatter_cache)
+        chatter = await _page_title(
+            client, headers, cp["relation"][0]["id"], chatter_cache,
+            access_counter=access_counter, counter_key="noaccess_chatter",
+        )
     elif ct == "formula":
         f = cp.get("formula") or {}
         ft = f.get("type")
@@ -503,7 +528,10 @@ async def _parse_row(
     shift_id = shift_val
     shift_name = None
     if shift_val and shift_kind == "relation":
-        shift_name = await _page_title(client, headers, shift_val, shift_cache)
+        shift_name = await _page_title(
+            client, headers, shift_val, shift_cache,
+            access_counter=access_counter, counter_key="noaccess_shift",
+        )
     elif shift_val:
         shift_name = shift_val
 
@@ -661,6 +689,7 @@ async def sync_notion_transactions_for_tenant(
     model_cache: dict[str, str] = {}
     chatter_cache: dict[str, str] = {}
     shift_cache: dict[str, str] = {}
+    access_counter: dict[str, int] = {}
 
     allow_empty_model = os.getenv("NOTION_SYNC_ALLOW_EMPTY_MODEL", "").strip().lower() in (
         "1",
@@ -685,6 +714,7 @@ async def sync_notion_transactions_for_tenant(
                         model_cache,
                         chatter_cache,
                         shift_cache,
+                        access_counter=access_counter,
                     )
                     date_val, model_name, chatter, amount, shift_id, shift_name = parsed
                     # Диагностика: если chatter не найден — логируем свойства строки
@@ -774,4 +804,7 @@ async def sync_notion_transactions_for_tenant(
         "skipped_parse": skipped_parse,
         "databases": len(db_ids),
         "assigned_rows": n,
+        "noaccess_chatter": access_counter.get("noaccess_chatter", 0),
+        "noaccess_model": access_counter.get("noaccess_model", 0),
+        "noaccess_shift": access_counter.get("noaccess_shift", 0),
     }
