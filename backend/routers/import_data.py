@@ -438,13 +438,31 @@ async def confirm_google_sheets_import(
     skipped = 0
 
     try:
-        # Удаляем ВСЕ google-sheets-транзакции тенанта (и новый формат sha1-prefix,
-        # и старый формат «gsheet:{batch_id}:{idx}» без sha1).
-        # Тенант имеет один активный google-источник → это правильная семантика.
+        # Удаляем строки ТОЛЬКО этого листа.
+        #
+        # Новый формат (после sha1-фикса): gsheet:{12hex}:{batch}:{idx}
+        #   → совпадает с LIKE 'gsheet:{notion_id_prefix}%'
+        #
+        # Старый формат (первые импорты до фикса): gsheet:{uuid}:{idx}
+        #   uuid начинается с 8 hex-символов, затем дефис (xxxxxxxx-...).
+        #   Паттерн "gsheet:____________:%" (12 символов) НЕ совпадает с UUID-стилем
+        #   (там 13-й символ — буква/цифра, не ":"), поэтому добавляем отдельное условие:
+        #   удаляем gsheet:-строки, которые НЕ соответствуют паттерну нового формата —
+        #   это «осиротевшие» строки от самого первого импорта (до sha1-фикса).
+        await db.execute(
+            delete(Transaction).where(
+                Transaction.tenant_id == tenant.id,
+                Transaction.notion_id.like(f"{notion_id_prefix}%"),
+            )
+        )
+        # Совместимость: чистим строки старого формата (gsheet:{uuid}:{idx})
+        # которые не имеют sha1-префикса. Их нельзя привязать к конкретному листу,
+        # поэтому при ЛЮБОМ импорте убираем их раз и навсегда.
         await db.execute(
             delete(Transaction).where(
                 Transaction.tenant_id == tenant.id,
                 Transaction.notion_id.like("gsheet:%"),
+                ~Transaction.notion_id.like("gsheet:____________:%"),
             )
         )
 
