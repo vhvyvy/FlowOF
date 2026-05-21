@@ -62,6 +62,7 @@ app.add_middleware(
 
 from routers import (  # noqa: E402
     auth,
+    auth_google,
     overview,
     finance,
     chatters,
@@ -77,11 +78,11 @@ from routers import (  # noqa: E402
     sync,
     onboarding,
     import_data,
-    sheets_stub,
 )
 from database import engine, Base, AsyncSessionLocal  # noqa: E402
 
 app.include_router(auth.router)
+app.include_router(auth_google.router)
 app.include_router(overview.router)
 app.include_router(finance.router)
 app.include_router(chatters.router)
@@ -97,7 +98,6 @@ app.include_router(teams.router)
 app.include_router(sync.router)
 app.include_router(onboarding.router)
 app.include_router(import_data.router)
-app.include_router(sheets_stub.router)
 
 
 # ── Startup: create missing tables ───────────────────────────────────────────

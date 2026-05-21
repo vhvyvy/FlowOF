@@ -5,7 +5,7 @@ import { Button } from '@/components/ui/button'
 
 const SOURCES: { id: string; label: string; hint: string }[] = [
   { id: 'notion', label: 'Notion', hint: 'База транзакций в Notion' },
-  { id: 'google_sheets', label: 'Google Таблицы', hint: 'Скоро' },
+  { id: 'google_sheets', label: 'Google Таблицы', hint: 'Импорт через AI — без ручного маппинга' },
   { id: 'excel', label: 'Excel / CSV', hint: 'Загрузка файла' },
   { id: 'manual', label: 'Пока без импорта', hint: 'Заполнение вручную в дашборде' },
 ]

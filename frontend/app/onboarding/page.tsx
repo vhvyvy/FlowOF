@@ -25,6 +25,14 @@ export default function OnboardingPage() {
           router.replace('/dashboard')
           return
         }
+        // Гидратируем data из ранее сохранённых полей — иначе после OAuth-редиректа
+        // (?google_connected=true) Step3 не знал бы, что выбран google_sheets.
+        setData((prev) => ({
+          ...prev,
+          ...(s.source_type ? { source_type: s.source_type } : {}),
+          ...(s.agency_name ? { agency_name: s.agency_name } : {}),
+          ...(s.currency ? { currency: s.currency } : {}),
+        }))
         setUiStep(s.next_ui_step)
         setLoading(false)
       })

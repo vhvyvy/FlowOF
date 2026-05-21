@@ -1,8 +1,24 @@
 'use client'
 
-import { useState } from 'react'
+import { useCallback, useEffect, useState } from 'react'
 import { Button } from '@/components/ui/button'
-import api from '@/lib/api'
+import api, { formatApiError } from '@/lib/api'
+
+type GooglePreviewRow = {
+  date?: string | null
+  model?: string | null
+  chatter?: string | null
+  amount?: number | string | null
+  shift_id?: string | null
+}
+
+type GooglePreviewResponse = {
+  preview: GooglePreviewRow[]
+  total_rows: number
+  columns_detected: string[]
+  mapping_used: Record<string, string>
+  warnings: string[]
+}
 
 export default function Step5Preview({
   onComplete,
@@ -16,14 +32,23 @@ export default function Step5Preview({
   const src = String(data.source_type ?? '—')
   const skipImport = Boolean(data.skip_import)
   const isExcel = src === 'excel' && !skipImport
+  const isGoogle = src === 'google_sheets' && !skipImport
   const uploadId = data.upload_id as string | undefined
   const mapping = (data.mapping_confirmed as Record<string, string>) || {}
   const previewRows = (data.preview_rows as Record<string, unknown>[]) || []
   const totalRows = typeof data.total_rows === 'number' ? data.total_rows : 0
+  const spreadsheetId = data.spreadsheet_id as string | undefined
+  const sheetName = data.sheet_name as string | undefined
+  const spreadsheetName = data.spreadsheet_name as string | undefined
 
   const [busy, setBusy] = useState(false)
   const [impErr, setImpErr] = useState<string | null>(null)
   const [importStats, setImportStats] = useState<{ imported: number; skipped: number } | null>(null)
+
+  // Google Sheets: AI preview state
+  const [aiLoading, setAiLoading] = useState(false)
+  const [aiErr, setAiErr] = useState<string | null>(null)
+  const [aiData, setAiData] = useState<GooglePreviewResponse | null>(null)
 
   const runImport = async () => {
     if (!isExcel || !uploadId) return
@@ -55,6 +80,52 @@ export default function Step5Preview({
           ? (e as { response: { data: { detail: string } } }).response.data.detail
           : 'Не удалось выполнить импорт'
       setImpErr(msg)
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const analyzeGoogleSheet = useCallback(async () => {
+    if (!spreadsheetId || !sheetName) {
+      setAiErr('Не выбрана таблица или лист — вернитесь на шаг подключения.')
+      return
+    }
+    setAiLoading(true)
+    setAiErr(null)
+    try {
+      const res = await api.post<GooglePreviewResponse>('/api/v1/import/google-sheets/preview', {
+        spreadsheet_id: spreadsheetId,
+        sheet_name: sheetName,
+      })
+      setAiData(res.data)
+    } catch (e) {
+      setAiErr(formatApiError(e))
+    } finally {
+      setAiLoading(false)
+    }
+  }, [spreadsheetId, sheetName])
+
+  useEffect(() => {
+    if (isGoogle && !aiData && !aiLoading && !aiErr) {
+      void analyzeGoogleSheet()
+    }
+  }, [isGoogle, aiData, aiLoading, aiErr, analyzeGoogleSheet])
+
+  const confirmGoogleImport = async () => {
+    if (!spreadsheetId || !sheetName) return
+    setBusy(true)
+    setImpErr(null)
+    try {
+      const res = await api.post<{ rows_imported?: number; rows_skipped?: number }>(
+        '/api/v1/import/google-sheets/confirm',
+        { spreadsheet_id: spreadsheetId, sheet_name: sheetName }
+      )
+      setImportStats({
+        imported: res.data.rows_imported ?? 0,
+        skipped: res.data.rows_skipped ?? 0,
+      })
+    } catch (e) {
+      setImpErr(formatApiError(e))
     } finally {
       setBusy(false)
     }
@@ -125,15 +196,106 @@ export default function Step5Preview({
         </div>
       )}
 
+      {isGoogle && (
+        <div className="mb-6">
+          {spreadsheetName && (
+            <p className="text-slate-400 text-sm mb-2">
+              Таблица: <span className="text-slate-200">{spreadsheetName}</span>
+              {sheetName ? <> · лист <span className="text-slate-200">{sheetName}</span></> : null}
+            </p>
+          )}
+
+          {aiLoading && (
+            <div className="rounded-lg border border-slate-700/50 bg-slate-800/40 p-4 text-center">
+              <div className="w-8 h-8 border-2 border-indigo-500 border-t-transparent rounded-full animate-spin mx-auto mb-3" />
+              <p className="text-slate-200 text-sm font-medium">AI анализирует таблицу…</p>
+              <p className="text-slate-500 text-xs mt-1">Обычно занимает 10–30 секунд</p>
+            </div>
+          )}
+
+          {aiErr && (
+            <div className="rounded-lg border border-red-500/30 bg-red-500/10 p-3 mb-3">
+              <p className="text-red-300 text-sm mb-2">{aiErr}</p>
+              <button
+                type="button"
+                onClick={analyzeGoogleSheet}
+                className="text-red-300 hover:text-red-200 text-xs underline"
+              >
+                Попробовать снова
+              </button>
+            </div>
+          )}
+
+          {aiData && !aiLoading && (
+            <>
+              <p className="text-slate-400 text-sm mb-2">
+                AI нашёл <span className="text-slate-100 font-medium">{aiData.total_rows}</span> транзакций. Проверьте
+                первые строки.
+              </p>
+
+              {aiData.warnings.length > 0 && (
+                <div className="rounded-lg border border-amber-500/30 bg-amber-500/10 p-3 mb-3 space-y-1">
+                  {aiData.warnings.map((w, i) => (
+                    <p key={i} className="text-amber-300 text-xs">
+                      ⚠ {w}
+                    </p>
+                  ))}
+                </div>
+              )}
+
+              <div className="overflow-x-auto rounded-lg border border-slate-700/50 max-h-56 text-xs mb-3">
+                <table className="min-w-full text-left text-slate-300">
+                  <thead className="bg-slate-800/80 text-slate-400 sticky top-0">
+                    <tr>
+                      <th className="px-2 py-1 font-normal">Дата</th>
+                      <th className="px-2 py-1 font-normal">Модель</th>
+                      <th className="px-2 py-1 font-normal">Чаттер</th>
+                      <th className="px-2 py-1 font-normal text-right">Сумма</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {aiData.preview.map((row, i) => (
+                      <tr key={i} className="border-t border-slate-700/40">
+                        <td className="px-2 py-1 whitespace-nowrap">{row.date ?? '—'}</td>
+                        <td className="px-2 py-1 whitespace-nowrap max-w-[140px] truncate">{row.model ?? '—'}</td>
+                        <td className="px-2 py-1 whitespace-nowrap max-w-[140px] truncate">{row.chatter ?? '—'}</td>
+                        <td className="px-2 py-1 whitespace-nowrap text-right text-emerald-400">
+                          {row.amount !== null && row.amount !== undefined && row.amount !== ''
+                            ? `$${Number(row.amount).toFixed(2)}`
+                            : '—'}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+
+              {importStats ? (
+                <p className="text-emerald-400 text-sm">
+                  Импортировано: {importStats.imported}, пропущено строк: {importStats.skipped}
+                </p>
+              ) : (
+                <Button className="w-full" onClick={confirmGoogleImport} disabled={busy}>
+                  {busy ? 'Импортируем…' : `Импортировать ${aiData.total_rows} транзакций`}
+                </Button>
+              )}
+              {impErr && <p className="text-red-400 text-sm mt-2">{impErr}</p>}
+            </>
+          )}
+        </div>
+      )}
+
       <Button
         className="w-full"
         onClick={finish}
-        disabled={isExcel && !importStats && !skipImport}
+        disabled={(isExcel || isGoogle) && !importStats && !skipImport}
       >
         Завершить и открыть дашборд
       </Button>
-      {isExcel && !importStats && !skipImport && (
-        <p className="text-slate-500 text-xs mt-2 text-center">Сначала нажмите «Импортировать данные».</p>
+      {(isExcel || isGoogle) && !importStats && !skipImport && (
+        <p className="text-slate-500 text-xs mt-2 text-center">
+          {isExcel ? 'Сначала нажмите «Импортировать данные».' : 'Сначала подтвердите импорт после анализа AI.'}
+        </p>
       )}
     </div>
   )

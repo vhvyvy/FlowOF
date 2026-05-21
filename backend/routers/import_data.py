@@ -1,10 +1,12 @@
-"""Загрузка CSV/XLSX, превью, подтверждение маппинга и импорт в transactions."""
+"""Загрузка CSV/XLSX + Google Sheets (через AI), превью, подтверждение маппинга и импорт в transactions."""
 from __future__ import annotations
 
 import logging
 import os
-from datetime import datetime
+from datetime import date, datetime
+from typing import Any
 
+import pandas as pd
 from fastapi import APIRouter, Depends, File, HTTPException, UploadFile, status
 from pydantic import BaseModel, Field
 from sqlalchemy import delete, update
@@ -14,6 +16,7 @@ from database import AsyncSessionLocal, get_db
 from dependencies import get_current_tenant
 from import_contract import ColumnMapping, ExcelImportState, TenantSourceMappingConfig
 from models import SyncLog, Tenant, TenantSource, Transaction
+from services.ai_importer import AIImporter
 from services.credentials_crypto import encrypt_credentials_blob
 from services.file_import import (
     build_transactions_from_dataframe,
@@ -21,6 +24,11 @@ from services.file_import import (
     load_dataframe,
     new_batch_id,
     suggest_mapping,
+)
+from services.google_sheets_service import GoogleAuthError, GoogleSheetsService
+from services.google_unify import (
+    get_google_access_token,
+    save_selected_spreadsheet,
 )
 from services.upload_store import get_upload_path, pop_upload, save_upload
 
@@ -218,3 +226,257 @@ class SuggestRequest(BaseModel):
 @router.post("/suggest-mapping")
 async def post_suggest_mapping(body: SuggestRequest):
     return {"mapping": suggest_mapping(body.columns)}
+
+
+# ─────────────────────────── Google Sheets + AI ───────────────────────────
+
+
+class GoogleSheetImportRequest(BaseModel):
+    spreadsheet_id: str = Field(..., min_length=10)
+    sheet_name: str = Field(..., min_length=1)
+
+
+class GoogleSheetPreviewResponse(BaseModel):
+    preview: list[dict[str, Any]]
+    total_rows: int
+    columns_detected: list[str]
+    mapping_used: dict[str, str]
+    warnings: list[str]
+
+
+class GoogleSheetConfirmResponse(BaseModel):
+    success: bool
+    rows_imported: int
+    rows_skipped: int
+    sync_log_id: int
+
+
+def _resolve_openai_key(tenant: Tenant) -> str:
+    key = (tenant.openai_key or "").strip() or (os.getenv("OPENAI_API_KEY") or "").strip()
+    if not key:
+        raise HTTPException(
+            status_code=503,
+            detail="OPENAI_API_KEY не настроен — AI-импорт недоступен",
+        )
+    return key
+
+
+def _coerce_amount(value: Any) -> float | None:
+    if value is None:
+        return None
+    if isinstance(value, (int, float)):
+        return float(value)
+    s = str(value).strip()
+    if not s:
+        return None
+    # GPT уже почистил, но на всякий случай — снимем мусор.
+    cleaned = (
+        s.replace("$", "")
+        .replace("€", "")
+        .replace("₽", "")
+        .replace("руб", "")
+        .replace(" ", "")
+        .replace("\u00a0", "")
+        .replace(",", ".")
+    )
+    try:
+        return float(cleaned)
+    except (TypeError, ValueError):
+        return None
+
+
+def _coerce_date(value: Any) -> date | None:
+    if value is None or value == "":
+        return None
+    if isinstance(value, datetime):
+        return value.date()
+    if isinstance(value, date):
+        return value
+    try:
+        ts = pd.to_datetime(value, errors="coerce", utc=False)
+    except Exception:
+        return None
+    if ts is None or pd.isna(ts):
+        return None
+    return ts.to_pydatetime().date()
+
+
+async def _fetch_csv_from_google(
+    db: AsyncSession, tenant: Tenant, spreadsheet_id: str, sheet_name: str
+) -> str:
+    try:
+        access_token = await get_google_access_token(db, tenant.id)
+    except GoogleAuthError as e:
+        raise HTTPException(status_code=400, detail=f"Google: {e}") from e
+
+    svc = GoogleSheetsService(access_token)
+    try:
+        csv_content = await svc.download_as_csv(spreadsheet_id, sheet_name)
+    except GoogleAuthError as e:
+        raise HTTPException(status_code=401, detail=f"Google авторизация: {e}") from e
+    except Exception as e:
+        logger.warning("download_as_csv failed tenant=%s sid=%s: %s", tenant.id, spreadsheet_id, e)
+        raise HTTPException(status_code=502, detail="Не удалось скачать таблицу из Google") from e
+
+    if not csv_content.strip():
+        raise HTTPException(status_code=400, detail="Лист пустой — нечего импортировать")
+    return csv_content
+
+
+@router.post("/google-sheets/preview", response_model=GoogleSheetPreviewResponse)
+async def preview_google_sheets(
+    body: GoogleSheetImportRequest,
+    tenant: Tenant = Depends(get_current_tenant),
+    db: AsyncSession = Depends(get_db),
+):
+    """Скачать таблицу, прогнать через AI и вернуть первые 10 нормализованных строк."""
+    openai_key = _resolve_openai_key(tenant)
+    csv_content = await _fetch_csv_from_google(db, tenant, body.spreadsheet_id, body.sheet_name)
+
+    importer = AIImporter(openai_key=openai_key)
+    try:
+        result = await importer.process(csv_content)
+    except Exception as e:
+        logger.exception("AI importer failed tenant=%s", tenant.id)
+        raise HTTPException(status_code=500, detail=f"AI-обработка не удалась: {e}") from e
+
+    # Запоминаем выбор пользователя, но не активируем источник (это сделает confirm).
+    try:
+        await save_selected_spreadsheet(
+            db,
+            tenant.id,
+            spreadsheet_id=body.spreadsheet_id,
+            sheet_name=body.sheet_name,
+            activate=False,
+        )
+    except GoogleAuthError as e:
+        logger.warning("save_selected_spreadsheet failed tenant=%s: %s", tenant.id, e)
+
+    return GoogleSheetPreviewResponse(
+        preview=result["rows"][:10],
+        total_rows=result["total"],
+        columns_detected=result["original_columns"],
+        mapping_used=result["mapping"],
+        warnings=result["warnings"],
+    )
+
+
+@router.post("/google-sheets/confirm", response_model=GoogleSheetConfirmResponse)
+async def confirm_google_sheets_import(
+    body: GoogleSheetImportRequest,
+    tenant: Tenant = Depends(get_current_tenant),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Полный AI-импорт: загрузка таблицы → нормализация GPT-4o → INSERT в transactions.
+    Старые строки этого источника удаляются (как у excel-импорта), чтобы повторный импорт был идемпотентен.
+    """
+    openai_key = _resolve_openai_key(tenant)
+    csv_content = await _fetch_csv_from_google(db, tenant, body.spreadsheet_id, body.sheet_name)
+
+    importer = AIImporter(openai_key=openai_key)
+    started = datetime.utcnow()
+    try:
+        result = await importer.process(csv_content)
+    except Exception as e:
+        logger.exception("AI importer failed tenant=%s", tenant.id)
+        raise HTTPException(status_code=500, detail=f"AI-обработка не удалась: {e}") from e
+
+    rows = result["rows"]
+    batch_id = new_batch_id()
+    notion_id_prefix = "gsheet:"
+    imported = 0
+    skipped = 0
+
+    try:
+        await db.execute(
+            delete(Transaction).where(
+                Transaction.tenant_id == tenant.id,
+                Transaction.notion_id.like(f"{notion_id_prefix}%"),
+            )
+        )
+
+        for idx, row in enumerate(rows):
+            try:
+                amount = _coerce_amount(row.get("amount"))
+                if amount is None:
+                    skipped += 1
+                    continue
+                tx_date = _coerce_date(row.get("date"))
+                shift_val = row.get("shift_id")
+                shift_str = str(shift_val).strip() if shift_val not in (None, "") else None
+                db.add(
+                    Transaction(
+                        tenant_id=tenant.id,
+                        date=tx_date,
+                        model=(str(row.get("model")).strip() if row.get("model") else None),
+                        chatter=(str(row.get("chatter")).strip() if row.get("chatter") else None),
+                        amount=amount,
+                        shift_id=shift_str,
+                        notion_id=f"{notion_id_prefix}{batch_id}:{idx}",
+                    )
+                )
+                imported += 1
+            except Exception as e:
+                logger.debug("row %s skipped: %s", idx, e)
+                skipped += 1
+
+        finished = datetime.utcnow()
+
+        await db.execute(
+            update(Tenant).where(Tenant.id == tenant.id).values(last_sync_at=finished)
+        )
+
+        # Активируем google_sheets источник, отметим выбор.
+        await save_selected_spreadsheet(
+            db,
+            tenant.id,
+            spreadsheet_id=body.spreadsheet_id,
+            sheet_name=body.sheet_name,
+            activate=True,
+        )
+
+        log_row = SyncLog(
+            tenant_id=tenant.id,
+            source_type="google_sheets",
+            started_at=started,
+            finished_at=finished,
+            status="success",
+            rows_imported=imported,
+            rows_skipped=skipped,
+        )
+        db.add(log_row)
+        await db.flush()
+        await db.commit()
+        log_id = log_row.id
+    except HTTPException:
+        await db.rollback()
+        raise
+    except Exception as e:
+        await db.rollback()
+        logger.exception("google sheets import failed tenant=%s", tenant.id)
+        async with AsyncSessionLocal() as s:
+            s.add(
+                SyncLog(
+                    tenant_id=tenant.id,
+                    source_type="google_sheets",
+                    started_at=started,
+                    finished_at=datetime.utcnow(),
+                    status="failed",
+                    rows_imported=0,
+                    rows_skipped=skipped,
+                    error_message=str(e)[:2000],
+                )
+            )
+            await s.commit()
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Ошибка записи в базу",
+        ) from e
+
+    return GoogleSheetConfirmResponse(
+        success=True,
+        rows_imported=imported,
+        rows_skipped=skipped,
+        sync_log_id=log_id,
+    )

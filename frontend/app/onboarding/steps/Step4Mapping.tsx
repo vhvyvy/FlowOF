@@ -35,6 +35,21 @@ export default function Step4Mapping({
   const [uploading, setUploading] = useState(false)
   const [err, setErr] = useState<string | null>(null)
 
+  if (source === 'google_sheets') {
+    return (
+      <div>
+        <h2 className="text-xl font-semibold text-slate-100 mb-2">Маппинг — не требуется</h2>
+        <p className="text-slate-400 text-sm mb-6">
+          Для Google Таблиц колонки определяет AI: на следующем шаге GPT‑4o прочитает выбранный лист, нормализует
+          даты/суммы и покажет превью первых строк перед импортом.
+        </p>
+        <Button className="w-full" onClick={() => onComplete({ skip_import: false, mapping_confirmed: {} })}>
+          Далее — AI‑анализ
+        </Button>
+      </div>
+    )
+  }
+
   if (source !== 'excel') {
     return (
       <div>
