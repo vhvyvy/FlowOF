@@ -1,11 +1,14 @@
 'use client'
 
+import { useEffect, useRef } from 'react'
 import { ChevronLeft, ChevronRight } from 'lucide-react'
 import { useQuery } from '@tanstack/react-query'
 import { Button } from '@/components/ui/button'
+import { MonthPicker } from '@/components/layout/MonthPicker'
 import { useMonthStore } from '@/lib/hooks/useMonth'
 import { useTeamStore } from '@/lib/hooks/useTeam'
-import { formatMonth, getPrevMonth, getNextMonth } from '@/lib/utils'
+import { useMonthsSummary } from '@/lib/hooks/useMonthsSummary'
+import { getPrevMonth, getNextMonth } from '@/lib/utils'
 import api from '@/lib/api'
 import type { TeamOut } from '@/types'
 
@@ -16,11 +19,31 @@ interface HeaderProps {
 export function Header({ title }: HeaderProps) {
   const { month, year, setMonth } = useMonthStore()
   const { teamId, setTeamId } = useTeamStore()
+  const { data: summary } = useMonthsSummary(teamId)
 
   const { data: teams } = useQuery({
     queryKey: ['teams'],
     queryFn: () => api.get<TeamOut[]>('/api/v1/teams').then((r) => r.data),
   })
+
+  // Один раз за сессию — если в текущем выбранном месяце нет данных, а где-то есть,
+  // прыгаем на самый свежий месяц с данными. Это решает кейс «по умолчанию текущий
+  // месяц, но импорт за прошлый период — экран пустой».
+  const autoSwitchedRef = useRef(false)
+  useEffect(() => {
+    if (autoSwitchedRef.current) return
+    if (!summary || summary.months.length === 0) return
+    const hasCurrent = summary.months.some(
+      (m) => m.month === month && m.year === year && m.revenue > 0
+    )
+    if (!hasCurrent) {
+      const latest = summary.months[0] // уже отсортировано год desc, месяц desc
+      if (latest && (latest.month !== month || latest.year !== year)) {
+        setMonth(latest.month, latest.year)
+      }
+    }
+    autoSwitchedRef.current = true
+  }, [summary, month, year, setMonth])
 
   const prev = () => {
     const p = getPrevMonth(month, year)
@@ -59,13 +82,11 @@ export function Header({ title }: HeaderProps) {
             </select>
           </label>
         )}
-        <div className="flex items-center gap-2">
+        <div className="flex items-center gap-1">
           <Button variant="ghost" size="icon" onClick={prev}>
             <ChevronLeft className="h-4 w-4" />
           </Button>
-          <span className="text-sm text-slate-300 min-w-[130px] text-center">
-            {formatMonth(month, year)}
-          </span>
+          <MonthPicker month={month} year={year} onChange={setMonth} teamId={teamId} />
           <Button variant="ghost" size="icon" onClick={next} disabled={isCurrent}>
             <ChevronRight className="h-4 w-4" />
           </Button>

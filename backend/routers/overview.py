@@ -3,6 +3,7 @@ from datetime import date
 from calendar import monthrange
 
 from fastapi import APIRouter, Depends, HTTPException, Query
+from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, func, and_
 
@@ -16,6 +17,17 @@ from team_economics import sum_revenue, aggregate_teams
 
 logger = logging.getLogger("flowof.overview")
 router = APIRouter(prefix="/api/v1", tags=["overview"])
+
+
+class MonthSummary(BaseModel):
+    year: int
+    month: int
+    revenue: float
+    transactions_count: int
+
+
+class MonthsSummaryResponse(BaseModel):
+    months: list[MonthSummary]
 
 
 def _month_range(year: int, month: int):
@@ -259,3 +271,55 @@ async def get_overview(
     except Exception as e:
         logger.error("overview error tenant=%d: %s", tenant.id, e, exc_info=True)
         raise HTTPException(status_code=500, detail="Ошибка загрузки данных")
+
+
+@router.get("/overview/months-summary", response_model=MonthsSummaryResponse)
+async def get_months_summary(
+    team_id: int | None = Query(None, description="Filter to one team (None = all)"),
+    tenant: Tenant = Depends(get_current_tenant),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Возвращает агрегированную сводку транзакций по всем месяцам, где есть данные.
+    Используется фронтом для подсветки месяцев в календаре + мини-баров выручки.
+    """
+    try:
+        await ensure_default_team(db, tenant.id)
+        teams = await list_teams(db, tenant.id)
+        default_team_id = teams[0].id if teams else None
+
+        cond = [
+            Transaction.tenant_id == tenant.id,
+            Transaction.date.isnot(None),
+        ]
+        if team_id is not None:
+            tc = team_transaction_clause(team_id, default_team_id)
+            if tc is not None:
+                cond.append(tc)
+
+        year_col = func.extract("year", Transaction.date).label("y")
+        month_col = func.extract("month", Transaction.date).label("m")
+        result = await db.execute(
+            select(
+                year_col,
+                month_col,
+                func.coalesce(func.sum(Transaction.amount), 0).label("revenue"),
+                func.count(Transaction.id).label("cnt"),
+            )
+            .where(and_(*cond))
+            .group_by(year_col, month_col)
+            .order_by(year_col.desc(), month_col.desc())
+        )
+        months = [
+            MonthSummary(
+                year=int(row.y),
+                month=int(row.m),
+                revenue=float(row.revenue or 0),
+                transactions_count=int(row.cnt or 0),
+            )
+            for row in result.all()
+        ]
+        return MonthsSummaryResponse(months=months)
+    except Exception as e:
+        logger.error("months-summary error tenant=%d: %s", tenant.id, e, exc_info=True)
+        raise HTTPException(status_code=500, detail="Ошибка загрузки сводки по месяцам")
