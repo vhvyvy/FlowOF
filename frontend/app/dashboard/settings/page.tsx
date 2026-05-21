@@ -6,7 +6,7 @@ import api from '@/lib/api'
 import { TEAM_COLOR_OPTIONS, teamColor } from '@/lib/teamColors'
 import { Header } from '@/components/layout/Header'
 import { Skeleton } from '@/components/ui/skeleton'
-import { Save, RefreshCw, AlertCircle, CheckCircle2, Key, Eye, EyeOff, Users, Pencil, Trash2, Check, X, CloudDownload } from 'lucide-react'
+import { Save, RefreshCw, AlertCircle, CheckCircle2, Key, Eye, EyeOff, Users, Pencil, Trash2, Check, X, CloudDownload, Table2, ExternalLink, Unlink } from 'lucide-react'
 import type { TeamOut } from '@/types'
 
 interface Settings {
@@ -842,6 +842,175 @@ function TeamsSection({ notionImport }: { notionImport: NotionImportMutation }) 
   )
 }
 
+// ─────────────────────────── Google Sheets Section ───────────────────────────
+
+interface GoogleStatus {
+  connected: boolean
+  active: boolean
+  spreadsheet_id: string | null
+  sheet_name: string | null
+}
+
+interface GoogleImportResult {
+  rows_imported: number
+  rows_skipped: number
+}
+
+function GoogleSheetsSection() {
+  const qc = useQueryClient()
+  const [importing, setImporting] = useState(false)
+  const [importResult, setImportResult] = useState<GoogleImportResult | null>(null)
+  const [importError, setImportError] = useState<string | null>(null)
+
+  const { data: status, isLoading } = useQuery<GoogleStatus>({
+    queryKey: ['google-status'],
+    queryFn: () => api.get<GoogleStatus>('/api/v1/google/status').then((r) => r.data),
+    staleTime: 30_000,
+  })
+
+  const disconnectMut = useMutation({
+    mutationFn: () => api.post('/api/v1/google/disconnect'),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['google-status'] })
+      setImportResult(null)
+      setImportError(null)
+    },
+  })
+
+  const handleReconnect = async () => {
+    try {
+      const res = await api.get<{ url: string }>('/api/v1/google/auth-url')
+      window.location.href = res.data.url
+    } catch {
+      setImportError('Не удалось получить ссылку на Google авторизацию')
+    }
+  }
+
+  const handleImport = async () => {
+    if (!status?.spreadsheet_id || !status?.sheet_name) return
+    setImporting(true)
+    setImportResult(null)
+    setImportError(null)
+    try {
+      const res = await api.post<GoogleImportResult>('/api/v1/import/google-sheets/confirm', {
+        spreadsheet_id: status.spreadsheet_id,
+        sheet_name: status.sheet_name,
+        // rows не передаём — бэкенд сам скачает таблицу и запустит AI
+      })
+      setImportResult(res.data)
+      qc.invalidateQueries({ queryKey: ['overview'] })
+      qc.invalidateQueries({ queryKey: ['finance'] })
+      qc.invalidateQueries({ queryKey: ['chatters'] })
+      qc.invalidateQueries({ queryKey: ['months-summary'] })
+    } catch (e: unknown) {
+      const ax = e as { response?: { data?: { detail?: string } }; message?: string }
+      setImportError(ax.response?.data?.detail ?? ax.message ?? 'Ошибка импорта')
+    } finally {
+      setImporting(false)
+    }
+  }
+
+  return (
+    <div className="bg-slate-800/60 border border-slate-700/50 rounded-xl px-5 py-5 space-y-4">
+      <p className="text-xs font-semibold text-slate-400 uppercase tracking-widest">Google Таблицы</p>
+
+      {isLoading && (
+        <p className="text-xs text-slate-500">Загрузка статуса…</p>
+      )}
+
+      {!isLoading && !status?.connected && (
+        <div className="space-y-3">
+          <p className="text-sm text-slate-400">Google Sheets не подключён.</p>
+          <button
+            type="button"
+            onClick={handleReconnect}
+            className="flex items-center gap-2 px-4 py-2 text-sm bg-white text-slate-900 rounded-lg hover:bg-slate-100 transition-colors font-medium"
+          >
+            <ExternalLink className="h-4 w-4" />
+            Войти через Google
+          </button>
+        </div>
+      )}
+
+      {!isLoading && status?.connected && (
+        <div className="space-y-4">
+          {/* Текущий источник */}
+          <div className="flex items-start gap-3 bg-slate-700/30 rounded-lg p-3 border border-slate-600/30">
+            <Table2 className="h-4 w-4 text-emerald-400 mt-0.5 shrink-0" />
+            <div className="min-w-0">
+              <p className="text-xs text-slate-500 mb-0.5">Подключённый лист</p>
+              {status.spreadsheet_id ? (
+                <>
+                  <p className="text-sm text-slate-200 font-medium truncate">
+                    {status.sheet_name ?? 'лист не выбран'}
+                  </p>
+                  <p className="text-[11px] text-slate-500 font-mono truncate mt-0.5">
+                    {status.spreadsheet_id}
+                  </p>
+                </>
+              ) : (
+                <p className="text-sm text-slate-400 italic">Таблица не выбрана — переподключитесь и выберите листы</p>
+              )}
+            </div>
+          </div>
+
+          {/* Результат последнего импорта */}
+          {importResult && (
+            <div className="flex items-center gap-2 text-xs text-emerald-300 bg-emerald-500/10 border border-emerald-500/30 rounded-lg px-3 py-2">
+              <CheckCircle2 className="h-3.5 w-3.5 shrink-0" />
+              Импортировано: {importResult.rows_imported}, пропущено: {importResult.rows_skipped}
+            </div>
+          )}
+          {importError && (
+            <div className="flex items-start gap-2 text-xs text-red-300 bg-red-500/5 border border-red-500/30 rounded-lg px-3 py-2">
+              <AlertCircle className="h-3.5 w-3.5 mt-0.5 shrink-0" />
+              {importError}
+            </div>
+          )}
+
+          {/* Кнопки */}
+          <div className="flex flex-wrap gap-2">
+            <button
+              type="button"
+              onClick={handleImport}
+              disabled={importing || !status.spreadsheet_id || !status.sheet_name}
+              className="flex items-center gap-2 px-4 py-2 text-sm bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 text-white rounded-lg transition-colors"
+            >
+              {importing
+                ? <><RefreshCw className="h-4 w-4 animate-spin" />AI импортирует…</>
+                : <><CloudDownload className="h-4 w-4" />Импортировать сейчас</>
+              }
+            </button>
+
+            <button
+              type="button"
+              onClick={handleReconnect}
+              className="flex items-center gap-2 px-3 py-2 text-sm border border-slate-600 text-slate-300 hover:border-slate-400 hover:text-slate-100 rounded-lg transition-colors"
+            >
+              <ExternalLink className="h-4 w-4" />
+              Сменить таблицу
+            </button>
+
+            <button
+              type="button"
+              onClick={() => disconnectMut.mutate()}
+              disabled={disconnectMut.isPending}
+              className="flex items-center gap-2 px-3 py-2 text-sm border border-slate-700 text-slate-500 hover:border-rose-500/50 hover:text-rose-400 rounded-lg transition-colors"
+            >
+              <Unlink className="h-4 w-4" />
+              Отключить
+            </button>
+          </div>
+
+          <p className="text-[11px] text-slate-500">
+            «Импортировать сейчас» — AI снова скачает таблицу и перезальёт данные этого листа (безопасно: другие источники не затрагиваются).
+          </p>
+        </div>
+      )}
+    </div>
+  )
+}
+
 function IntegrationsSection() {
   const qc = useQueryClient()
   const [omKey, setOmKey] = useState('')
@@ -1041,6 +1210,8 @@ export default function SettingsPage() {
       <div className="max-w-3xl space-y-6">
 
       <IntegrationsSection />
+
+      <GoogleSheetsSection />
 
       <GlobalExpensesNotionSection
         value={local.notion_expenses_database_ids}
