@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import logging
 import os
+import hashlib
 from datetime import date, datetime
 from typing import Any
 
@@ -236,7 +237,20 @@ class GoogleSheetImportRequest(BaseModel):
     sheet_name: str = Field(..., min_length=1)
 
 
+class GoogleSheetConfirmRequest(GoogleSheetImportRequest):
+    """confirm: можно прислать уже подсчитанные AI-rows (preview), чтобы не звать GPT повторно."""
+
+    rows: list[dict[str, Any]] | None = Field(
+        default=None,
+        description="Готовые rows от /preview. Если None — confirm заново вызовет AI на полной таблице.",
+    )
+
+
 class GoogleSheetPreviewResponse(BaseModel):
+    rows: list[dict[str, Any]] = Field(
+        default_factory=list,
+        description="Полный набор нормализованных строк (используется фронтом для /confirm).",
+    )
     preview: list[dict[str, Any]]
     total_rows: int
     columns_detected: list[str]
@@ -249,6 +263,16 @@ class GoogleSheetConfirmResponse(BaseModel):
     rows_imported: int
     rows_skipped: int
     sync_log_id: int
+
+
+def _gsheet_dedupe_prefix(spreadsheet_id: str, sheet_name: str) -> str:
+    """
+    Стабильный (но короткий) префикс notion_id для строки конкретного (spreadsheet, sheet).
+    Позволяет идемпотентно перезаливать импорт ИЗ ЭТОГО листа, не трогая другие google-импорты тенанта.
+    """
+    raw = f"{spreadsheet_id.strip()}|{sheet_name.strip()}".encode("utf-8")
+    digest = hashlib.sha1(raw).hexdigest()[:12]  # 48 бит — для одного tenant пересечений практически нет
+    return f"gsheet:{digest}:"
 
 
 def _resolve_openai_key(tenant: Tenant) -> str:
@@ -329,7 +353,7 @@ async def preview_google_sheets(
     tenant: Tenant = Depends(get_current_tenant),
     db: AsyncSession = Depends(get_db),
 ):
-    """Скачать таблицу, прогнать через AI и вернуть первые 10 нормализованных строк."""
+    """Скачать таблицу, прогнать через AI и вернуть полный результат (preview + полный rows для confirm)."""
     openai_key = _resolve_openai_key(tenant)
     csv_content = await _fetch_csv_from_google(db, tenant, body.spreadsheet_id, body.sheet_name)
 
@@ -339,6 +363,17 @@ async def preview_google_sheets(
     except Exception as e:
         logger.exception("AI importer failed tenant=%s", tenant.id)
         raise HTTPException(status_code=500, detail=f"AI-обработка не удалась: {e}") from e
+
+    rows = result.get("rows") or []
+    if not rows:
+        # AI вообще ничего не распознал — это не «0 импортировано», а ошибка структуры файла.
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                "AI не распознал ни одной транзакции в выбранном листе. "
+                "Проверьте, что в листе есть столбцы с датой и суммой, а строки содержат значения."
+            ),
+        )
 
     # Запоминаем выбор пользователя, но не активируем источник (это сделает confirm).
     try:
@@ -353,7 +388,8 @@ async def preview_google_sheets(
         logger.warning("save_selected_spreadsheet failed tenant=%s: %s", tenant.id, e)
 
     return GoogleSheetPreviewResponse(
-        preview=result["rows"][:10],
+        rows=rows,
+        preview=rows[:10],
         total_rows=result["total"],
         columns_detected=result["original_columns"],
         mapping_used=result["mapping"],
@@ -363,28 +399,41 @@ async def preview_google_sheets(
 
 @router.post("/google-sheets/confirm", response_model=GoogleSheetConfirmResponse)
 async def confirm_google_sheets_import(
-    body: GoogleSheetImportRequest,
+    body: GoogleSheetConfirmRequest,
     tenant: Tenant = Depends(get_current_tenant),
     db: AsyncSession = Depends(get_db),
 ):
     """
-    Полный AI-импорт: загрузка таблицы → нормализация GPT-4o → INSERT в transactions.
-    Старые строки этого источника удаляются (как у excel-импорта), чтобы повторный импорт был идемпотентен.
+    Подтверждение AI-импорта.
+
+    Если фронт передал `rows` (из ответа /preview) — используем их (нет повторного GPT-вызова).
+    Иначе (например, фоновый sync без UI) — заново скачиваем таблицу и нормализуем через AI.
+    Чистим только записи ЭТОГО (spreadsheet, sheet), чтобы не задеть другие google-источники тенанта.
     """
-    openai_key = _resolve_openai_key(tenant)
-    csv_content = await _fetch_csv_from_google(db, tenant, body.spreadsheet_id, body.sheet_name)
-
-    importer = AIImporter(openai_key=openai_key)
     started = datetime.utcnow()
-    try:
-        result = await importer.process(csv_content)
-    except Exception as e:
-        logger.exception("AI importer failed tenant=%s", tenant.id)
-        raise HTTPException(status_code=500, detail=f"AI-обработка не удалась: {e}") from e
 
-    rows = result["rows"]
+    rows: list[dict[str, Any]]
+    if body.rows is not None:
+        rows = [r for r in body.rows if isinstance(r, dict)]
+    else:
+        openai_key = _resolve_openai_key(tenant)
+        csv_content = await _fetch_csv_from_google(db, tenant, body.spreadsheet_id, body.sheet_name)
+        importer = AIImporter(openai_key=openai_key)
+        try:
+            result = await importer.process(csv_content)
+        except Exception as e:
+            logger.exception("AI importer failed tenant=%s", tenant.id)
+            raise HTTPException(status_code=500, detail=f"AI-обработка не удалась: {e}") from e
+        rows = result.get("rows") or []
+
+    if not rows:
+        raise HTTPException(
+            status_code=422,
+            detail="Нечего импортировать — AI вернул пустой результат.",
+        )
+
     batch_id = new_batch_id()
-    notion_id_prefix = "gsheet:"
+    notion_id_prefix = _gsheet_dedupe_prefix(body.spreadsheet_id, body.sheet_name)
     imported = 0
     skipped = 0
 

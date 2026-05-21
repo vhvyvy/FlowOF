@@ -13,6 +13,7 @@ type GooglePreviewRow = {
 }
 
 type GooglePreviewResponse = {
+  rows?: GooglePreviewRow[]
   preview: GooglePreviewRow[]
   total_rows: number
   columns_detected: string[]
@@ -116,9 +117,17 @@ export default function Step5Preview({
     setBusy(true)
     setImpErr(null)
     try {
+      // Если есть rows из preview — шлём их, чтобы избежать повторного вызова GPT-4o (платный).
+      const payload: Record<string, unknown> = {
+        spreadsheet_id: spreadsheetId,
+        sheet_name: sheetName,
+      }
+      if (aiData?.rows && aiData.rows.length > 0) {
+        payload.rows = aiData.rows
+      }
       const res = await api.post<{ rows_imported?: number; rows_skipped?: number }>(
         '/api/v1/import/google-sheets/confirm',
-        { spreadsheet_id: spreadsheetId, sheet_name: sheetName }
+        payload
       )
       setImportStats({
         imported: res.data.rows_imported ?? 0,
