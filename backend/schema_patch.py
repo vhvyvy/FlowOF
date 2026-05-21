@@ -68,6 +68,8 @@ _PATCHES: list[tuple[str, bool]] = [
     ),
     # Multi-DB on a team: notion_database_id can hold several IDs (comma/newline separated)
     ("ALTER TABLE teams_mt ALTER COLUMN notion_database_id TYPE TEXT", False),
+    # Admin panel
+    ("ALTER TABLE tenants ADD COLUMN IF NOT EXISTS is_admin BOOLEAN NOT NULL DEFAULT FALSE", False),
 ]
 
 

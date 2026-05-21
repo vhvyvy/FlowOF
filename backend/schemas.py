@@ -49,6 +49,7 @@ class TenantOut(BaseModel):
     email: str
     plan: str
     active: bool
+    is_admin: bool = False
     created_at: datetime
 
     model_config = {"from_attributes": True}
@@ -56,6 +57,28 @@ class TenantOut(BaseModel):
 
 class TenantPasswordUpdate(BaseModel):
     password: str
+
+
+# ── Admin panel ────────────────────────────────────────────────────────────────
+
+class AdminTenantListItem(BaseModel):
+    id: int
+    email: str
+    agency_name: Optional[str]
+    plan: str
+    active: bool
+    is_admin: bool
+    onboarding_completed: bool
+    created_at: datetime
+    last_sync_at: Optional[datetime]
+
+    model_config = {"from_attributes": True}
+
+
+class AdminTenantUpdate(BaseModel):
+    plan: Optional[str] = None
+    active: Optional[bool] = None
+    is_admin: Optional[bool] = None
 
 
 # ── Overview ──────────────────────────────────────────────────────────────────

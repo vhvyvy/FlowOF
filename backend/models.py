@@ -30,6 +30,7 @@ class Tenant(Base):
     last_sync_at = Column(DateTime, nullable=True)
     currency = Column(String(8), default="USD", nullable=False)
     agency_name = Column(String(255), nullable=True)
+    is_admin = Column(Boolean, default=False, nullable=False)
 
 
 class TenantSource(Base):

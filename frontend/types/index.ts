@@ -32,7 +32,20 @@ export interface TenantOut {
   email: string
   plan: string
   active: boolean
+  is_admin: boolean
   created_at: string
+}
+
+export interface AdminTenant {
+  id: number
+  email: string
+  agency_name: string | null
+  plan: string
+  active: boolean
+  is_admin: boolean
+  onboarding_completed: boolean
+  created_at: string
+  last_sync_at: string | null
 }
 
 // ── Overview ──────────────────────────────────────────────────────────────────
