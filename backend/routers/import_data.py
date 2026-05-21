@@ -438,10 +438,13 @@ async def confirm_google_sheets_import(
     skipped = 0
 
     try:
+        # Удаляем ВСЕ google-sheets-транзакции тенанта (и новый формат sha1-prefix,
+        # и старый формат «gsheet:{batch_id}:{idx}» без sha1).
+        # Тенант имеет один активный google-источник → это правильная семантика.
         await db.execute(
             delete(Transaction).where(
                 Transaction.tenant_id == tenant.id,
-                Transaction.notion_id.like(f"{notion_id_prefix}%"),
+                Transaction.notion_id.like("gsheet:%"),
             )
         )
 

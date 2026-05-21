@@ -121,6 +121,12 @@ async def google_callback(
         expires_in=int(tokens.get("expires_in") or 3600),
     )
 
+    # Если онбординг уже завершён → возвращаем в настройки, а не в онбординг.
+    # Так пользователь попадёт на инлайн-пикер листа прямо в /dashboard/settings.
+    tenant_row = await db.get(Tenant, tenant_id)
+    if tenant_row and tenant_row.onboarding_completed:
+        return RedirectResponse(f"{frontend}/dashboard/settings?google_connected=true")
+
     return RedirectResponse(f"{frontend}/onboarding?google_connected=true")
 
 
