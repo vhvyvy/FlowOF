@@ -195,7 +195,11 @@ export default function AdminPage() {
                       <td className="px-4 py-3 text-slate-500 font-mono text-xs">{t.id}</td>
                       <td className="px-4 py-3">
                         <div className="flex items-center gap-2">
-                          {t.is_admin && <Shield className="h-3 w-3 text-indigo-400 shrink-0" title="Администратор" />}
+                          {t.is_admin && (
+                            <span title="Администратор">
+                              <Shield className="h-3 w-3 text-indigo-400 shrink-0" />
+                            </span>
+                          )}
                           <span className="font-medium text-slate-200 whitespace-nowrap">
                             {t.agency_name ?? '—'}
                           </span>
