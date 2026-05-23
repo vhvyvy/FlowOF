@@ -76,27 +76,63 @@ type FileAIPreviewResponse = {
   warnings: string[]
 }
 
+type FileDetectResponse = {
+  upload_id: string
+  filename: string
+  sheets: string[]
+}
+
 function ExcelAIConnect({
   onComplete,
 }: {
   onComplete: (data: Record<string, unknown>) => void
 }) {
-  const [stage, setStage] = useState<'drop' | 'analyzing' | 'done' | 'error'>('drop')
+  const [stage, setStage] = useState<'drop' | 'detecting' | 'sheets' | 'analyzing' | 'done' | 'error'>('drop')
   const [err, setErr] = useState<string | null>(null)
   const [fileName, setFileName] = useState<string>('')
+  const [uploadId, setUploadId] = useState<string>('')
+  const [sheets, setSheets] = useState<string[]>([])
+  const [selectedSheet, setSelectedSheet] = useState<string>('')
   const [aiData, setAiData] = useState<FileAIPreviewResponse | null>(null)
   const [dragging, setDragging] = useState(false)
   const inputRef = useRef<HTMLInputElement>(null)
+  const token = typeof window !== 'undefined' ? localStorage.getItem('token') : null
 
-  const uploadFile = async (file: File) => {
+  const detectSheets = async (file: File) => {
     setFileName(file.name)
     setErr(null)
-    setStage('analyzing')
+    setStage('detecting')
 
     const fd = new FormData()
     fd.append('file', file)
-    const token = typeof window !== 'undefined' ? localStorage.getItem('token') : null
+    try {
+      const res = await fetch(`${resolveApiBaseURL()}/api/v1/import/file/detect-sheets`, {
+        method: 'POST',
+        headers: token ? { Authorization: `Bearer ${token}` } : {},
+        body: fd,
+      })
+      const body = (await res.json().catch(() => ({}))) as FileDetectResponse & { detail?: string }
+      if (!res.ok) throw new Error(typeof body.detail === 'string' ? body.detail : 'Ошибка загрузки')
 
+      setUploadId(body.upload_id)
+      if (body.sheets.length > 1) {
+        setSheets(body.sheets)
+        setStage('sheets')
+      } else {
+        // CSV или один лист — сразу в preview
+        await runPreview(body.upload_id, body.sheets[0] ?? '')
+      }
+    } catch (e: unknown) {
+      setErr(e instanceof Error ? e.message : 'Ошибка')
+      setStage('error')
+    }
+  }
+
+  const runPreview = async (uid: string, sheet: string) => {
+    setStage('analyzing')
+    const fd = new FormData()
+    fd.append('upload_id', uid)
+    if (sheet) fd.append('sheet_name', sheet)
     try {
       const res = await fetch(`${resolveApiBaseURL()}/api/v1/import/file/preview`, {
         method: 'POST',
@@ -104,9 +140,7 @@ function ExcelAIConnect({
         body: fd,
       })
       const body = (await res.json().catch(() => ({}))) as FileAIPreviewResponse & { detail?: string }
-      if (!res.ok) {
-        throw new Error(typeof body.detail === 'string' ? body.detail : 'Ошибка AI-анализа')
-      }
+      if (!res.ok) throw new Error(typeof body.detail === 'string' ? body.detail : 'Ошибка AI-анализа')
       setAiData(body)
       setStage('done')
     } catch (e: unknown) {
@@ -117,14 +151,14 @@ function ExcelAIConnect({
 
   const onInputChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0]
-    if (file) void uploadFile(file)
+    if (file) void detectSheets(file)
   }
 
   const onDrop = (e: React.DragEvent<HTMLDivElement>) => {
     e.preventDefault()
     setDragging(false)
     const file = e.dataTransfer.files?.[0]
-    if (file) void uploadFile(file)
+    if (file) void detectSheets(file)
   }
 
   const handleContinue = () => {
@@ -140,6 +174,11 @@ function ExcelAIConnect({
     })
   }
 
+  const reset = () => {
+    setStage('drop'); setErr(null); setAiData(null)
+    setFileName(''); setUploadId(''); setSheets([]); setSelectedSheet('')
+  }
+
   return (
     <div>
       <h2 className="text-xl font-semibold text-slate-100 mb-2">Загрузи файл</h2>
@@ -147,7 +186,7 @@ function ExcelAIConnect({
         Поддерживаются <span className="text-slate-200">.xlsx, .xls, .csv</span>. AI сам разберётся со структурой — маппинг не нужен.
       </p>
 
-      {/* Drop zone */}
+      {/* ── Drop zone ── */}
       {(stage === 'drop' || stage === 'error') && (
         <>
           <div
@@ -179,28 +218,69 @@ function ExcelAIConnect({
             </div>
           )}
           {stage === 'error' && (
-            <button
-              type="button"
-              onClick={() => { setStage('drop'); setErr(null) }}
-              className="text-xs text-slate-500 hover:text-slate-300 mt-2 w-full text-center"
-            >
+            <button type="button" onClick={reset}
+              className="text-xs text-slate-500 hover:text-slate-300 mt-2 w-full text-center">
               Попробовать другой файл
             </button>
           )}
         </>
       )}
 
-      {/* Analyzing */}
+      {/* ── Detecting ── */}
+      {stage === 'detecting' && (
+        <div className="rounded-xl border border-slate-700/50 bg-slate-800/40 px-6 py-8 text-center">
+          <div className="w-8 h-8 border-2 border-indigo-500 border-t-transparent rounded-full animate-spin mx-auto mb-3" />
+          <p className="text-slate-300 text-sm">Читаем файл…</p>
+          <p className="text-slate-500 text-xs mt-1">{fileName}</p>
+        </div>
+      )}
+
+      {/* ── Sheet picker ── */}
+      {stage === 'sheets' && (
+        <div className="space-y-3">
+          <div className="flex items-center gap-2 text-xs text-slate-500 bg-slate-800/40 rounded-lg px-3 py-2 border border-slate-700/40">
+            <FileSpreadsheet className="h-3.5 w-3.5 shrink-0" />
+            {fileName}
+          </div>
+          <p className="text-slate-400 text-sm">Файл содержит несколько листов. Выбери лист с транзакциями:</p>
+          <div className="space-y-1.5 max-h-64 overflow-y-auto">
+            {sheets.map((s) => (
+              <button
+                key={s}
+                type="button"
+                onClick={() => setSelectedSheet(s)}
+                className={`w-full text-left rounded-lg border px-4 py-3 transition-colors ${
+                  selectedSheet === s
+                    ? 'border-indigo-500 bg-indigo-500/10 text-slate-100'
+                    : 'border-slate-700 bg-slate-800/40 text-slate-300 hover:border-slate-500'
+                }`}
+              >
+                {s}
+              </button>
+            ))}
+          </div>
+          <Button className="w-full" disabled={!selectedSheet}
+            onClick={() => void runPreview(uploadId, selectedSheet)}>
+            Анализировать лист
+          </Button>
+          <button type="button" onClick={reset}
+            className="w-full text-xs text-slate-500 hover:text-slate-300">
+            ← Загрузить другой файл
+          </button>
+        </div>
+      )}
+
+      {/* ── Analyzing ── */}
       {stage === 'analyzing' && (
         <div className="rounded-xl border border-slate-700/50 bg-slate-800/40 px-6 py-10 text-center">
           <div className="w-10 h-10 border-2 border-indigo-500 border-t-transparent rounded-full animate-spin mx-auto mb-4" />
           <p className="text-slate-200 text-sm font-medium">AI анализирует таблицу…</p>
-          <p className="text-slate-500 text-xs mt-1">{fileName}</p>
+          <p className="text-slate-500 text-xs mt-1">{fileName}{selectedSheet ? ` · ${selectedSheet}` : ''}</p>
           <p className="text-slate-500 text-xs mt-1">Обычно занимает 10–30 секунд</p>
         </div>
       )}
 
-      {/* Done */}
+      {/* ── Done ── */}
       {stage === 'done' && aiData && (
         <div className="space-y-4">
           <div className="flex items-center gap-3 rounded-xl border border-emerald-500/30 bg-emerald-500/10 px-4 py-3">
@@ -211,7 +291,7 @@ function ExcelAIConnect({
               </p>
               <p className="text-xs text-slate-500 mt-0.5 flex items-center gap-1">
                 <FileSpreadsheet className="h-3 w-3" />
-                {fileName}
+                {fileName}{selectedSheet ? ` · ${selectedSheet}` : ''}
               </p>
             </div>
           </div>
@@ -224,7 +304,6 @@ function ExcelAIConnect({
             </div>
           )}
 
-          {/* Mini preview */}
           <div className="rounded-lg border border-slate-700/50 overflow-hidden text-xs max-h-44 overflow-y-auto">
             <table className="min-w-full text-left text-slate-300">
               <thead className="bg-slate-800/80 text-slate-400 sticky top-0">
@@ -255,11 +334,8 @@ function ExcelAIConnect({
           <Button className="w-full" onClick={handleContinue}>
             Далее — импорт
           </Button>
-          <button
-            type="button"
-            onClick={() => { setStage('drop'); setAiData(null); setFileName('') }}
-            className="w-full text-xs text-slate-500 hover:text-slate-300"
-          >
+          <button type="button" onClick={reset}
+            className="w-full text-xs text-slate-500 hover:text-slate-300">
             Загрузить другой файл
           </button>
         </div>

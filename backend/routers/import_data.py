@@ -8,7 +8,7 @@ from datetime import date, datetime
 from typing import Any
 
 import pandas as pd
-from fastapi import APIRouter, Depends, File, HTTPException, UploadFile, status
+from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile, status
 from pydantic import BaseModel, Field
 from sqlalchemy import delete, update
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -564,6 +564,12 @@ class FilePreviewResponse(BaseModel):
     warnings: list[str]
 
 
+class FileDetectSheetsResponse(BaseModel):
+    upload_id: str
+    filename: str
+    sheets: list[str]
+
+
 class FileConfirmRequest(BaseModel):
     rows: list[dict[str, Any]] = Field(..., description="Строки из /file/preview — повторный GPT не нужен")
 
@@ -574,13 +580,16 @@ class FileConfirmResponse(BaseModel):
     rows_skipped: int
 
 
-def _df_to_csv(raw: bytes, filename: str) -> str:
+def _df_to_csv(raw: bytes, filename: str, sheet_name: str | None = None) -> str:
     """Читает xlsx/xls/csv и возвращает строку CSV для AIImporter."""
     import io as _io
 
     ext = os.path.splitext(filename or "")[1].lower()
     if ext in (".xlsx", ".xls"):
-        df = pd.read_excel(_io.BytesIO(raw))
+        kwargs: dict = {}
+        if sheet_name:
+            kwargs["sheet_name"] = sheet_name
+        df = pd.read_excel(_io.BytesIO(raw), **kwargs)
     else:
         # CSV — пробуем несколько кодировок
         for enc in ("utf-8-sig", "utf-8", "cp1251", "latin-1"):
@@ -596,20 +605,58 @@ def _df_to_csv(raw: bytes, filename: str) -> str:
     return df.to_csv(index=False)
 
 
-@router.post("/file/preview", response_model=FilePreviewResponse)
-async def preview_file_import(
+def _get_excel_sheets(raw: bytes, filename: str) -> list[str]:
+    """Возвращает список листов xlsx/xls. Для CSV — пустой список."""
+    ext = os.path.splitext(filename or "")[1].lower()
+    if ext not in (".xlsx", ".xls"):
+        return []
+    import io as _io
+    try:
+        xl = pd.ExcelFile(_io.BytesIO(raw))
+        return xl.sheet_names  # type: ignore[return-value]
+    except Exception:
+        return []
+
+
+@router.post("/file/detect-sheets", response_model=FileDetectSheetsResponse)
+async def detect_file_sheets(
     file: UploadFile = File(...),
     tenant: Tenant = Depends(get_current_tenant),
 ):
-    """Загрузить xlsx/csv → AI → вернуть превью (rows для confirm + первые 10 для UI)."""
+    """Сохранить файл и вернуть список листов (для xlsx с несколькими листами)."""
     if not file.filename:
         raise HTTPException(status_code=400, detail="Файл без имени")
     raw = await file.read()
     if len(raw) > 15 * 1024 * 1024:
         raise HTTPException(status_code=400, detail="Файл больше 15 МБ")
 
+    suffix = os.path.splitext(file.filename)[1] or ".bin"
+    upload_id = save_upload(tenant.id, raw, suffix)
+    sheets = _get_excel_sheets(raw, file.filename)
+
+    return FileDetectSheetsResponse(
+        upload_id=upload_id,
+        filename=file.filename,
+        sheets=sheets,
+    )
+
+
+@router.post("/file/preview", response_model=FilePreviewResponse)
+async def preview_file_import(
+    upload_id: str = Form(...),
+    sheet_name: str = Form(""),
+    tenant: Tenant = Depends(get_current_tenant),
+):
+    """Прочитать сохранённый файл, прогнать через AI, вернуть превью."""
+    path = get_upload_path(upload_id, tenant.id)
+    if not path or not path.exists():
+        raise HTTPException(status_code=400, detail="Сессия загрузки истекла. Загрузите файл снова.")
+
+    raw = path.read_bytes()
+    filename = path.name  # содержит суффикс
+
     try:
-        csv_content = _df_to_csv(raw, file.filename)
+        csv_content = _df_to_csv(raw, filename, sheet_name or None)
     except Exception as e:
         logger.warning("file/preview parse failed: %s", e)
         raise HTTPException(status_code=400, detail=f"Не удалось прочитать файл: {e}") from e
@@ -628,7 +675,7 @@ async def preview_file_import(
             status_code=422,
             detail=(
                 "AI не распознал ни одной транзакции. "
-                "Проверьте, что файл содержит столбцы с датой и суммой."
+                "Проверьте, что выбранный лист содержит столбцы с датой и суммой."
             ),
         )
 
