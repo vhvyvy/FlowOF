@@ -550,3 +550,155 @@ async def confirm_google_sheets_import(
         rows_skipped=skipped,
         sync_log_id=log_id,
     )
+
+
+# ─────────────────────────── AI File import (xlsx / csv) ─────────────────────
+
+
+class FilePreviewResponse(BaseModel):
+    rows: list[dict]
+    preview: list[dict]
+    total_rows: int
+    columns_detected: list[str]
+    mapping_used: dict
+    warnings: list[str]
+
+
+class FileConfirmRequest(BaseModel):
+    rows: list[dict[str, Any]] = Field(..., description="Строки из /file/preview — повторный GPT не нужен")
+
+
+class FileConfirmResponse(BaseModel):
+    success: bool = True
+    rows_imported: int
+    rows_skipped: int
+
+
+def _df_to_csv(raw: bytes, filename: str) -> str:
+    """Читает xlsx/xls/csv и возвращает строку CSV для AIImporter."""
+    import io as _io
+
+    ext = os.path.splitext(filename or "")[1].lower()
+    if ext in (".xlsx", ".xls"):
+        df = pd.read_excel(_io.BytesIO(raw))
+    else:
+        # CSV — пробуем несколько кодировок
+        for enc in ("utf-8-sig", "utf-8", "cp1251", "latin-1"):
+            try:
+                df = pd.read_csv(_io.BytesIO(raw), encoding=enc)
+                break
+            except Exception:
+                continue
+        else:
+            raise ValueError("Не удалось прочитать CSV ни в одной кодировке")
+
+    df = df.dropna(how="all").dropna(axis=1, how="all")
+    return df.to_csv(index=False)
+
+
+@router.post("/file/preview", response_model=FilePreviewResponse)
+async def preview_file_import(
+    file: UploadFile = File(...),
+    tenant: Tenant = Depends(get_current_tenant),
+):
+    """Загрузить xlsx/csv → AI → вернуть превью (rows для confirm + первые 10 для UI)."""
+    if not file.filename:
+        raise HTTPException(status_code=400, detail="Файл без имени")
+    raw = await file.read()
+    if len(raw) > 15 * 1024 * 1024:
+        raise HTTPException(status_code=400, detail="Файл больше 15 МБ")
+
+    try:
+        csv_content = _df_to_csv(raw, file.filename)
+    except Exception as e:
+        logger.warning("file/preview parse failed: %s", e)
+        raise HTTPException(status_code=400, detail=f"Не удалось прочитать файл: {e}") from e
+
+    openai_key = _resolve_openai_key(tenant)
+    importer = AIImporter(openai_key=openai_key)
+    try:
+        result = await importer.process(csv_content)
+    except Exception as e:
+        logger.exception("AI importer failed tenant=%s", tenant.id)
+        raise HTTPException(status_code=500, detail=f"AI-обработка не удалась: {e}") from e
+
+    rows = result.get("rows") or []
+    if not rows:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                "AI не распознал ни одной транзакции. "
+                "Проверьте, что файл содержит столбцы с датой и суммой."
+            ),
+        )
+
+    return FilePreviewResponse(
+        rows=rows,
+        preview=rows[:10],
+        total_rows=result["total"],
+        columns_detected=result["original_columns"],
+        mapping_used=result["mapping"],
+        warnings=result["warnings"],
+    )
+
+
+@router.post("/file/confirm", response_model=FileConfirmResponse)
+async def confirm_file_import(
+    body: FileConfirmRequest,
+    tenant: Tenant = Depends(get_current_tenant),
+    db: AsyncSession = Depends(get_db),
+):
+    """Сохранить AI-обработанные строки из /file/preview в БД."""
+    rows = [r for r in body.rows if isinstance(r, dict)]
+    if not rows:
+        raise HTTPException(status_code=422, detail="Нечего импортировать")
+
+    batch_id = new_batch_id()
+    imported = 0
+    skipped = 0
+
+    try:
+        # Чистим предыдущие AI-файловые импорты этого тенанта
+        await db.execute(
+            delete(Transaction).where(
+                Transaction.tenant_id == tenant.id,
+                Transaction.notion_id.like("file_ai:%"),
+            )
+        )
+
+        for idx, row in enumerate(rows):
+            try:
+                amount = _coerce_amount(row.get("amount"))
+                if amount is None:
+                    skipped += 1
+                    continue
+                tx_date = _coerce_date(row.get("date"))
+                shift_val = row.get("shift_id")
+                shift_str = str(shift_val).strip() if shift_val not in (None, "") else None
+                db.add(
+                    Transaction(
+                        tenant_id=tenant.id,
+                        date=tx_date,
+                        model=(str(row.get("model")).strip() if row.get("model") else None),
+                        chatter=(str(row.get("chatter")).strip() if row.get("chatter") else None),
+                        amount=amount,
+                        shift_id=shift_str,
+                        notion_id=f"file_ai:{batch_id}:{idx}",
+                    )
+                )
+                imported += 1
+            except Exception as e:
+                logger.debug("file_ai row %s skipped: %s", idx, e)
+                skipped += 1
+
+        fin = datetime.utcnow()
+        await db.execute(
+            update(Tenant).where(Tenant.id == tenant.id).values(last_sync_at=fin)
+        )
+        await db.commit()
+
+    except Exception as e:
+        logger.exception("file/confirm DB write failed tenant=%s", tenant.id)
+        raise HTTPException(status_code=500, detail="Ошибка записи в базу") from e
+
+    return FileConfirmResponse(rows_imported=imported, rows_skipped=skipped)

@@ -32,8 +32,9 @@ export default function Step5Preview({
   const cur = String(data.currency ?? 'USD')
   const src = String(data.source_type ?? '—')
   const skipImport = Boolean(data.skip_import)
-  const isExcel = src === 'excel' && !skipImport
+  const isExcel = src === 'excel' && !skipImport && !Boolean(data.excel_ai)
   const isGoogle = src === 'google_sheets' && !skipImport
+  const isFileAI = src === 'excel' && !skipImport && Boolean(data.excel_ai)
   const uploadId = data.upload_id as string | undefined
   const mapping = (data.mapping_confirmed as Record<string, string>) || {}
   const previewRows = (data.preview_rows as Record<string, unknown>[]) || []
@@ -41,6 +42,12 @@ export default function Step5Preview({
   const spreadsheetId = data.spreadsheet_id as string | undefined
   const sheetName = data.sheet_name as string | undefined
   const spreadsheetName = data.spreadsheet_name as string | undefined
+
+  // File AI mode data (from Step3 ExcelAIConnect)
+  const fileAiRows = (data.ai_rows as Record<string, unknown>[] | undefined) ?? []
+  const fileAiWarnings = (data.warnings as string[] | undefined) ?? []
+  const fileAiTotal = typeof data.total_rows === 'number' ? data.total_rows : fileAiRows.length
+  const fileAiPreview = (data.preview as Record<string, unknown>[] | undefined) ?? fileAiRows.slice(0, 10)
 
   const [busy, setBusy] = useState(false)
   const [impErr, setImpErr] = useState<string | null>(null)
@@ -128,6 +135,26 @@ export default function Step5Preview({
       const res = await api.post<{ rows_imported?: number; rows_skipped?: number }>(
         '/api/v1/import/google-sheets/confirm',
         payload
+      )
+      setImportStats({
+        imported: res.data.rows_imported ?? 0,
+        skipped: res.data.rows_skipped ?? 0,
+      })
+    } catch (e) {
+      setImpErr(formatApiError(e))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const confirmFileAIImport = async () => {
+    if (!fileAiRows.length) return
+    setBusy(true)
+    setImpErr(null)
+    try {
+      const res = await api.post<{ rows_imported?: number; rows_skipped?: number }>(
+        '/api/v1/import/file/confirm',
+        { rows: fileAiRows }
       )
       setImportStats({
         imported: res.data.rows_imported ?? 0,
@@ -294,14 +321,68 @@ export default function Step5Preview({
         </div>
       )}
 
+      {isFileAI && (
+        <div className="mb-6">
+          <p className="text-slate-400 text-sm mb-2">
+            AI нашёл <span className="text-slate-100 font-medium">{fileAiTotal}</span> транзакций. Проверьте первые строки.
+          </p>
+
+          {fileAiWarnings.length > 0 && (
+            <div className="rounded-lg border border-amber-500/30 bg-amber-500/10 p-3 mb-3 space-y-1">
+              {fileAiWarnings.map((w, i) => (
+                <p key={i} className="text-amber-300 text-xs">⚠ {w}</p>
+              ))}
+            </div>
+          )}
+
+          <div className="overflow-x-auto rounded-lg border border-slate-700/50 max-h-56 text-xs mb-3">
+            <table className="min-w-full text-left text-slate-300">
+              <thead className="bg-slate-800/80 text-slate-400 sticky top-0">
+                <tr>
+                  <th className="px-2 py-1 font-normal">Дата</th>
+                  <th className="px-2 py-1 font-normal">Модель</th>
+                  <th className="px-2 py-1 font-normal">Чаттер</th>
+                  <th className="px-2 py-1 font-normal text-right">Сумма</th>
+                </tr>
+              </thead>
+              <tbody>
+                {fileAiPreview.map((row, i) => (
+                  <tr key={i} className="border-t border-slate-700/40">
+                    <td className="px-2 py-1 whitespace-nowrap">{String(row.date ?? '—')}</td>
+                    <td className="px-2 py-1 whitespace-nowrap max-w-[140px] truncate">{String(row.model ?? '—')}</td>
+                    <td className="px-2 py-1 whitespace-nowrap max-w-[140px] truncate">{String(row.chatter ?? '—')}</td>
+                    <td className="px-2 py-1 whitespace-nowrap text-right text-emerald-400">
+                      {row.amount !== null && row.amount !== undefined && row.amount !== ''
+                        ? `$${Number(row.amount).toFixed(2)}`
+                        : '—'}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+
+          {importStats ? (
+            <p className="text-emerald-400 text-sm">
+              Импортировано: {importStats.imported}, пропущено строк: {importStats.skipped}
+            </p>
+          ) : (
+            <Button className="w-full" onClick={confirmFileAIImport} disabled={busy || !fileAiRows.length}>
+              {busy ? 'Импортируем…' : `Импортировать ${fileAiTotal} транзакций`}
+            </Button>
+          )}
+          {impErr && <p className="text-red-400 text-sm mt-2">{impErr}</p>}
+        </div>
+      )}
+
       <Button
         className="w-full"
         onClick={finish}
-        disabled={(isExcel || isGoogle) && !importStats && !skipImport}
+        disabled={(isExcel || isGoogle || isFileAI) && !importStats && !skipImport}
       >
         Завершить и открыть дашборд
       </Button>
-      {(isExcel || isGoogle) && !importStats && !skipImport && (
+      {(isExcel || isGoogle || isFileAI) && !importStats && !skipImport && (
         <p className="text-slate-500 text-xs mt-2 text-center">
           {isExcel ? 'Сначала нажмите «Импортировать данные».' : 'Сначала подтвердите импорт после анализа AI.'}
         </p>

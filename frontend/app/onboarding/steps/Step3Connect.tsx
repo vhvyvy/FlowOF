@@ -1,8 +1,9 @@
 'use client'
 
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Button } from '@/components/ui/button'
-import api, { formatApiError } from '@/lib/api'
+import api, { formatApiError, resolveApiBaseURL } from '@/lib/api'
+import { UploadCloud, FileSpreadsheet, CheckCircle2, AlertCircle } from 'lucide-react'
 
 type Spreadsheet = { id: string; name: string; modifiedTime?: string }
 type Sheet = { id: number | string; name: string }
@@ -26,6 +27,10 @@ export default function Step3Connect({
 
   if (src === 'google_sheets') {
     return <GoogleSheetsConnect onComplete={onComplete} data={data} />
+  }
+
+  if (src === 'excel') {
+    return <ExcelAIConnect onComplete={onComplete} />
   }
 
   return (
@@ -56,6 +61,209 @@ export default function Step3Connect({
       <Button className="w-full" onClick={() => onComplete({})}>
         Понятно, далее
       </Button>
+    </div>
+  )
+}
+
+// ─────────────────────────── Excel / CSV AI sub-flow ─────────────────────────
+
+type FileAIPreviewResponse = {
+  rows: Record<string, unknown>[]
+  preview: Record<string, unknown>[]
+  total_rows: number
+  columns_detected: string[]
+  mapping_used: Record<string, string>
+  warnings: string[]
+}
+
+function ExcelAIConnect({
+  onComplete,
+}: {
+  onComplete: (data: Record<string, unknown>) => void
+}) {
+  const [stage, setStage] = useState<'drop' | 'analyzing' | 'done' | 'error'>('drop')
+  const [err, setErr] = useState<string | null>(null)
+  const [fileName, setFileName] = useState<string>('')
+  const [aiData, setAiData] = useState<FileAIPreviewResponse | null>(null)
+  const [dragging, setDragging] = useState(false)
+  const inputRef = useRef<HTMLInputElement>(null)
+
+  const uploadFile = async (file: File) => {
+    setFileName(file.name)
+    setErr(null)
+    setStage('analyzing')
+
+    const fd = new FormData()
+    fd.append('file', file)
+    const token = typeof window !== 'undefined' ? localStorage.getItem('token') : null
+
+    try {
+      const res = await fetch(`${resolveApiBaseURL()}/api/v1/import/file/preview`, {
+        method: 'POST',
+        headers: token ? { Authorization: `Bearer ${token}` } : {},
+        body: fd,
+      })
+      const body = (await res.json().catch(() => ({}))) as FileAIPreviewResponse & { detail?: string }
+      if (!res.ok) {
+        throw new Error(typeof body.detail === 'string' ? body.detail : 'Ошибка AI-анализа')
+      }
+      setAiData(body)
+      setStage('done')
+    } catch (e: unknown) {
+      setErr(e instanceof Error ? e.message : 'Не удалось обработать файл')
+      setStage('error')
+    }
+  }
+
+  const onInputChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0]
+    if (file) void uploadFile(file)
+  }
+
+  const onDrop = (e: React.DragEvent<HTMLDivElement>) => {
+    e.preventDefault()
+    setDragging(false)
+    const file = e.dataTransfer.files?.[0]
+    if (file) void uploadFile(file)
+  }
+
+  const handleContinue = () => {
+    if (!aiData) return
+    onComplete({
+      excel_ai: true,
+      ai_rows: aiData.rows,
+      preview: aiData.preview,
+      total_rows: aiData.total_rows,
+      columns_detected: aiData.columns_detected,
+      warnings: aiData.warnings,
+      skip_import: false,
+    })
+  }
+
+  return (
+    <div>
+      <h2 className="text-xl font-semibold text-slate-100 mb-2">Загрузи файл</h2>
+      <p className="text-slate-400 text-sm mb-6">
+        Поддерживаются <span className="text-slate-200">.xlsx, .xls, .csv</span>. AI сам разберётся со структурой — маппинг не нужен.
+      </p>
+
+      {/* Drop zone */}
+      {(stage === 'drop' || stage === 'error') && (
+        <>
+          <div
+            onDragOver={(e) => { e.preventDefault(); setDragging(true) }}
+            onDragLeave={() => setDragging(false)}
+            onDrop={onDrop}
+            onClick={() => inputRef.current?.click()}
+            className={`cursor-pointer rounded-xl border-2 border-dashed px-6 py-10 text-center transition-colors ${
+              dragging
+                ? 'border-indigo-400 bg-indigo-500/10'
+                : 'border-slate-700 bg-slate-800/30 hover:border-slate-500 hover:bg-slate-800/50'
+            }`}
+          >
+            <UploadCloud className="h-10 w-10 text-slate-500 mx-auto mb-3" />
+            <p className="text-slate-300 text-sm font-medium">Перетащи файл сюда или нажми</p>
+            <p className="text-slate-500 text-xs mt-1">.xlsx, .xls, .csv · до 15 МБ</p>
+          </div>
+          <input
+            ref={inputRef}
+            type="file"
+            accept=".csv,.xlsx,.xls"
+            className="hidden"
+            onChange={onInputChange}
+          />
+          {err && (
+            <div className="flex items-start gap-2 mt-3 text-sm text-red-300 bg-red-500/10 border border-red-500/30 rounded-lg px-3 py-2">
+              <AlertCircle className="h-4 w-4 mt-0.5 shrink-0" />
+              {err}
+            </div>
+          )}
+          {stage === 'error' && (
+            <button
+              type="button"
+              onClick={() => { setStage('drop'); setErr(null) }}
+              className="text-xs text-slate-500 hover:text-slate-300 mt-2 w-full text-center"
+            >
+              Попробовать другой файл
+            </button>
+          )}
+        </>
+      )}
+
+      {/* Analyzing */}
+      {stage === 'analyzing' && (
+        <div className="rounded-xl border border-slate-700/50 bg-slate-800/40 px-6 py-10 text-center">
+          <div className="w-10 h-10 border-2 border-indigo-500 border-t-transparent rounded-full animate-spin mx-auto mb-4" />
+          <p className="text-slate-200 text-sm font-medium">AI анализирует таблицу…</p>
+          <p className="text-slate-500 text-xs mt-1">{fileName}</p>
+          <p className="text-slate-500 text-xs mt-1">Обычно занимает 10–30 секунд</p>
+        </div>
+      )}
+
+      {/* Done */}
+      {stage === 'done' && aiData && (
+        <div className="space-y-4">
+          <div className="flex items-center gap-3 rounded-xl border border-emerald-500/30 bg-emerald-500/10 px-4 py-3">
+            <CheckCircle2 className="h-5 w-5 text-emerald-400 shrink-0" />
+            <div>
+              <p className="text-sm text-emerald-300 font-medium">
+                AI нашёл {aiData.total_rows} транзакций
+              </p>
+              <p className="text-xs text-slate-500 mt-0.5 flex items-center gap-1">
+                <FileSpreadsheet className="h-3 w-3" />
+                {fileName}
+              </p>
+            </div>
+          </div>
+
+          {aiData.warnings.length > 0 && (
+            <div className="rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-2.5 space-y-1">
+              {aiData.warnings.map((w, i) => (
+                <p key={i} className="text-amber-300 text-xs">⚠ {w}</p>
+              ))}
+            </div>
+          )}
+
+          {/* Mini preview */}
+          <div className="rounded-lg border border-slate-700/50 overflow-hidden text-xs max-h-44 overflow-y-auto">
+            <table className="min-w-full text-left text-slate-300">
+              <thead className="bg-slate-800/80 text-slate-400 sticky top-0">
+                <tr>
+                  <th className="px-2 py-1.5 font-normal">Дата</th>
+                  <th className="px-2 py-1.5 font-normal">Модель</th>
+                  <th className="px-2 py-1.5 font-normal">Чаттер</th>
+                  <th className="px-2 py-1.5 font-normal text-right">Сумма</th>
+                </tr>
+              </thead>
+              <tbody>
+                {aiData.preview.map((row, i) => (
+                  <tr key={i} className="border-t border-slate-700/30">
+                    <td className="px-2 py-1 whitespace-nowrap">{String(row.date ?? '—')}</td>
+                    <td className="px-2 py-1 max-w-[120px] truncate">{String(row.model ?? '—')}</td>
+                    <td className="px-2 py-1 max-w-[120px] truncate">{String(row.chatter ?? '—')}</td>
+                    <td className="px-2 py-1 text-right text-emerald-400">
+                      {row.amount !== null && row.amount !== undefined && row.amount !== ''
+                        ? `$${Number(row.amount).toFixed(2)}`
+                        : '—'}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+
+          <Button className="w-full" onClick={handleContinue}>
+            Далее — импорт
+          </Button>
+          <button
+            type="button"
+            onClick={() => { setStage('drop'); setAiData(null); setFileName('') }}
+            className="w-full text-xs text-slate-500 hover:text-slate-300"
+          >
+            Загрузить другой файл
+          </button>
+        </div>
+      )}
     </div>
   )
 }
