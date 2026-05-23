@@ -58,6 +58,14 @@ class AIImporter:
         if not csv_content or not csv_content.strip():
             return {"rows": [], "total": 0, "original_columns": [], "mapping": {}, "warnings": ["Пустой CSV"]}
 
+        # Извлекаем мета-строку # sheet: ... и сохраняем для батчей
+        sheet_hint = ""
+        lines_raw = csv_content.splitlines()
+        if lines_raw and lines_raw[0].startswith("# sheet:"):
+            sheet_hint = lines_raw[0].removeprefix("# sheet:").strip()
+            csv_content = "\n".join(lines_raw[1:])
+        self._sheet_hint = sheet_hint  # передаём в _process_chunk через self
+
         try:
             df = pd.read_csv(io.StringIO(csv_content))
         except Exception as e:
@@ -149,10 +157,19 @@ class AIImporter:
         return {}
 
     def _build_normalize_prompt(self, csv_content: str) -> str:
+        sheet_hint = getattr(self, "_sheet_hint", "")
+
+        sheet_context = (
+            f"\nВажно: данные взяты с листа «{sheet_hint}». "
+            "Если колонка model отсутствует, используй имя листа как значение model для всех строк."
+            if sheet_hint else ""
+        )
+
         return (
             "Ты помощник по импорту данных для FlowOF — системы аналитики OF-агентств.\n\n"
             "Вот CSV таблица агентства:\n```\n"
             f"{csv_content}\n```\n\n"
+            f"{sheet_context}\n"
             "Наша стандартная схема транзакций:\n"
             f"{json.dumps(self.SCHEMA, ensure_ascii=False, indent=2)}\n\n"
             "Задача:\n"

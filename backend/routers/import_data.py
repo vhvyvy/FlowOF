@@ -586,10 +586,31 @@ def _df_to_csv(raw: bytes, filename: str, sheet_name: str | None = None) -> str:
 
     ext = os.path.splitext(filename or "")[1].lower()
     if ext in (".xlsx", ".xls"):
-        kwargs: dict = {}
-        if sheet_name:
-            kwargs["sheet_name"] = sheet_name
-        df = pd.read_excel(_io.BytesIO(raw), **kwargs)
+        sheet_kw: dict = {"sheet_name": sheet_name} if sheet_name else {}
+
+        def _read(header: int) -> "pd.DataFrame":
+            return pd.read_excel(_io.BytesIO(raw), header=header, **sheet_kw)
+
+        df = _read(0)
+
+        # Если заголовок «плохой» (много Unnamed: X) — пробуем header=1, 2
+        # Это случается когда первая строка — объединённая ячейка-заголовок («Июль 2024» и т.п.)
+        def _unnamed_ratio(frame: "pd.DataFrame") -> float:
+            if not len(frame.columns):
+                return 1.0
+            bad = sum(1 for c in frame.columns if str(c).startswith("Unnamed:"))
+            return bad / len(frame.columns)
+
+        for alt_header in (1, 2):
+            if _unnamed_ratio(df) < 0.4:
+                break
+            try:
+                df_alt = _read(alt_header)
+                if _unnamed_ratio(df_alt) < _unnamed_ratio(df):
+                    df = df_alt
+            except Exception:
+                break
+
     else:
         # CSV — пробуем несколько кодировок
         for enc in ("utf-8-sig", "utf-8", "cp1251", "latin-1"):
@@ -654,12 +675,19 @@ async def preview_file_import(
 
     raw = path.read_bytes()
     filename = path.name  # содержит суффикс
+    chosen_sheet = sheet_name.strip() if sheet_name else None
 
     try:
-        csv_content = _df_to_csv(raw, filename, sheet_name or None)
+        csv_content = _df_to_csv(raw, filename, chosen_sheet)
     except Exception as e:
         logger.warning("file/preview parse failed: %s", e)
         raise HTTPException(status_code=400, detail=f"Не удалось прочитать файл: {e}") from e
+
+    # Если указан лист — прикрепляем его как мета-строку перед CSV,
+    # чтобы GPT мог использовать имя листа как подсказку для поля «model»
+    # (актуально, когда весь лист посвящён одной модели и колонки «model» нет).
+    if chosen_sheet:
+        csv_content = f"# sheet: {chosen_sheet}\n{csv_content}"
 
     openai_key = _resolve_openai_key(tenant)
     importer = AIImporter(openai_key=openai_key)
