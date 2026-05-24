@@ -951,6 +951,10 @@ function FileImportSection() {
         if (!pvRes.ok) { setErr(pvBody.detail ?? `Ошибка анализа листа ${sheet}`); break }
         // confirm
         const payload: Record<string, unknown> = { rows: pvBody.rows, filename: fileName, sheet_name: sheet }
+        if (overrideMonth && overrideYear) {
+          payload.override_month = Number(overrideMonth)
+          payload.override_year = Number(overrideYear)
+        }
         const cfRes = await api.post<FileConfirmResp>('/api/v1/import/file/confirm', payload)
         totalImported += cfRes.data.rows_imported
         totalSkipped += cfRes.data.rows_skipped
@@ -1062,7 +1066,7 @@ function FileImportSection() {
             <FileSpreadsheet className="h-3.5 w-3.5 shrink-0" />{fileName}
           </div>
           <p className="text-slate-400 text-sm">Выбери один или несколько листов для импорта:</p>
-          <div className="space-y-1.5 max-h-52 overflow-y-auto">
+          <div className="space-y-1.5 max-h-44 overflow-y-auto">
             {sheets.map((s) => {
               const checked = selectedSheets.has(s)
               return (
@@ -1080,6 +1084,33 @@ function FileImportSection() {
           {selectedSheets.size > 0 && (
             <p className="text-xs text-slate-500">Выбрано: {selectedSheets.size} из {sheets.length}</p>
           )}
+
+          {/* Период — обязательно указать при мультивыборе */}
+          <div className="rounded-lg border border-slate-700/40 bg-slate-800/40 px-3 py-2.5 space-y-1.5">
+            <p className="text-xs text-slate-400 font-medium">Период данных <span className="text-amber-400">*</span></p>
+            <p className="text-[11px] text-slate-500">Укажи месяц и год — даты в ячейках часто содержат дефолтное значение</p>
+            <div className="flex items-center gap-2">
+              <select
+                value={overrideMonth}
+                onChange={e => setOverrideMonth(e.target.value ? Number(e.target.value) : '')}
+                className="text-xs bg-slate-700 border border-slate-600 text-slate-200 rounded px-2 py-1.5 focus:outline-none flex-1"
+              >
+                <option value="">Месяц</option>
+                {['Январь','Февраль','Март','Апрель','Май','Июнь','Июль','Август','Сентябрь','Октябрь','Ноябрь','Декабрь'].map((m,i) => (
+                  <option key={i+1} value={i+1}>{m}</option>
+                ))}
+              </select>
+              <select
+                value={overrideYear}
+                onChange={e => setOverrideYear(e.target.value ? Number(e.target.value) : '')}
+                className="text-xs bg-slate-700 border border-slate-600 text-slate-200 rounded px-2 py-1.5 focus:outline-none flex-1"
+              >
+                <option value="">Год</option>
+                {[2023,2024,2025,2026,2027].map(y => <option key={y} value={y}>{y}</option>)}
+              </select>
+            </div>
+          </div>
+
           <div className="flex gap-2">
             {importing ? (
               <div className="flex-1 flex flex-col gap-1">
@@ -1090,8 +1121,16 @@ function FileImportSection() {
               </div>
             ) : (
               <button type="button"
-                disabled={selectedSheets.size === 0}
-                onClick={() => void runMultiImport(Array.from(selectedSheets))}
+                disabled={selectedSheets.size === 0 || (selectedSheets.size > 1 && (!overrideMonth || !overrideYear))}
+                onClick={() => {
+                  const arr = Array.from(selectedSheets)
+                  if (arr.length === 1) {
+                    setSelectedSheet(arr[0])
+                    void runPreview(uploadId, arr[0])
+                  } else {
+                    void runMultiImport(arr)
+                  }
+                }}
                 className="flex-1 flex items-center justify-center gap-2 px-4 py-2 text-sm bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 text-white rounded-lg transition-colors">
                 <CloudDownload className="h-4 w-4" />
                 {selectedSheets.size > 1 ? `Импортировать ${selectedSheets.size} листа` : 'Анализировать лист'}
@@ -1101,6 +1140,9 @@ function FileImportSection() {
               Отмена
             </button>
           </div>
+          {selectedSheets.size > 1 && (!overrideMonth || !overrideYear) && (
+            <p className="text-[11px] text-amber-400/80">Укажи месяц и год чтобы даты импортировались правильно</p>
+          )}
         </div>
       )}
 
