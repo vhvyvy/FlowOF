@@ -13,7 +13,7 @@ from typing import Optional
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from models import CatalogChatter, CatalogModel, ShiftCatalog
+from models import CatalogChatter, CatalogModel, ExpenseCategory, ShiftCatalog
 
 logger = logging.getLogger("flowof.catalog_resolver")
 
@@ -116,4 +116,31 @@ async def resolve_shift_catalog_id(
     db.add(obj)
     await db.flush()
     logger.debug("catalog_resolver: created shift '%s' tenant=%s id=%s", name, tenant_id, obj.id)
+    return obj.id
+
+
+async def resolve_category_id(
+    name: Optional[str],
+    tenant_id: int,
+    db: AsyncSession,
+) -> Optional[int]:
+    """Найти категорию расхода по имени или создать новую запись в справочнике."""
+    name = _clean(name)
+    if not name:
+        return None
+    result = await db.execute(
+        select(ExpenseCategory).where(
+            ExpenseCategory.tenant_id == tenant_id,
+            ExpenseCategory.name == name,
+        )
+    )
+    obj = result.scalar_one_or_none()
+    if obj:
+        if not obj.active:
+            obj.active = True
+        return obj.id
+    obj = ExpenseCategory(tenant_id=tenant_id, name=name, active=True)
+    db.add(obj)
+    await db.flush()
+    logger.debug("catalog_resolver: created category '%s' tenant=%s id=%s", name, tenant_id, obj.id)
     return obj.id

@@ -11,7 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from database import get_db
 from dependencies import get_current_tenant
-from models import Tenant, Transaction
+from models import Expense, Tenant, Transaction
 
 router = APIRouter(prefix="/api/v1/entries", tags=["entries"])
 
@@ -133,5 +133,123 @@ async def delete_transaction(
     if not tx or tx.tenant_id != tenant.id:
         raise HTTPException(status_code=404, detail="Не найдено")
     await db.delete(tx)
+    await db.commit()
+    return {"success": True}
+
+
+# ─── РАСХОДЫ ─────────────────────────────────────────────────────────────────
+
+class ExpenseCreate(BaseModel):
+    date: DateType
+    category_id: int
+    amount: float
+    model_id: Optional[int] = None
+    description: Optional[str] = None
+
+
+class ExpenseUpdate(BaseModel):
+    date: DateType
+    category_id: int
+    amount: float
+    model_id: Optional[int] = None
+    description: Optional[str] = None
+
+
+@router.post("/expenses", status_code=201)
+async def create_expense(
+    data: ExpenseCreate,
+    tenant: Tenant = Depends(get_current_tenant),
+    db: AsyncSession = Depends(get_db),
+):
+    exp = Expense(
+        tenant_id=tenant.id,
+        date=data.date,
+        category_id=data.category_id,
+        amount=data.amount,
+        model_id=data.model_id,
+        description=data.description,
+        source="manual",
+    )
+    db.add(exp)
+    await db.commit()
+    await db.refresh(exp)
+    return {"id": exp.id, "success": True}
+
+
+@router.get("/expenses")
+async def list_expenses(
+    month: int = Query(..., ge=1, le=12),
+    year: int = Query(..., ge=2000),
+    source: Optional[str] = Query(None),
+    tenant: Tenant = Depends(get_current_tenant),
+    db: AsyncSession = Depends(get_db),
+):
+    """Список расходов за месяц с JOIN на справочники.
+
+    Для импортированных строк (category_id IS NULL) подставляет текстовые значения
+    из колонок category / model.
+    """
+    base_sql = """
+        SELECT
+            e.id,
+            e.date,
+            e.amount,
+            e.category_id,
+            e.model_id,
+            e.description,
+            e.vendor,
+            COALESCE(e.source, 'import')         AS source,
+            COALESCE(ec.name, e.category)        AS category_name,
+            COALESCE(m.name,  e.model)           AS model_name
+        FROM expenses e
+        LEFT JOIN expense_categories ec ON e.category_id = ec.id
+        LEFT JOIN models              m  ON e.model_id    = m.id
+        WHERE e.tenant_id = :tid
+          AND e.date IS NOT NULL
+          AND EXTRACT(MONTH FROM e.date) = :month
+          AND EXTRACT(YEAR  FROM e.date) = :year
+    """
+    params: dict = {"tid": tenant.id, "month": month, "year": year}
+
+    if source:
+        base_sql += " AND COALESCE(e.source, 'import') = :source"
+        params["source"] = source
+
+    base_sql += " ORDER BY e.date DESC, e.id DESC"
+
+    result = await db.execute(text(base_sql), params)
+    return {"items": [dict(r) for r in result.mappings()]}
+
+
+@router.put("/expenses/{exp_id}")
+async def update_expense(
+    exp_id: int,
+    data: ExpenseUpdate,
+    tenant: Tenant = Depends(get_current_tenant),
+    db: AsyncSession = Depends(get_db),
+):
+    exp = await db.get(Expense, exp_id)
+    if not exp or exp.tenant_id != tenant.id:
+        raise HTTPException(status_code=404, detail="Не найдено")
+    exp.date = data.date
+    exp.category_id = data.category_id
+    exp.amount = data.amount
+    exp.model_id = data.model_id
+    exp.description = data.description
+    exp.source = "manual"  # правка отвязывает от автосинка
+    await db.commit()
+    return {"success": True}
+
+
+@router.delete("/expenses/{exp_id}")
+async def delete_expense(
+    exp_id: int,
+    tenant: Tenant = Depends(get_current_tenant),
+    db: AsyncSession = Depends(get_db),
+):
+    exp = await db.get(Expense, exp_id)
+    if not exp or exp.tenant_id != tenant.id:
+        raise HTTPException(status_code=404, detail="Не найдено")
+    await db.delete(exp)
     await db.commit()
     return {"success": True}

@@ -15,6 +15,7 @@ from datetime import datetime
 from models import AppSetting, Expense, SyncLog
 from notion_sync_service import NOTION_VERSION, _norm_prop_name, _parse_date
 from team_helpers import normalize_notion_db_id
+from services.catalog_resolver import resolve_category_id, resolve_model_id
 
 logger = logging.getLogger("flowof.notion_expenses")
 
@@ -189,6 +190,10 @@ async def sync_notion_expenses_for_tenant(
                 vendor = _prop_text(vendor_p)
                 payment_method = _prop_text(pay_p)
 
+                # Резолвим имена в справочниках
+                cat_id = await resolve_category_id(cat, tenant_id, db)
+                model_catalog_id = await resolve_model_id(model, tenant_id, db)
+
                 r = await db.execute(
                     select(Expense).where(
                         Expense.tenant_id == tenant_id,
@@ -203,6 +208,9 @@ async def sync_notion_expenses_for_tenant(
                     ex.model = model
                     ex.vendor = vendor
                     ex.payment_method = payment_method
+                    ex.category_id = cat_id
+                    ex.model_id = model_catalog_id
+                    ex.source = "import"
                     updated += 1
                 else:
                     db.add(
@@ -215,6 +223,9 @@ async def sync_notion_expenses_for_tenant(
                             model=model,
                             vendor=vendor,
                             payment_method=payment_method,
+                            category_id=cat_id,
+                            model_id=model_catalog_id,
+                            source="import",
                         )
                     )
                     inserted += 1

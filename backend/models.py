@@ -121,6 +121,11 @@ class Expense(Base):
     vendor = Column(String(255), nullable=True)
     payment_method = Column(String(100), nullable=True)
     amount = Column(Numeric(12, 2), nullable=True)
+    # Ручной учёт / импорт: FK на справочники + источник + описание
+    category_id = Column(Integer, ForeignKey("expense_categories.id"), nullable=True)
+    model_id = Column(Integer, ForeignKey("models.id"), nullable=True)
+    description = Column(Text, nullable=True)
+    source = Column(String(50), nullable=True)  # 'manual' | 'import' | 'google_sheets'
 
 
 class Shift(Base):

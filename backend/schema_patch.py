@@ -204,6 +204,55 @@ _PATCHES: list[tuple[str, bool]] = [
            WHERE source IS NULL AND notion_id IS NOT NULL""",
         False,
     ),
+    # Бэкфилл expenses: заполнить category_id и model_id для ранее импортированных расходов
+    (
+        """INSERT INTO expense_categories (tenant_id, name, active)
+           SELECT DISTINCT e.tenant_id, e.category, true
+           FROM expenses e
+           WHERE e.category IS NOT NULL AND e.category <> '' AND e.category_id IS NULL
+             AND NOT EXISTS (
+                 SELECT 1 FROM expense_categories ec
+                 WHERE ec.tenant_id = e.tenant_id AND ec.name = e.category
+             )""",
+        False,
+    ),
+    (
+        """UPDATE expenses e
+           SET category_id = ec.id
+           FROM expense_categories ec
+           WHERE e.tenant_id = ec.tenant_id
+             AND e.category = ec.name
+             AND e.category_id IS NULL
+             AND e.category IS NOT NULL AND e.category <> ''""",
+        False,
+    ),
+    (
+        """INSERT INTO models (tenant_id, name, active)
+           SELECT DISTINCT e.tenant_id, e.model, true
+           FROM expenses e
+           WHERE e.model IS NOT NULL AND e.model <> '' AND e.model_id IS NULL
+             AND NOT EXISTS (
+                 SELECT 1 FROM models m WHERE m.tenant_id = e.tenant_id AND m.name = e.model
+             )""",
+        False,
+    ),
+    (
+        """UPDATE expenses e
+           SET model_id = m.id
+           FROM models m
+           WHERE e.tenant_id = m.tenant_id
+             AND e.model = m.name
+             AND e.model_id IS NULL
+             AND e.model IS NOT NULL AND e.model <> ''""",
+        False,
+    ),
+    # Проставить source для расходов
+    (
+        """UPDATE expenses
+           SET source = 'import'
+           WHERE source IS NULL AND notion_id IS NOT NULL""",
+        False,
+    ),
 ]
 
 
