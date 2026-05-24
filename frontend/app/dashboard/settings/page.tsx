@@ -1418,7 +1418,7 @@ function GoogleSheetsSection() {
 
           <div className="flex flex-wrap gap-2">
             <button type="button"
-              onClick={() => handleImport(status.spreadsheet_id!, status.sheet_name!)}
+              onClick={() => handleImport(status.spreadsheet_id!, [status.sheet_name!])}
               disabled={importing || !status.spreadsheet_id || !status.sheet_name}
               className="flex items-center gap-2 px-4 py-2 text-sm bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 text-white rounded-lg transition-colors">
               {importing
