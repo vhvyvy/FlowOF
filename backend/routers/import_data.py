@@ -707,6 +707,9 @@ def _normalize_date_column(df: "pd.DataFrame", period_hint: str) -> "pd.DataFram
             # Записываем чистый ISO YYYY-MM-DD в колонку
             df[col] = parsed.dt.strftime("%Y-%m-%d").where(parsed.notna(), series)
     return df
+
+
+def _df_to_csv(raw: bytes, filename: str, sheet_name: str | None = None) -> str:
     """Читает xlsx/xls/csv и возвращает строку CSV для AIImporter."""
     import io as _io
 
