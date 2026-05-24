@@ -79,6 +79,11 @@ class Transaction(Base):
     # Which Notion database this row was synced from (for team routing)
     notion_database_id = Column(String(64), nullable=True, index=True)
     team_id = Column(Integer, ForeignKey("teams_mt.id"), nullable=True, index=True)
+    # Ручной учёт: FK на справочники + признак источника
+    model_id = Column(Integer, ForeignKey("models.id"), nullable=True)
+    chatter_id = Column(Integer, ForeignKey("chatters.id"), nullable=True)
+    shift_catalog_id = Column(Integer, ForeignKey("shifts_catalog.id"), nullable=True)
+    source = Column(String(50), nullable=True)  # 'manual' | 'import' | 'google_sheets'
 
 
 class Team(Base):

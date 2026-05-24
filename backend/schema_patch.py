@@ -116,6 +116,15 @@ _PATCHES: list[tuple[str, bool]] = [
         False,
     ),
     ("CREATE INDEX IF NOT EXISTS ix_expense_categories_tenant_id ON expense_categories (tenant_id)", False),
+    # Этап 2: новые колонки в transactions и expenses для ручного учёта
+    ("ALTER TABLE transactions ADD COLUMN IF NOT EXISTS model_id INTEGER REFERENCES models(id)", False),
+    ("ALTER TABLE transactions ADD COLUMN IF NOT EXISTS chatter_id INTEGER REFERENCES chatters(id)", False),
+    ("ALTER TABLE transactions ADD COLUMN IF NOT EXISTS shift_catalog_id INTEGER REFERENCES shifts_catalog(id)", False),
+    ("ALTER TABLE transactions ADD COLUMN IF NOT EXISTS source TEXT", False),
+    ("ALTER TABLE expenses ADD COLUMN IF NOT EXISTS category_id INTEGER REFERENCES expense_categories(id)", False),
+    ("ALTER TABLE expenses ADD COLUMN IF NOT EXISTS model_id INTEGER REFERENCES models(id)", False),
+    ("ALTER TABLE expenses ADD COLUMN IF NOT EXISTS description TEXT", False),
+    ("ALTER TABLE expenses ADD COLUMN IF NOT EXISTS source TEXT", False),
 ]
 
 
