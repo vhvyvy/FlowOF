@@ -1,12 +1,12 @@
 'use client'
 
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useRef } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
-import api from '@/lib/api'
+import api, { resolveApiBaseURL } from '@/lib/api'
 import { TEAM_COLOR_OPTIONS, teamColor } from '@/lib/teamColors'
 import { Header } from '@/components/layout/Header'
 import { Skeleton } from '@/components/ui/skeleton'
-import { Save, RefreshCw, AlertCircle, CheckCircle2, Key, Eye, EyeOff, Users, Pencil, Trash2, Check, X, CloudDownload, Table2, ExternalLink, Unlink } from 'lucide-react'
+import { Save, RefreshCw, AlertCircle, CheckCircle2, Key, Eye, EyeOff, Users, Pencil, Trash2, Check, X, CloudDownload, Table2, ExternalLink, Unlink, UploadCloud, FileSpreadsheet } from 'lucide-react'
 import type { TeamOut } from '@/types'
 
 interface Settings {
@@ -842,6 +842,273 @@ function TeamsSection({ notionImport }: { notionImport: NotionImportMutation }) 
   )
 }
 
+// ─────────────────────────── File Import Section ─────────────────────────────
+
+type FileDetectResp = { upload_id: string; filename: string; sheets: string[] }
+type FilePreviewRow = { date?: string | null; model?: string | null; chatter?: string | null; amount?: number | string | null; shift_id?: string | null }
+type FilePreviewResp = { rows: FilePreviewRow[]; preview: FilePreviewRow[]; total_rows: number; warnings: string[] }
+type FileConfirmResp = { rows_imported: number; rows_skipped: number }
+
+type FileStage = 'idle' | 'detecting' | 'sheets' | 'analyzing' | 'preview' | 'done'
+
+function FileImportSection() {
+  const qc = useQueryClient()
+  const [stage, setStage] = useState<FileStage>('idle')
+  const [dragging, setDragging] = useState(false)
+  const [fileName, setFileName] = useState('')
+  const [uploadId, setUploadId] = useState('')
+  const [sheets, setSheets] = useState<string[]>([])
+  const [selectedSheet, setSelectedSheet] = useState('')
+  const [previewData, setPreviewData] = useState<FilePreviewResp | null>(null)
+  const [aiRows, setAiRows] = useState<FilePreviewRow[]>([])
+  const [err, setErr] = useState<string | null>(null)
+  const [importResult, setImportResult] = useState<{ count: number; date: string } | null>(null)
+  const [importing, setImporting] = useState(false)
+  const inputRef = useRef<HTMLInputElement>(null)
+  const token = typeof window !== 'undefined' ? localStorage.getItem('token') : null
+
+  const reset = () => {
+    setStage('idle'); setErr(null); setFileName(''); setUploadId('')
+    setSheets([]); setSelectedSheet(''); setPreviewData(null); setAiRows([])
+  }
+
+  const detectSheets = async (file: File) => {
+    setFileName(file.name)
+    setErr(null)
+    setImportResult(null)
+    setStage('detecting')
+    const fd = new FormData()
+    fd.append('file', file)
+    try {
+      const res = await fetch(`${resolveApiBaseURL()}/api/v1/import/file/detect-sheets`, {
+        method: 'POST',
+        headers: token ? { Authorization: `Bearer ${token}` } : {},
+        body: fd,
+      })
+      const body = (await res.json().catch(() => ({}))) as FileDetectResp & { detail?: string }
+      if (!res.ok) throw new Error(body.detail ?? 'Ошибка загрузки')
+      setUploadId(body.upload_id)
+      if (body.sheets.length > 1) {
+        setSheets(body.sheets); setStage('sheets')
+      } else {
+        await runPreview(body.upload_id, body.sheets[0] ?? '')
+      }
+    } catch (e: unknown) {
+      setErr(e instanceof Error ? e.message : 'Ошибка'); setStage('idle')
+    }
+  }
+
+  const runPreview = async (uid: string, sheet: string) => {
+    setStage('analyzing')
+    const fd = new FormData()
+    fd.append('upload_id', uid)
+    if (sheet) fd.append('sheet_name', sheet)
+    try {
+      const res = await fetch(`${resolveApiBaseURL()}/api/v1/import/file/preview`, {
+        method: 'POST',
+        headers: token ? { Authorization: `Bearer ${token}` } : {},
+        body: fd,
+      })
+      const body = (await res.json().catch(() => ({}))) as FilePreviewResp & { detail?: string }
+      if (!res.ok) throw new Error(body.detail ?? 'Ошибка AI-анализа')
+      setPreviewData(body)
+      setAiRows(body.rows)
+      setStage('preview')
+    } catch (e: unknown) {
+      setErr(e instanceof Error ? e.message : 'Ошибка'); setStage('idle')
+    }
+  }
+
+  const handleConfirm = async () => {
+    if (!aiRows.length) return
+    setImporting(true); setErr(null)
+    try {
+      const res = await api.post<FileConfirmResp>('/api/v1/import/file/confirm', { rows: aiRows })
+      setImportResult({ count: res.data.rows_imported, date: new Date().toLocaleString('ru', { day: '2-digit', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit' }) })
+      setStage('done')
+      qc.invalidateQueries({ queryKey: ['overview'] })
+      qc.invalidateQueries({ queryKey: ['finance'] })
+      qc.invalidateQueries({ queryKey: ['chatters'] })
+      qc.invalidateQueries({ queryKey: ['months-summary'] })
+    } catch (e: unknown) {
+      const ax = e as { response?: { data?: { detail?: string } }; message?: string }
+      setErr(ax.response?.data?.detail ?? ax.message ?? 'Ошибка импорта')
+    } finally {
+      setImporting(false)
+    }
+  }
+
+  const onDrop = (e: React.DragEvent<HTMLDivElement>) => {
+    e.preventDefault(); setDragging(false)
+    const file = e.dataTransfer.files?.[0]
+    if (file) void detectSheets(file)
+  }
+
+  const onInput = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0]
+    if (file) void detectSheets(file)
+    e.target.value = ''
+  }
+
+  return (
+    <div className="bg-slate-800/60 border border-slate-700/50 rounded-xl px-5 py-5 space-y-4">
+      <p className="text-xs font-semibold text-slate-400 uppercase tracking-widest">Загрузить файл</p>
+
+      {/* Результат прошлого импорта */}
+      {importResult && stage === 'done' && (
+        <div className="flex items-center gap-2 text-xs text-emerald-300 bg-emerald-500/10 border border-emerald-500/30 rounded-lg px-3 py-2">
+          <CheckCircle2 className="h-3.5 w-3.5 shrink-0" />
+          Импортировано {importResult.count} строк · {importResult.date}
+        </div>
+      )}
+
+      {/* Ошибка */}
+      {err && (
+        <div className="flex items-start gap-2 text-xs text-red-300 bg-red-500/5 border border-red-500/30 rounded-lg px-3 py-2">
+          <AlertCircle className="h-3.5 w-3.5 mt-0.5 shrink-0" />
+          {err}
+        </div>
+      )}
+
+      {/* ── Drag & drop ── */}
+      {(stage === 'idle' || stage === 'done') && (
+        <>
+          <div
+            onDragOver={(e) => { e.preventDefault(); setDragging(true) }}
+            onDragLeave={() => setDragging(false)}
+            onDrop={onDrop}
+            onClick={() => inputRef.current?.click()}
+            className={`cursor-pointer rounded-xl border-2 border-dashed px-6 py-8 text-center transition-colors ${dragging ? 'border-indigo-400 bg-indigo-500/10' : 'border-slate-700 bg-slate-800/30 hover:border-slate-500 hover:bg-slate-800/50'}`}
+          >
+            <UploadCloud className="h-8 w-8 text-slate-500 mx-auto mb-2" />
+            <p className="text-slate-300 text-sm font-medium">Перетащи файл или нажми</p>
+            <p className="text-slate-500 text-xs mt-1">.xlsx, .xls, .csv · до 15 МБ</p>
+          </div>
+          <input ref={inputRef} type="file" accept=".csv,.xlsx,.xls" className="hidden" onChange={onInput} />
+        </>
+      )}
+
+      {/* ── Detecting ── */}
+      {stage === 'detecting' && (
+        <div className="rounded-xl border border-slate-700/40 bg-slate-800/40 px-4 py-6 text-center">
+          <RefreshCw className="h-6 w-6 text-slate-500 animate-spin mx-auto mb-2" />
+          <p className="text-slate-400 text-sm">Читаем файл…</p>
+          <p className="text-slate-500 text-xs mt-0.5">{fileName}</p>
+        </div>
+      )}
+
+      {/* ── Sheet picker ── */}
+      {stage === 'sheets' && (
+        <div className="space-y-3">
+          <div className="flex items-center gap-2 text-xs text-slate-500 bg-slate-800/40 rounded-lg px-3 py-2 border border-slate-700/40">
+            <FileSpreadsheet className="h-3.5 w-3.5 shrink-0" />{fileName}
+          </div>
+          <p className="text-slate-400 text-sm">Файл содержит несколько листов. Выбери нужный:</p>
+          <div className="space-y-1.5 max-h-52 overflow-y-auto">
+            {sheets.map((s) => (
+              <button key={s} type="button" onClick={() => setSelectedSheet(s)}
+                className={`w-full text-left rounded-lg border px-4 py-2.5 text-sm transition-colors ${selectedSheet === s ? 'border-indigo-500 bg-indigo-500/10 text-slate-100' : 'border-slate-700 bg-slate-800/40 text-slate-300 hover:border-slate-500'}`}>
+                {s}
+              </button>
+            ))}
+          </div>
+          <div className="flex gap-2">
+            <button type="button"
+              disabled={!selectedSheet}
+              onClick={() => void runPreview(uploadId, selectedSheet)}
+              className="flex-1 flex items-center justify-center gap-2 px-4 py-2 text-sm bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 text-white rounded-lg transition-colors">
+              <CloudDownload className="h-4 w-4" />Анализировать лист
+            </button>
+            <button type="button" onClick={reset} className="px-3 py-2 text-sm border border-slate-700 text-slate-400 hover:text-slate-200 rounded-lg">
+              Отмена
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* ── Analyzing ── */}
+      {stage === 'analyzing' && (
+        <div className="rounded-xl border border-slate-700/40 bg-slate-800/40 px-4 py-8 text-center">
+          <div className="w-9 h-9 border-2 border-indigo-500 border-t-transparent rounded-full animate-spin mx-auto mb-3" />
+          <p className="text-slate-200 text-sm font-medium">AI анализирует таблицу…</p>
+          <p className="text-slate-500 text-xs mt-1">{fileName}{selectedSheet ? ` · ${selectedSheet}` : ''}</p>
+          <p className="text-slate-500 text-xs mt-0.5">Обычно 10–30 секунд</p>
+        </div>
+      )}
+
+      {/* ── Preview + confirm ── */}
+      {stage === 'preview' && previewData && (
+        <div className="space-y-3">
+          {/* Файл/лист */}
+          <div className="flex items-center gap-2 text-xs text-slate-500 bg-slate-800/40 rounded-lg px-3 py-2 border border-slate-700/40">
+            <FileSpreadsheet className="h-3.5 w-3.5 shrink-0" />
+            {fileName}{selectedSheet ? ` · ${selectedSheet}` : ''}
+            <span className="ml-auto text-slate-400 font-medium">{previewData.total_rows} транзакций</span>
+          </div>
+
+          {/* Предупреждения */}
+          {previewData.warnings.length > 0 && (
+            <div className="rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-2 space-y-1">
+              {previewData.warnings.map((w, i) => (
+                <p key={i} className="text-amber-300 text-xs">⚠ {w}</p>
+              ))}
+            </div>
+          )}
+
+          {/* Таблица превью */}
+          <div className="rounded-lg border border-slate-700/50 overflow-hidden text-xs max-h-52 overflow-y-auto">
+            <table className="min-w-full text-left text-slate-300">
+              <thead className="bg-slate-800/80 text-slate-400 sticky top-0">
+                <tr>
+                  <th className="px-2 py-1.5 font-normal">Дата</th>
+                  <th className="px-2 py-1.5 font-normal">Модель</th>
+                  <th className="px-2 py-1.5 font-normal">Чаттер</th>
+                  <th className="px-2 py-1.5 font-normal text-right">Сумма</th>
+                </tr>
+              </thead>
+              <tbody>
+                {previewData.preview.map((row, i) => (
+                  <tr key={i} className="border-t border-slate-700/30">
+                    <td className="px-2 py-1 whitespace-nowrap">{row.date ?? '—'}</td>
+                    <td className="px-2 py-1 max-w-[130px] truncate">{row.model ?? '—'}</td>
+                    <td className="px-2 py-1 max-w-[130px] truncate">{row.chatter ?? '—'}</td>
+                    <td className="px-2 py-1 text-right text-emerald-400">
+                      {row.amount !== null && row.amount !== undefined && row.amount !== ''
+                        ? `$${Number(row.amount).toFixed(2)}` : '—'}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+          <p className="text-slate-600 text-xs">Первые {previewData.preview.length} из {previewData.total_rows} строк</p>
+
+          <div className="flex gap-2">
+            <button type="button" onClick={handleConfirm} disabled={importing}
+              className="flex-1 flex items-center justify-center gap-2 px-4 py-2 text-sm bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 text-white rounded-lg transition-colors">
+              {importing
+                ? <><RefreshCw className="h-4 w-4 animate-spin" />Импортируем…</>
+                : <><CloudDownload className="h-4 w-4" />Импортировать {previewData.total_rows} строк</>}
+            </button>
+            <button type="button" onClick={reset}
+              className="px-3 py-2 text-sm border border-slate-700 text-slate-400 hover:text-slate-200 rounded-lg transition-colors">
+              Отмена
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* После успешного импорта — кнопка загрузить ещё */}
+      {stage === 'done' && (
+        <button type="button" onClick={reset}
+          className="w-full text-xs text-slate-500 hover:text-slate-300 transition-colors">
+          Загрузить другой файл
+        </button>
+      )}
+    </div>
+  )
+}
+
 // ─────────────────────────── Google Sheets Section ───────────────────────────
 
 interface GoogleStatus {
@@ -1343,6 +1610,8 @@ export default function SettingsPage() {
       <IntegrationsSection />
 
       <GoogleSheetsSection />
+
+      <FileImportSection />
 
       <GlobalExpensesNotionSection
         value={local.notion_expenses_database_ids}
