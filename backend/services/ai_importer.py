@@ -58,13 +58,21 @@ class AIImporter:
         if not csv_content or not csv_content.strip():
             return {"rows": [], "total": 0, "original_columns": [], "mapping": {}, "warnings": ["Пустой CSV"]}
 
-        # Извлекаем мета-строку # sheet: ... и сохраняем для батчей
+        # Извлекаем мета-строки # sheet: ... и # period: ... и сохраняем для батчей
         sheet_hint = ""
+        period_hint = ""
         lines_raw = csv_content.splitlines()
-        if lines_raw and lines_raw[0].startswith("# sheet:"):
-            sheet_hint = lines_raw[0].removeprefix("# sheet:").strip()
-            csv_content = "\n".join(lines_raw[1:])
-        self._sheet_hint = sheet_hint  # передаём в _process_chunk через self
+        data_lines: list[str] = []
+        for line in lines_raw:
+            if line.startswith("# sheet:"):
+                sheet_hint = line.removeprefix("# sheet:").strip()
+            elif line.startswith("# period:"):
+                period_hint = line.removeprefix("# period:").strip()
+            else:
+                data_lines.append(line)
+        csv_content = "\n".join(data_lines)
+        self._sheet_hint = sheet_hint
+        self._period_hint = period_hint
 
         try:
             df = pd.read_csv(io.StringIO(csv_content))
@@ -158,6 +166,7 @@ class AIImporter:
 
     def _build_normalize_prompt(self, csv_content: str) -> str:
         sheet_hint = getattr(self, "_sheet_hint", "")
+        period_hint = getattr(self, "_period_hint", "")
 
         sheet_context = (
             f"\nВажно: данные взяты с листа «{sheet_hint}». "
@@ -165,11 +174,19 @@ class AIImporter:
             if sheet_hint else ""
         )
 
+        period_context = (
+            f"\nВажно: данные за период «{period_hint}». "
+            "Если в датах отсутствует год или месяц (например дата записана как '01.07' или просто '1'), "
+            f"используй год и месяц из этого периода при нормализации дат в формат YYYY-MM-DD."
+            if period_hint else ""
+        )
+
         return (
             "Ты помощник по импорту данных для FlowOF — системы аналитики OF-агентств.\n\n"
             "Вот CSV таблица агентства:\n```\n"
             f"{csv_content}\n```\n\n"
             f"{sheet_context}\n"
+            f"{period_context}\n"
             "Наша стандартная схема транзакций:\n"
             f"{json.dumps(self.SCHEMA, ensure_ascii=False, indent=2)}\n\n"
             "Задача:\n"

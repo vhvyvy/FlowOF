@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import hashlib
 from datetime import date, datetime
 from typing import Any
@@ -582,6 +583,27 @@ class FileConfirmResponse(BaseModel):
     rows_skipped: int
 
 
+def _extract_period_hint(raw: bytes, filename: str, sheet_kw: dict) -> str:
+    """
+    Читает первые 3 строки Excel до применения header-detection,
+    ищет ячейку с годом (например 'Июль 2024', 'July 2024', '07.2024').
+    Возвращает строку-подсказку или '' если не найдено.
+    """
+    import io as _io
+    try:
+        df_peek = pd.read_excel(_io.BytesIO(raw), header=None, nrows=3, **sheet_kw)
+        for row_idx in range(min(3, len(df_peek))):
+            for col_idx in range(min(5, len(df_peek.columns))):
+                raw_val = df_peek.iloc[row_idx, col_idx]
+                cell = str(raw_val).strip()
+                # Ищем что-то похожее на год 20XX (не просто число-дата)
+                if re.search(r'\b20\d\d\b', cell) and len(cell) < 60:
+                    return cell
+    except Exception:
+        pass
+    return ""
+
+
 def _df_to_csv(raw: bytes, filename: str, sheet_name: str | None = None) -> str:
     """Читает xlsx/xls/csv и возвращает строку CSV для AIImporter."""
     import io as _io
@@ -589,6 +611,9 @@ def _df_to_csv(raw: bytes, filename: str, sheet_name: str | None = None) -> str:
     ext = os.path.splitext(filename or "")[1].lower()
     if ext in (".xlsx", ".xls"):
         sheet_kw: dict = {"sheet_name": sheet_name} if sheet_name else {}
+
+        # Сначала ищем period-hint в сырых строках (до header detection)
+        period_hint = _extract_period_hint(raw, filename, sheet_kw)
 
         def _read(header: int) -> "pd.DataFrame":
             return pd.read_excel(_io.BytesIO(raw), header=header, **sheet_kw)
@@ -614,6 +639,7 @@ def _df_to_csv(raw: bytes, filename: str, sheet_name: str | None = None) -> str:
                 break
 
     else:
+        period_hint = ""
         # CSV — пробуем несколько кодировок
         for enc in ("utf-8-sig", "utf-8", "cp1251", "latin-1"):
             try:
@@ -625,7 +651,11 @@ def _df_to_csv(raw: bytes, filename: str, sheet_name: str | None = None) -> str:
             raise ValueError("Не удалось прочитать CSV ни в одной кодировке")
 
     df = df.dropna(how="all").dropna(axis=1, how="all")
-    return df.to_csv(index=False)
+    csv_out = df.to_csv(index=False)
+    # Прикрепляем period-hint как мета-комментарий чтобы AI знал год/месяц
+    if period_hint:
+        csv_out = f"# period: {period_hint}\n{csv_out}"
+    return csv_out
 
 
 def _get_excel_sheets(raw: bytes, filename: str) -> list[str]:
