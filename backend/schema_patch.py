@@ -70,6 +70,52 @@ _PATCHES: list[tuple[str, bool]] = [
     ("ALTER TABLE teams_mt ALTER COLUMN notion_database_id TYPE TEXT", False),
     # Admin panel
     ("ALTER TABLE tenants ADD COLUMN IF NOT EXISTS is_admin BOOLEAN NOT NULL DEFAULT FALSE", False),
+    # Этап 1: справочники ручного учёта
+    (
+        """CREATE TABLE IF NOT EXISTS models (
+            id SERIAL PRIMARY KEY,
+            tenant_id INTEGER NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+            name VARCHAR(255) NOT NULL,
+            active BOOLEAN NOT NULL DEFAULT TRUE,
+            created_at TIMESTAMP DEFAULT NOW()
+        )""",
+        False,
+    ),
+    ("CREATE INDEX IF NOT EXISTS ix_models_tenant_id ON models (tenant_id)", False),
+    (
+        """CREATE TABLE IF NOT EXISTS chatters (
+            id SERIAL PRIMARY KEY,
+            tenant_id INTEGER NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+            name VARCHAR(255) NOT NULL,
+            active BOOLEAN NOT NULL DEFAULT TRUE,
+            created_at TIMESTAMP DEFAULT NOW()
+        )""",
+        False,
+    ),
+    ("CREATE INDEX IF NOT EXISTS ix_chatters_tenant_id ON chatters (tenant_id)", False),
+    (
+        """CREATE TABLE IF NOT EXISTS shifts_catalog (
+            id SERIAL PRIMARY KEY,
+            tenant_id INTEGER NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+            name VARCHAR(255) NOT NULL,
+            sort_order INTEGER DEFAULT 0,
+            active BOOLEAN NOT NULL DEFAULT TRUE,
+            created_at TIMESTAMP DEFAULT NOW()
+        )""",
+        False,
+    ),
+    ("CREATE INDEX IF NOT EXISTS ix_shifts_catalog_tenant_id ON shifts_catalog (tenant_id)", False),
+    (
+        """CREATE TABLE IF NOT EXISTS expense_categories (
+            id SERIAL PRIMARY KEY,
+            tenant_id INTEGER NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+            name VARCHAR(255) NOT NULL,
+            active BOOLEAN NOT NULL DEFAULT TRUE,
+            created_at TIMESTAMP DEFAULT NOW()
+        )""",
+        False,
+    ),
+    ("CREATE INDEX IF NOT EXISTS ix_expense_categories_tenant_id ON expense_categories (tenant_id)", False),
 ]
 
 

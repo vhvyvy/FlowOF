@@ -71,6 +71,7 @@ from routers import (  # noqa: E402
     kpi,
     ai,
     admin,
+    catalog,
     settings,
     structure,
     shifts,
@@ -91,6 +92,7 @@ app.include_router(plans.router)
 app.include_router(kpi.router)
 app.include_router(ai.router)
 app.include_router(admin.router)
+app.include_router(catalog.router)
 app.include_router(settings.router)
 app.include_router(structure.router)
 app.include_router(shifts.router)

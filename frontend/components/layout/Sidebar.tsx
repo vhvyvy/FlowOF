@@ -16,6 +16,7 @@ import {
   ClipboardList,
   PieChart,
   CalendarDays,
+  BookOpen,
 } from 'lucide-react'
 import { useState } from 'react'
 import { cn } from '@/lib/utils'
@@ -31,6 +32,7 @@ const NAV_ITEMS = [
   { href: '/dashboard/kpi', label: 'KPI', icon: BarChart3 },
   { href: '/dashboard/shifts', label: 'Смены', icon: CalendarDays },
   { href: '/dashboard/plans', label: 'Планы', icon: ClipboardList },
+  { href: '/dashboard/catalog', label: 'Справочники', icon: BookOpen },
   { href: '/dashboard/lab', label: 'Лаборатория', icon: FlaskConical },
   { href: '/dashboard/ai', label: 'AI Аналитик', icon: Sparkles },
   { href: '/dashboard/settings', label: 'Настройки', icon: Settings },
