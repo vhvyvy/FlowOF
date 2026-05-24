@@ -58,21 +58,24 @@ class AIImporter:
         if not csv_content or not csv_content.strip():
             return {"rows": [], "total": 0, "original_columns": [], "mapping": {}, "warnings": ["Пустой CSV"]}
 
-        # Извлекаем мета-строки # sheet: ... и # period: ... и сохраняем для батчей
+        # Извлекаем мета-строки # sheet: / # period: / # filename: и сохраняем для батчей
         sheet_hint = ""
         period_hint = ""
-        lines_raw = csv_content.splitlines()
+        filename_hint = ""
         data_lines: list[str] = []
-        for line in lines_raw:
+        for line in csv_content.splitlines():
             if line.startswith("# sheet:"):
                 sheet_hint = line.removeprefix("# sheet:").strip()
             elif line.startswith("# period:"):
                 period_hint = line.removeprefix("# period:").strip()
+            elif line.startswith("# filename:"):
+                filename_hint = line.removeprefix("# filename:").strip()
             else:
                 data_lines.append(line)
         csv_content = "\n".join(data_lines)
         self._sheet_hint = sheet_hint
         self._period_hint = period_hint
+        self._filename_hint = filename_hint
 
         try:
             df = pd.read_csv(io.StringIO(csv_content))
@@ -167,6 +170,7 @@ class AIImporter:
     def _build_normalize_prompt(self, csv_content: str) -> str:
         sheet_hint = getattr(self, "_sheet_hint", "")
         period_hint = getattr(self, "_period_hint", "")
+        filename_hint = getattr(self, "_filename_hint", "")
 
         sheet_context = (
             f"\nВажно: данные взяты с листа «{sheet_hint}». "
@@ -174,12 +178,25 @@ class AIImporter:
             if sheet_hint else ""
         )
 
-        period_context = (
-            f"\nВажно: данные за период «{period_hint}». "
-            "Если в датах отсутствует год или месяц (например дата записана как '01.07' или просто '1'), "
-            f"используй год и месяц из этого периода при нормализации дат в формат YYYY-MM-DD."
-            if period_hint else ""
-        )
+        # Собираем максимум контекста о периоде из всех источников
+        period_parts: list[str] = []
+        if period_hint:
+            period_parts.append(f"явный период: «{period_hint}»")
+        if filename_hint:
+            period_parts.append(f"имя файла: «{filename_hint}»")
+        if sheet_hint:
+            period_parts.append(f"имя листа: «{sheet_hint}»")
+
+        if period_parts:
+            period_context = (
+                f"\nКонтекст дат — {', '.join(period_parts)}. "
+                "Используй эту информацию чтобы определить год и месяц транзакций. "
+                "Если в датах таблицы отсутствует год или месяц (например записано только '01', '02.08', '1 авг') — "
+                "восстанови полную дату YYYY-MM-DD используя год/месяц из контекста выше. "
+                "Например если контекст говорит 'август 2025' и дата '15' → '2025-08-15'."
+            )
+        else:
+            period_context = ""
 
         return (
             "Ты помощник по импорту данных для FlowOF — системы аналитики OF-агентств.\n\n"
@@ -194,11 +211,11 @@ class AIImporter:
             "2. Преобразуй КАЖДУЮ строку данных в наш формат.\n"
             '3. Очисти суммы: убери $, руб, €, пробелы, запятые → оставь только число '
             '(например "1 500,50 $" → 1500.50).\n'
-            '4. Нормализуй даты → YYYY-MM-DD (например "01.04.2026" → "2026-04-01").\n'
+            '4. Нормализуй даты → YYYY-MM-DD. Используй контекст периода если год/месяц не указан явно.\n'
             "5. Строки-итоги/заголовки/пустые — пропусти.\n"
             "6. Верни ТОЛЬКО валидный JSON. Формат:\n"
             '{"rows": [\n'
-            '  {"date": "2026-04-01", "model": "Anna", "chatter": "Max", "amount": 150.0, "shift_id": "1"},\n'
+            '  {"date": "2025-08-01", "model": "Anna", "chatter": "Max", "amount": 150.0, "shift_id": "1"},\n'
             "  ...\n"
             "]}\n\n"
             "Если поле не найдено — ставь null. Не придумывай данные, которых нет в таблице."

@@ -583,10 +583,57 @@ class FileConfirmResponse(BaseModel):
     rows_skipped: int
 
 
+_MONTHS_RU = {
+    "январ": "январь", "феврал": "февраль", "март": "март",
+    "апрел": "апрель", "май": "май", "июн": "июнь",
+    "июл": "июль", "август": "август", "сентябр": "сентябрь",
+    "октябр": "октябрь", "ноябр": "ноябрь", "декабр": "декабрь",
+}
+_MONTHS_EN = {
+    "january": "january", "february": "february", "march": "march",
+    "april": "april", "may": "may", "june": "june",
+    "july": "july", "august": "august", "september": "september",
+    "october": "october", "november": "november", "december": "december",
+}
+
+
+def _find_month_in_text(text: str) -> str:
+    """Ищет название месяца (рус/англ) в произвольной строке. Возвращает '' если не найдено."""
+    lo = text.lower()
+    for prefix, name in _MONTHS_RU.items():
+        if prefix in lo:
+            return name
+    for prefix, name in _MONTHS_EN.items():
+        if prefix in lo:
+            return name
+    return ""
+
+
+def _find_year_in_text(text: str) -> str:
+    """Ищет год формата 20XX или короткий 2X (->20XX). Возвращает '' если не найдено."""
+    m = re.search(r'\b(20\d\d)\b', text)
+    if m:
+        return m.group(1)
+    # Короткий год: '25', '24' и т.п. не окружённый цифрами
+    m2 = re.search(r'(?<!\d)(2[0-9])(?!\d)', text)
+    if m2:
+        return f"20{m2.group(1)}"
+    return ""
+
+
+def _extract_period_from_filename(filename: str) -> str:
+    """Извлекает период (месяц + год) из имени файла или листа."""
+    stem = os.path.splitext(filename or "")[0]
+    month = _find_month_in_text(stem)
+    year = _find_year_in_text(stem)
+    if month or year:
+        return f"{month} {year}".strip()
+    return ""
+
+
 def _extract_period_hint(raw: bytes, filename: str, sheet_kw: dict) -> str:
     """
-    Читает первые 3 строки Excel до применения header-detection,
-    ищет ячейку с годом (например 'Июль 2024', 'July 2024', '07.2024').
+    Читает первые 3 строки Excel, ищет ячейку с месяцем и/или годом.
     Возвращает строку-подсказку или '' если не найдено.
     """
     import io as _io
@@ -594,10 +641,10 @@ def _extract_period_hint(raw: bytes, filename: str, sheet_kw: dict) -> str:
         df_peek = pd.read_excel(_io.BytesIO(raw), header=None, nrows=3, **sheet_kw)
         for row_idx in range(min(3, len(df_peek))):
             for col_idx in range(min(5, len(df_peek.columns))):
-                raw_val = df_peek.iloc[row_idx, col_idx]
-                cell = str(raw_val).strip()
-                # Ищем что-то похожее на год 20XX (не просто число-дата)
-                if re.search(r'\b20\d\d\b', cell) and len(cell) < 60:
+                cell = str(df_peek.iloc[row_idx, col_idx]).strip()
+                month = _find_month_in_text(cell)
+                year = _find_year_in_text(cell)
+                if (month or year) and len(cell) < 60:
                     return cell
     except Exception:
         pass
@@ -612,8 +659,12 @@ def _df_to_csv(raw: bytes, filename: str, sheet_name: str | None = None) -> str:
     if ext in (".xlsx", ".xls"):
         sheet_kw: dict = {"sheet_name": sheet_name} if sheet_name else {}
 
-        # Сначала ищем period-hint в сырых строках (до header detection)
+        # Ищем period-hint: сначала в Excel-строках, потом в имени файла/листа
         period_hint = _extract_period_hint(raw, filename, sheet_kw)
+        if not period_hint:
+            period_hint = _extract_period_from_filename(filename)
+        if not period_hint and sheet_name:
+            period_hint = _extract_period_from_filename(sheet_name)
 
         def _read(header: int) -> "pd.DataFrame":
             return pd.read_excel(_io.BytesIO(raw), header=header, **sheet_kw)
@@ -639,7 +690,7 @@ def _df_to_csv(raw: bytes, filename: str, sheet_name: str | None = None) -> str:
                 break
 
     else:
-        period_hint = ""
+        period_hint = _extract_period_from_filename(filename)
         # CSV — пробуем несколько кодировок
         for enc in ("utf-8-sig", "utf-8", "cp1251", "latin-1"):
             try:
@@ -652,10 +703,13 @@ def _df_to_csv(raw: bytes, filename: str, sheet_name: str | None = None) -> str:
 
     df = df.dropna(how="all").dropna(axis=1, how="all")
     csv_out = df.to_csv(index=False)
-    # Прикрепляем period-hint как мета-комментарий чтобы AI знал год/месяц
+
+    # Мета-комментарии для AI: имя файла (всегда) + период если найден
+    # AI использует их для корректного определения дат и модели
+    meta = f"# filename: {filename}\n"
     if period_hint:
-        csv_out = f"# period: {period_hint}\n{csv_out}"
-    return csv_out
+        meta += f"# period: {period_hint}\n"
+    return meta + csv_out
 
 
 def _get_excel_sheets(raw: bytes, filename: str) -> list[str]:
