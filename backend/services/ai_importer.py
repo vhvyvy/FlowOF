@@ -20,12 +20,50 @@ from __future__ import annotations
 import io
 import json
 import logging
+import re
 from typing import Any
 
 import pandas as pd
 from openai import AsyncOpenAI
 
 logger = logging.getLogger("flowof.ai_importer")
+
+_RU_MONTHS = {
+    "январ": ("январь", 1), "феврал": ("февраль", 2), "март": ("март", 3),
+    "апрел": ("апрель", 4), "май": ("май", 5), "июн": ("июнь", 6),
+    "июл": ("июль", 7), "август": ("август", 8), "сентябр": ("сентябрь", 9),
+    "октябр": ("октябрь", 10), "ноябр": ("ноябрь", 11), "декабр": ("декабрь", 12),
+}
+_EN_MONTHS = {
+    "jan": ("January", 1), "feb": ("February", 2), "mar": ("March", 3),
+    "apr": ("April", 4), "may": ("May", 5), "jun": ("June", 6),
+    "jul": ("July", 7), "aug": ("August", 8), "sep": ("September", 9),
+    "oct": ("October", 10), "nov": ("November", 11), "dec": ("December", 12),
+}
+
+
+def _parse_period(text: str) -> tuple[str, int | None, int | None]:
+    """
+    Парсит строку типа 'Деньги Август 2025.xlsx', 'август', '08.2025' и т.п.
+    Возвращает (month_name, month_num, year).
+    """
+    lo = text.lower()
+    month_name = ""
+    month_num: int | None = None
+    for prefix, (name, num) in {**_RU_MONTHS, **_EN_MONTHS}.items():
+        if prefix in lo:
+            month_name = name
+            month_num = num
+            break
+    year: int | None = None
+    m = re.search(r"\b(20\d\d)\b", text)
+    if m:
+        year = int(m.group(1))
+    else:
+        m2 = re.search(r"(?<!\d)(2[0-9])(?!\d)", text)
+        if m2:
+            year = 2000 + int(m2.group(1))
+    return month_name, month_num, year
 
 
 class AIImporter:
@@ -39,8 +77,6 @@ class AIImporter:
         "shift_id": "номер или ID смены (опционально, может отсутствовать)",
     }
 
-    # Максимум строк CSV, которые передаём в GPT за один вызов.
-    # 150 строк × ~5 колонок ≈ ~10–20k токенов, в 128k влезет с запасом + ответ.
     BATCH_SIZE = 150
     CHUNK_LIMIT_FOR_SINGLE_CALL = 200
 
@@ -53,44 +89,52 @@ class AIImporter:
 
     # ─────────────────────────── public API ───────────────────────────
 
-    async def process(self, csv_content: str) -> dict[str, Any]:
-        """Основной вход. Возвращает dict с rows / total / mapping / warnings."""
+    async def process(
+        self,
+        csv_content: str,
+        filename: str = "",
+        sheet_name: str = "",
+    ) -> dict[str, Any]:
+        """Основной вход. Возвращает dict с rows / total / mapping / warnings / detected_period."""
         if not csv_content or not csv_content.strip():
-            return {"rows": [], "total": 0, "original_columns": [], "mapping": {}, "warnings": ["Пустой CSV"]}
+            return {"rows": [], "total": 0, "original_columns": [], "mapping": {}, "warnings": ["Пустой CSV"], "detected_period": ""}
 
-        # Извлекаем мета-строки # sheet: / # period: / # filename: и сохраняем для батчей
-        sheet_hint = ""
+        # Извлекаем мета-строки (совместимость со старым кодом, новый путь через params)
         period_hint = ""
-        filename_hint = ""
         data_lines: list[str] = []
         for line in csv_content.splitlines():
-            if line.startswith("# sheet:"):
-                sheet_hint = line.removeprefix("# sheet:").strip()
+            if line.startswith("# sheet:") and not sheet_name:
+                sheet_name = line.removeprefix("# sheet:").strip()
             elif line.startswith("# period:"):
                 period_hint = line.removeprefix("# period:").strip()
-            elif line.startswith("# filename:"):
-                filename_hint = line.removeprefix("# filename:").strip()
+            elif line.startswith("# filename:") and not filename:
+                filename = line.removeprefix("# filename:").strip()
             else:
                 data_lines.append(line)
         csv_content = "\n".join(data_lines)
-        self._sheet_hint = sheet_hint
+
+        # Определяем период из всех источников (приоритет: filename > sheet_name > period_hint)
+        detected_period = self._resolve_detected_period(filename, sheet_name, period_hint)
+
+        self._filename = filename
+        self._sheet_name = sheet_name
         self._period_hint = period_hint
-        self._filename_hint = filename_hint
+        self._detected_period = detected_period
 
         try:
             df = pd.read_csv(io.StringIO(csv_content))
         except Exception as e:
             logger.warning("CSV parse failed: %s", e)
-            return {"rows": [], "total": 0, "original_columns": [], "mapping": {}, "warnings": [f"Не удалось прочитать CSV: {e}"]}
+            return {"rows": [], "total": 0, "original_columns": [], "mapping": {}, "warnings": [f"Не удалось прочитать CSV: {e}"], "detected_period": detected_period}
 
         df = df.dropna(axis=1, how="all")
         original_columns = [str(c) for c in df.columns.tolist()]
         total_rows = int(len(df))
 
-        logger.info("AIImporter: %s строк, колонки: %s", total_rows, original_columns)
+        logger.info("AIImporter: %s строк, колонки: %s, period: %s", total_rows, original_columns, detected_period)
 
         if total_rows == 0:
-            return {"rows": [], "total": 0, "original_columns": original_columns, "mapping": {}, "warnings": ["В таблице нет строк"]}
+            return {"rows": [], "total": 0, "original_columns": original_columns, "mapping": {}, "warnings": ["В таблице нет строк"], "detected_period": detected_period}
 
         if total_rows > self.CHUNK_LIMIT_FOR_SINGLE_CALL:
             rows = await self._process_in_batches(df)
@@ -105,9 +149,27 @@ class AIImporter:
             "original_columns": original_columns,
             "mapping": mapping,
             "warnings": self._find_warnings(rows, total_rows),
+            "detected_period": detected_period,
         }
 
     # ─────────────────────────── internals ───────────────────────────
+
+    def _resolve_detected_period(self, filename: str, sheet_name: str, period_hint: str) -> str:
+        """Определяет период (например 'Август 2025') из имени файла, листа или явного hint."""
+        import os
+        stem = os.path.splitext(filename)[0] if filename else ""
+        for source in (stem, sheet_name, period_hint):
+            if not source:
+                continue
+            month_name, month_num, year = _parse_period(source)
+            if month_num or year:
+                parts = []
+                if month_name:
+                    parts.append(month_name)
+                if year:
+                    parts.append(str(year))
+                return " ".join(parts)
+        return ""
 
     async def _process_chunk(self, csv_content: str) -> list[dict[str, Any]]:
         """Один вызов GPT-4o на CSV-чанк (до ~300 строк)."""
@@ -168,44 +230,56 @@ class AIImporter:
         return {}
 
     def _build_normalize_prompt(self, csv_content: str) -> str:
-        sheet_hint = getattr(self, "_sheet_hint", "")
-        period_hint = getattr(self, "_period_hint", "")
-        filename_hint = getattr(self, "_filename_hint", "")
+        filename = getattr(self, "_filename", "")
+        sheet_name = getattr(self, "_sheet_name", "")
+        detected_period = getattr(self, "_detected_period", "")
 
+        # Контекст модели из имени листа
         sheet_context = (
-            f"\nВажно: данные взяты с листа «{sheet_hint}». "
-            "Если колонка model отсутствует, используй имя листа как значение model для всех строк."
-            if sheet_hint else ""
+            f"\nИмя листа: «{sheet_name}». "
+            "Если колонка model отсутствует — используй имя листа как значение model для всех строк."
+            if sheet_name else ""
         )
 
-        # Собираем максимум контекста о периоде из всех источников
-        period_parts: list[str] = []
-        if period_hint:
-            period_parts.append(f"явный период: «{period_hint}»")
-        if filename_hint:
-            period_parts.append(f"имя файла: «{filename_hint}»")
-        if sheet_hint:
-            period_parts.append(f"имя листа: «{sheet_hint}»")
+        # Контекст дат — главная инструкция
+        if filename or sheet_name or detected_period:
+            file_ctx = f"«{filename}»" if filename else ""
+            sheet_ctx = f"лист «{sheet_name}»" if sheet_name else ""
+            period_ctx = f"период: «{detected_period}»" if detected_period else ""
+            ctx_parts = ", ".join(p for p in [file_ctx, sheet_ctx, period_ctx] if p)
 
-        if period_parts:
-            period_context = (
-                f"\nКонтекст периода — {', '.join(period_parts)}.\n"
-                "ПРАВИЛА ДЛЯ ДАТ (строго соблюдай):\n"
-                "- Если в данных дата содержит ГОД, МЕСЯЦ и ДЕНЬ (любой формат: '2025-08-01', '01.08.25', '01.08.2025') — "
-                "переведи её в YYYY-MM-DD ТОЧНО КАК ЕСТЬ, НЕ меняй год и месяц.\n"
-                "- Если дата содержит только ДЕНЬ и МЕСЯЦ ('01.08', '15.12') — добавь год из контекста.\n"
-                "- Если дата содержит только ДЕНЬ ('1', '15', '31') — добавь месяц и год из контекста.\n"
-                "- Месяц берётся из самой даты если он там есть явно. Контекст используй ТОЛЬКО для добавления пропущенного года/месяца."
+            date_instruction = (
+                f"\nНАЗВАНИЕ ФАЙЛА/ЛИСТА: {ctx_parts}\n"
+                "КРИТИЧЕСКИ ВАЖНО ПО ДАТАМ:\n"
+                "Значения в колонке дат ЧАСТО содержат неправильный месяц/год — это дефолтное значение "
+                "из Google Sheets или Excel, НЕ реальные даты.\n"
+                "Реальный период определяй по названию файла и листа:\n"
             )
+            if detected_period:
+                _, month_num, year = _parse_period(detected_period)
+                month_name = detected_period.split()[0] if detected_period else ""
+                year_str = str(year) if year else "текущий"
+                date_instruction += (
+                    f"- Данные относятся к периоду: {detected_period}\n"
+                    f"- Из ячейки даты бери ТОЛЬКО НОМЕР ДНЯ (1–31)\n"
+                    f"- Итоговая дата: {year_str}-{'0'+str(month_num) if month_num and month_num < 10 else month_num or 'MM'}-DD\n"
+                    f"- Например: если в ячейке '15' или '15.12.2024' или '2024-12-15' → итог '{ year_str }-{'0'+str(month_num) if month_num and month_num < 10 else str(month_num) if month_num else 'MM'}-15'\n"
+                )
+            else:
+                date_instruction += (
+                    "- Определи реальный месяц и год из названия файла/листа\n"
+                    "- Из ячейки бери только номер дня\n"
+                    "- Если год нигде не указан — используй 2025\n"
+                )
         else:
-            period_context = ""
+            date_instruction = ""
 
         return (
             "Ты помощник по импорту данных для FlowOF — системы аналитики OF-агентств.\n\n"
             "Вот CSV таблица агентства:\n```\n"
             f"{csv_content}\n```\n\n"
             f"{sheet_context}\n"
-            f"{period_context}\n"
+            f"{date_instruction}\n"
             "Наша стандартная схема транзакций:\n"
             f"{json.dumps(self.SCHEMA, ensure_ascii=False, indent=2)}\n\n"
             "Задача:\n"
@@ -213,9 +287,9 @@ class AIImporter:
             "2. Преобразуй КАЖДУЮ строку данных в наш формат.\n"
             '3. Очисти суммы: убери $, руб, €, пробелы, запятые → оставь только число '
             '(например "1 500,50 $" → 1500.50).\n'
-            "4. Нормализуй даты → YYYY-MM-DD строго по правилам выше.\n"
+            "4. Нормализуй даты → YYYY-MM-DD используя правила выше.\n"
             "5. Строки-итоги/заголовки/пустые — пропусти.\n"
-            "6. Верни ТОЛЬКО валидный JSON. Формат:\n"
+            "6. Верни ТОЛЬКО валидный JSON:\n"
             '{"rows": [\n'
             '  {"date": "2025-08-01", "model": "Anna", "chatter": "Max", "amount": 150.0, "shift_id": "1"},\n'
             "  ...\n"
@@ -238,7 +312,6 @@ class AIImporter:
                 v = parsed.get(key)
                 if isinstance(v, list):
                     return [r for r in v if isinstance(r, dict)]
-            # fallback — первый list-like
             for v in parsed.values():
                 if isinstance(v, list):
                     return [r for r in v if isinstance(r, dict)]

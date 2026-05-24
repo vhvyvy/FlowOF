@@ -74,6 +74,7 @@ type FileAIPreviewResponse = {
   columns_detected: string[]
   mapping_used: Record<string, string>
   warnings: string[]
+  detected_period?: string
 }
 
 type FileDetectResponse = {
@@ -173,6 +174,7 @@ function ExcelAIConnect({
       skip_import: false,
       file_name: fileName,
       selected_sheet: selectedSheet,
+      detected_period: aiData.detected_period ?? '',
     })
   }
 

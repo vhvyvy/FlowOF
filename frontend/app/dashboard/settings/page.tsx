@@ -846,7 +846,7 @@ function TeamsSection({ notionImport }: { notionImport: NotionImportMutation }) 
 
 type FileDetectResp = { upload_id: string; filename: string; sheets: string[] }
 type FilePreviewRow = { date?: string | null; model?: string | null; chatter?: string | null; amount?: number | string | null; shift_id?: string | null }
-type FilePreviewResp = { rows: FilePreviewRow[]; preview: FilePreviewRow[]; total_rows: number; warnings: string[] }
+type FilePreviewResp = { rows: FilePreviewRow[]; preview: FilePreviewRow[]; total_rows: number; warnings: string[]; detected_period?: string }
 type FileConfirmResp = { rows_imported: number; rows_skipped: number }
 
 type FileStage = 'idle' | 'detecting' | 'sheets' | 'analyzing' | 'preview' | 'done'
@@ -864,12 +864,16 @@ function FileImportSection() {
   const [err, setErr] = useState<string | null>(null)
   const [importResult, setImportResult] = useState<{ count: number; date: string } | null>(null)
   const [importing, setImporting] = useState(false)
+  const [detectedPeriod, setDetectedPeriod] = useState('')
+  const [overrideMonth, setOverrideMonth] = useState<number | ''>('')
+  const [overrideYear, setOverrideYear] = useState<number | ''>('')
   const inputRef = useRef<HTMLInputElement>(null)
   const token = typeof window !== 'undefined' ? localStorage.getItem('token') : null
 
   const reset = () => {
     setStage('idle'); setErr(null); setFileName(''); setUploadId('')
     setSheets([]); setSelectedSheet(''); setPreviewData(null); setAiRows([])
+    setDetectedPeriod(''); setOverrideMonth(''); setOverrideYear('')
   }
 
   const detectSheets = async (file: File) => {
@@ -913,6 +917,7 @@ function FileImportSection() {
       if (!res.ok) throw new Error(body.detail ?? 'Ошибка AI-анализа')
       setPreviewData(body)
       setAiRows(body.rows)
+      if (body.detected_period) setDetectedPeriod(body.detected_period)
       setStage('preview')
     } catch (e: unknown) {
       setErr(e instanceof Error ? e.message : 'Ошибка'); setStage('idle')
@@ -923,7 +928,12 @@ function FileImportSection() {
     if (!aiRows.length) return
     setImporting(true); setErr(null)
     try {
-      const res = await api.post<FileConfirmResp>('/api/v1/import/file/confirm', { rows: aiRows, filename: fileName, sheet_name: selectedSheet })
+      const payload: Record<string, unknown> = { rows: aiRows, filename: fileName, sheet_name: selectedSheet }
+      if (overrideMonth && overrideYear) {
+        payload.override_month = Number(overrideMonth)
+        payload.override_year = Number(overrideYear)
+      }
+      const res = await api.post<FileConfirmResp>('/api/v1/import/file/confirm', payload)
       setImportResult({ count: res.data.rows_imported, date: new Date().toLocaleString('ru', { day: '2-digit', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit' }) })
       setStage('done')
       qc.invalidateQueries({ queryKey: ['overview'] })
@@ -1044,6 +1054,41 @@ function FileImportSection() {
             <FileSpreadsheet className="h-3.5 w-3.5 shrink-0" />
             {fileName}{selectedSheet ? ` · ${selectedSheet}` : ''}
             <span className="ml-auto text-slate-400 font-medium">{previewData.total_rows} транзакций</span>
+          </div>
+
+          {/* Период — detected + override */}
+          <div className="rounded-lg border border-slate-700/40 bg-slate-800/40 px-3 py-2.5 space-y-2">
+            <div className="flex items-center gap-2">
+              <span className="text-xs text-slate-400">Период данных:</span>
+              {detectedPeriod
+                ? <span className="text-xs font-medium text-indigo-300 bg-indigo-900/30 px-2 py-0.5 rounded">{detectedPeriod}</span>
+                : <span className="text-xs text-slate-500 italic">не определён — укажите вручную</span>}
+            </div>
+            <div className="flex items-center gap-2">
+              <span className="text-xs text-slate-500">Переопределить:</span>
+              <select
+                value={overrideMonth}
+                onChange={e => setOverrideMonth(e.target.value ? Number(e.target.value) : '')}
+                className="text-xs bg-slate-700 border border-slate-600 text-slate-200 rounded px-2 py-1 focus:outline-none"
+              >
+                <option value="">Месяц</option>
+                {['Январь','Февраль','Март','Апрель','Май','Июнь','Июль','Август','Сентябрь','Октябрь','Ноябрь','Декабрь'].map((m,i) => (
+                  <option key={i+1} value={i+1}>{m}</option>
+                ))}
+              </select>
+              <select
+                value={overrideYear}
+                onChange={e => setOverrideYear(e.target.value ? Number(e.target.value) : '')}
+                className="text-xs bg-slate-700 border border-slate-600 text-slate-200 rounded px-2 py-1 focus:outline-none"
+              >
+                <option value="">Год</option>
+                {[2023,2024,2025,2026,2027].map(y => <option key={y} value={y}>{y}</option>)}
+              </select>
+              {(overrideMonth || overrideYear) && (
+                <button type="button" onClick={() => { setOverrideMonth(''); setOverrideYear('') }}
+                  className="text-xs text-slate-500 hover:text-slate-300">✕ сброс</button>
+              )}
+            </div>
           </div>
 
           {/* Предупреждения */}

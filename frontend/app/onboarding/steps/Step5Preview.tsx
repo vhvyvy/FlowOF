@@ -50,6 +50,10 @@ export default function Step5Preview({
   const fileAiPreview = (data.preview as Record<string, unknown>[] | undefined) ?? fileAiRows.slice(0, 10)
   const fileAiFileName = (data.file_name as string | undefined) ?? ''
   const fileAiSheetName = (data.selected_sheet as string | undefined) ?? ''
+  const fileAiDetectedPeriod = (data.detected_period as string | undefined) ?? ''
+
+  const [fileAiOverrideMonth, setFileAiOverrideMonth] = useState<number | ''>('')
+  const [fileAiOverrideYear, setFileAiOverrideYear] = useState<number | ''>('')
 
   const [busy, setBusy] = useState(false)
   const [impErr, setImpErr] = useState<string | null>(null)
@@ -156,7 +160,14 @@ export default function Step5Preview({
     try {
       const res = await api.post<{ rows_imported?: number; rows_skipped?: number }>(
         '/api/v1/import/file/confirm',
-        { rows: fileAiRows, filename: fileAiFileName, sheet_name: fileAiSheetName }
+        {
+          rows: fileAiRows,
+          filename: fileAiFileName,
+          sheet_name: fileAiSheetName,
+          ...(fileAiOverrideMonth && fileAiOverrideYear
+            ? { override_month: Number(fileAiOverrideMonth), override_year: Number(fileAiOverrideYear) }
+            : {}),
+        }
       )
       setImportStats({
         imported: res.data.rows_imported ?? 0,
@@ -328,6 +339,41 @@ export default function Step5Preview({
           <p className="text-slate-400 text-sm mb-2">
             AI нашёл <span className="text-slate-100 font-medium">{fileAiTotal}</span> транзакций. Проверьте первые строки.
           </p>
+
+          {/* Период */}
+          <div className="rounded-lg border border-slate-700/40 bg-slate-800/40 px-3 py-2.5 mb-3 space-y-2">
+            <div className="flex items-center gap-2">
+              <span className="text-xs text-slate-400">Период данных:</span>
+              {fileAiDetectedPeriod
+                ? <span className="text-xs font-medium text-indigo-300 bg-indigo-900/30 px-2 py-0.5 rounded">{fileAiDetectedPeriod}</span>
+                : <span className="text-xs text-slate-500 italic">не определён — укажите вручную</span>}
+            </div>
+            <div className="flex items-center gap-2 flex-wrap">
+              <span className="text-xs text-slate-500">Переопределить:</span>
+              <select
+                value={fileAiOverrideMonth}
+                onChange={e => setFileAiOverrideMonth(e.target.value ? Number(e.target.value) : '')}
+                className="text-xs bg-slate-700 border border-slate-600 text-slate-200 rounded px-2 py-1 focus:outline-none"
+              >
+                <option value="">Месяц</option>
+                {['Январь','Февраль','Март','Апрель','Май','Июнь','Июль','Август','Сентябрь','Октябрь','Ноябрь','Декабрь'].map((m,i) => (
+                  <option key={i+1} value={i+1}>{m}</option>
+                ))}
+              </select>
+              <select
+                value={fileAiOverrideYear}
+                onChange={e => setFileAiOverrideYear(e.target.value ? Number(e.target.value) : '')}
+                className="text-xs bg-slate-700 border border-slate-600 text-slate-200 rounded px-2 py-1 focus:outline-none"
+              >
+                <option value="">Год</option>
+                {[2023,2024,2025,2026,2027].map(y => <option key={y} value={y}>{y}</option>)}
+              </select>
+              {(fileAiOverrideMonth || fileAiOverrideYear) && (
+                <button type="button" onClick={() => { setFileAiOverrideMonth(''); setFileAiOverrideYear('') }}
+                  className="text-xs text-slate-500 hover:text-slate-300">✕ сброс</button>
+              )}
+            </div>
+          </div>
 
           {fileAiWarnings.length > 0 && (
             <div className="rounded-lg border border-amber-500/30 bg-amber-500/10 p-3 mb-3 space-y-1">

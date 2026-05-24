@@ -563,6 +563,7 @@ class FilePreviewResponse(BaseModel):
     columns_detected: list[str]
     mapping_used: dict
     warnings: list[str]
+    detected_period: str = ""
 
 
 class FileDetectSheetsResponse(BaseModel):
@@ -575,6 +576,8 @@ class FileConfirmRequest(BaseModel):
     rows: list[dict[str, Any]] = Field(..., description="Строки из /file/preview — повторный GPT не нужен")
     filename: str = Field("", description="Имя файла — для изоляции при повторном импорте")
     sheet_name: str = Field("", description="Имя листа — для изоляции при повторном импорте")
+    override_month: int | None = Field(None, description="Принудительный месяц (1-12) — замещает AI-даты")
+    override_year: int | None = Field(None, description="Принудительный год — замещает AI-даты")
 
 
 class FileConfirmResponse(BaseModel):
@@ -820,7 +823,7 @@ async def preview_file_import(
         raise HTTPException(status_code=400, detail="Сессия загрузки истекла. Загрузите файл снова.")
 
     raw = path.read_bytes()
-    filename = path.name  # содержит суффикс
+    filename = path.name
     chosen_sheet = sheet_name.strip() if sheet_name else None
 
     try:
@@ -829,16 +832,14 @@ async def preview_file_import(
         logger.warning("file/preview parse failed: %s", e)
         raise HTTPException(status_code=400, detail=f"Не удалось прочитать файл: {e}") from e
 
-    # Если указан лист — прикрепляем его как мета-строку перед CSV,
-    # чтобы GPT мог использовать имя листа как подсказку для поля «model»
-    # (актуально, когда весь лист посвящён одной модели и колонки «model» нет).
-    if chosen_sheet:
-        csv_content = f"# sheet: {chosen_sheet}\n{csv_content}"
-
     openai_key = _resolve_openai_key(tenant)
     importer = AIImporter(openai_key=openai_key)
     try:
-        result = await importer.process(csv_content)
+        result = await importer.process(
+            csv_content,
+            filename=filename,
+            sheet_name=chosen_sheet or "",
+        )
     except Exception as e:
         logger.exception("AI importer failed tenant=%s", tenant.id)
         raise HTTPException(status_code=500, detail=f"AI-обработка не удалась: {e}") from e
@@ -860,6 +861,7 @@ async def preview_file_import(
         columns_detected=result["original_columns"],
         mapping_used=result["mapping"],
         warnings=result["warnings"],
+        detected_period=result.get("detected_period", ""),
     )
 
 
@@ -874,6 +876,32 @@ def _file_dedupe_prefix(filename: str, sheet_name: str) -> str:
     return f"file_ai:{digest}:"
 
 
+def _reapply_period(rows: list[dict], month: int, year: int) -> list[dict]:
+    """
+    Заменяет месяц и год в датах всех строк.
+    Используется когда пользователь указал override_month/override_year.
+    День берётся из оригинальной даты, месяц и год заменяются.
+    """
+    import calendar
+    result = []
+    for row in rows:
+        row = dict(row)
+        d = row.get("date")
+        if d:
+            try:
+                parsed = _coerce_date(d)
+                if parsed:
+                    # Не выходим за пределы месяца (28/30/31)
+                    max_day = calendar.monthrange(year, month)[1]
+                    day = min(parsed.day, max_day)
+                    from datetime import date as _date
+                    row["date"] = _date(year, month, day).isoformat()
+            except Exception:
+                pass
+        result.append(row)
+    return result
+
+
 @router.post("/file/confirm", response_model=FileConfirmResponse)
 async def confirm_file_import(
     body: FileConfirmRequest,
@@ -884,6 +912,10 @@ async def confirm_file_import(
     rows = [r for r in body.rows if isinstance(r, dict)]
     if not rows:
         raise HTTPException(status_code=422, detail="Нечего импортировать")
+
+    # Применяем override периода если пользователь его скорректировал
+    if body.override_month and body.override_year:
+        rows = _reapply_period(rows, body.override_month, body.override_year)
 
     batch_id = new_batch_id()
     # Стабильный префикс по (filename, sheet_name) — изолирует разные листы
