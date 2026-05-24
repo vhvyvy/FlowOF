@@ -572,6 +572,8 @@ class FileDetectSheetsResponse(BaseModel):
 
 class FileConfirmRequest(BaseModel):
     rows: list[dict[str, Any]] = Field(..., description="Строки из /file/preview — повторный GPT не нужен")
+    filename: str = Field("", description="Имя файла — для изоляции при повторном импорте")
+    sheet_name: str = Field("", description="Имя листа — для изоляции при повторном импорте")
 
 
 class FileConfirmResponse(BaseModel):
@@ -717,6 +719,17 @@ async def preview_file_import(
     )
 
 
+def _file_dedupe_prefix(filename: str, sheet_name: str) -> str:
+    """
+    Стабильный sha1-префикс для строк конкретного (файл, лист).
+    Позволяет переимпортировать один лист, не трогая другие листы того же файла.
+    Аналог _gsheet_dedupe_prefix для xlsx/csv-импорта.
+    """
+    raw = f"{filename.strip()}|{sheet_name.strip()}".encode("utf-8")
+    digest = hashlib.sha1(raw).hexdigest()[:12]
+    return f"file_ai:{digest}:"
+
+
 @router.post("/file/confirm", response_model=FileConfirmResponse)
 async def confirm_file_import(
     body: FileConfirmRequest,
@@ -729,15 +742,26 @@ async def confirm_file_import(
         raise HTTPException(status_code=422, detail="Нечего импортировать")
 
     batch_id = new_batch_id()
+    # Стабильный префикс по (filename, sheet_name) — изолирует разные листы
+    prefix = _file_dedupe_prefix(body.filename, body.sheet_name)
     imported = 0
     skipped = 0
 
     try:
-        # Чистим предыдущие AI-файловые импорты этого тенанта
+        # Удаляем строки ТОЛЬКО этого листа/файла (новый формат с sha1)
+        await db.execute(
+            delete(Transaction).where(
+                Transaction.tenant_id == tenant.id,
+                Transaction.notion_id.like(f"{prefix}%"),
+            )
+        )
+        # Совместимость: чистим старые строки формата file_ai:{uuid}:{idx} (без sha1-prefix)
+        # Они не имеют sha1, поэтому не совпадают с паттерном "file_ai:____________:%"
         await db.execute(
             delete(Transaction).where(
                 Transaction.tenant_id == tenant.id,
                 Transaction.notion_id.like("file_ai:%"),
+                ~Transaction.notion_id.like("file_ai:____________:%"),
             )
         )
 
@@ -758,7 +782,7 @@ async def confirm_file_import(
                         chatter=(str(row.get("chatter")).strip() if row.get("chatter") else None),
                         amount=amount,
                         shift_id=shift_str,
-                        notion_id=f"file_ai:{batch_id}:{idx}",
+                        notion_id=f"{prefix}{batch_id}:{idx}",
                     )
                 )
                 imported += 1

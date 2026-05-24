@@ -923,7 +923,7 @@ function FileImportSection() {
     if (!aiRows.length) return
     setImporting(true); setErr(null)
     try {
-      const res = await api.post<FileConfirmResp>('/api/v1/import/file/confirm', { rows: aiRows })
+      const res = await api.post<FileConfirmResp>('/api/v1/import/file/confirm', { rows: aiRows, filename: fileName, sheet_name: selectedSheet })
       setImportResult({ count: res.data.rows_imported, date: new Date().toLocaleString('ru', { day: '2-digit', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit' }) })
       setStage('done')
       qc.invalidateQueries({ queryKey: ['overview'] })

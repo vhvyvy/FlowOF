@@ -171,6 +171,8 @@ function ExcelAIConnect({
       columns_detected: aiData.columns_detected,
       warnings: aiData.warnings,
       skip_import: false,
+      file_name: fileName,
+      selected_sheet: selectedSheet,
     })
   }
 

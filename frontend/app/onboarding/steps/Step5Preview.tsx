@@ -48,6 +48,8 @@ export default function Step5Preview({
   const fileAiWarnings = (data.warnings as string[] | undefined) ?? []
   const fileAiTotal = typeof data.total_rows === 'number' ? data.total_rows : fileAiRows.length
   const fileAiPreview = (data.preview as Record<string, unknown>[] | undefined) ?? fileAiRows.slice(0, 10)
+  const fileAiFileName = (data.file_name as string | undefined) ?? ''
+  const fileAiSheetName = (data.selected_sheet as string | undefined) ?? ''
 
   const [busy, setBusy] = useState(false)
   const [impErr, setImpErr] = useState<string | null>(null)
@@ -154,7 +156,7 @@ export default function Step5Preview({
     try {
       const res = await api.post<{ rows_imported?: number; rows_skipped?: number }>(
         '/api/v1/import/file/confirm',
-        { rows: fileAiRows }
+        { rows: fileAiRows, filename: fileAiFileName, sheet_name: fileAiSheetName }
       )
       setImportStats({
         imported: res.data.rows_imported ?? 0,
