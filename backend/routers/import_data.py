@@ -651,7 +651,62 @@ def _extract_period_hint(raw: bytes, filename: str, sheet_kw: dict) -> str:
     return ""
 
 
-def _df_to_csv(raw: bytes, filename: str, sheet_name: str | None = None) -> str:
+_DATE_COL_KEYWORDS = {"дата", "date", "день", "day", "data", "дата транзакции", "transaction date"}
+
+
+def _parse_period_month_year(period_hint: str) -> tuple[int | None, int | None]:
+    """Извлекает (month, year) из period_hint типа 'август 2025' или 'август'."""
+    _RU_MONTH_MAP = {
+        "январ": 1, "феврал": 2, "март": 3, "апрел": 4, "май": 5, "июн": 6,
+        "июл": 7, "август": 8, "сентябр": 9, "октябр": 10, "ноябр": 11, "декабр": 12,
+    }
+    _EN_MONTH_MAP = {
+        "jan": 1, "feb": 2, "mar": 3, "apr": 4, "may": 5, "jun": 6,
+        "jul": 7, "aug": 8, "sep": 9, "oct": 10, "nov": 11, "dec": 12,
+    }
+    lo = period_hint.lower()
+    month: int | None = None
+    for prefix, num in {**_RU_MONTH_MAP, **_EN_MONTH_MAP}.items():
+        if prefix in lo:
+            month = num
+            break
+    year_str = _find_year_in_text(period_hint)
+    year = int(year_str) if year_str else None
+    return month, year
+
+
+def _normalize_date_column(df: "pd.DataFrame", period_hint: str) -> "pd.DataFrame":
+    """
+    Принудительно парсит дату в date-колонке через pandas с dayfirst=True,
+    выводит чистый ISO YYYY-MM-DD. Если в дате нет года/месяца — добирает из period_hint.
+    """
+    period_month, period_year = _parse_period_month_year(period_hint) if period_hint else (None, None)
+
+    for col in list(df.columns):
+        col_lo = str(col).lower().strip()
+        if not any(kw in col_lo for kw in _DATE_COL_KEYWORDS):
+            continue
+        series = df[col].copy()
+        # Парсим строки / числа / datetime с dayfirst=True
+        parsed = pd.to_datetime(series, dayfirst=True, errors="coerce", utc=False)
+        valid_ratio = parsed.notna().sum() / max(len(series), 1)
+
+        if valid_ratio >= 0.4:
+            # Для строк где распознали только день (целые 1..31) — добавляем месяц/год из period_hint
+            if period_month and period_year:
+                for idx in df.index:
+                    if pd.isna(parsed[idx]):
+                        raw_val = str(series[idx]).strip()
+                        try:
+                            day = int(float(raw_val))
+                            if 1 <= day <= 31:
+                                parsed[idx] = pd.Timestamp(year=period_year, month=period_month, day=day)
+                        except Exception:
+                            pass
+
+            # Записываем чистый ISO YYYY-MM-DD в колонку
+            df[col] = parsed.dt.strftime("%Y-%m-%d").where(parsed.notna(), series)
+    return df
     """Читает xlsx/xls/csv и возвращает строку CSV для AIImporter."""
     import io as _io
 
@@ -702,6 +757,8 @@ def _df_to_csv(raw: bytes, filename: str, sheet_name: str | None = None) -> str:
             raise ValueError("Не удалось прочитать CSV ни в одной кодировке")
 
     df = df.dropna(how="all").dropna(axis=1, how="all")
+    # Принудительно парсим дату-колонку и приводим к ISO формату (dayfirst=True для DD.MM.YY)
+    df = _normalize_date_column(df, period_hint)
     csv_out = df.to_csv(index=False)
 
     # Мета-комментарии для AI: имя файла (всегда) + период если найден
