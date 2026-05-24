@@ -28,6 +28,7 @@ from services.file_import import (
     suggest_mapping,
 )
 from services.google_sheets_service import GoogleAuthError, GoogleSheetsService
+from services.catalog_resolver import resolve_model_id, resolve_chatter_id, resolve_shift_catalog_id
 from services.google_unify import (
     get_google_access_token,
     save_selected_spreadsheet,
@@ -476,14 +477,25 @@ async def confirm_google_sheets_import(
                 tx_date = _coerce_date(row.get("date"))
                 shift_val = row.get("shift_id")
                 shift_str = str(shift_val).strip() if shift_val not in (None, "") else None
+                model_name = str(row.get("model")).strip() if row.get("model") else None
+                chatter_name = str(row.get("chatter")).strip() if row.get("chatter") else None
+                shift_display = str(row.get("shift_name") or shift_str or "").strip() or None
+                # Резолвим имена в справочниках (создаём если нет)
+                model_id = await resolve_model_id(model_name, tenant.id, db)
+                chatter_id = await resolve_chatter_id(chatter_name, tenant.id, db)
+                shift_catalog_id = await resolve_shift_catalog_id(shift_display, tenant.id, db)
                 db.add(
                     Transaction(
                         tenant_id=tenant.id,
                         date=tx_date,
-                        model=(str(row.get("model")).strip() if row.get("model") else None),
-                        chatter=(str(row.get("chatter")).strip() if row.get("chatter") else None),
+                        model=model_name,
+                        chatter=chatter_name,
                         amount=amount,
                         shift_id=shift_str,
+                        model_id=model_id,
+                        chatter_id=chatter_id,
+                        shift_catalog_id=shift_catalog_id,
+                        source="google_sheets",
                         notion_id=f"{notion_id_prefix}{batch_id}:{idx}",
                     )
                 )
@@ -952,14 +964,25 @@ async def confirm_file_import(
                 tx_date = _coerce_date(row.get("date"))
                 shift_val = row.get("shift_id")
                 shift_str = str(shift_val).strip() if shift_val not in (None, "") else None
+                model_name = str(row.get("model")).strip() if row.get("model") else None
+                chatter_name = str(row.get("chatter")).strip() if row.get("chatter") else None
+                shift_display = str(row.get("shift_name") or shift_str or "").strip() or None
+                # Резолвим имена в справочниках (создаём если нет)
+                model_id = await resolve_model_id(model_name, tenant.id, db)
+                chatter_id = await resolve_chatter_id(chatter_name, tenant.id, db)
+                shift_catalog_id = await resolve_shift_catalog_id(shift_display, tenant.id, db)
                 db.add(
                     Transaction(
                         tenant_id=tenant.id,
                         date=tx_date,
-                        model=(str(row.get("model")).strip() if row.get("model") else None),
-                        chatter=(str(row.get("chatter")).strip() if row.get("chatter") else None),
+                        model=model_name,
+                        chatter=chatter_name,
                         amount=amount,
                         shift_id=shift_str,
+                        model_id=model_id,
+                        chatter_id=chatter_id,
+                        shift_catalog_id=shift_catalog_id,
+                        source="import",
                         notion_id=f"{prefix}{batch_id}:{idx}",
                     )
                 )

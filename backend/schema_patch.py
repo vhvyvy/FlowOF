@@ -125,6 +125,85 @@ _PATCHES: list[tuple[str, bool]] = [
     ("ALTER TABLE expenses ADD COLUMN IF NOT EXISTS model_id INTEGER REFERENCES models(id)", False),
     ("ALTER TABLE expenses ADD COLUMN IF NOT EXISTS description TEXT", False),
     ("ALTER TABLE expenses ADD COLUMN IF NOT EXISTS source TEXT", False),
+    # Бэкфилл: заполнить model_id/chatter_id/shift_catalog_id для ранее импортированных строк.
+    # Шаг 1 — создать записи в справочниках для имён, которых там ещё нет
+    (
+        """INSERT INTO models (tenant_id, name, active)
+           SELECT DISTINCT t.tenant_id, t.model, true
+           FROM transactions t
+           WHERE t.model IS NOT NULL AND t.model <> '' AND t.model_id IS NULL
+             AND NOT EXISTS (
+                 SELECT 1 FROM models m WHERE m.tenant_id = t.tenant_id AND m.name = t.model
+             )""",
+        False,
+    ),
+    (
+        """INSERT INTO chatters (tenant_id, name, active)
+           SELECT DISTINCT t.tenant_id, t.chatter, true
+           FROM transactions t
+           WHERE t.chatter IS NOT NULL AND t.chatter <> '' AND t.chatter_id IS NULL
+             AND NOT EXISTS (
+                 SELECT 1 FROM chatters c WHERE c.tenant_id = t.tenant_id AND c.name = t.chatter
+             )""",
+        False,
+    ),
+    (
+        """INSERT INTO shifts_catalog (tenant_id, name, active)
+           SELECT DISTINCT t.tenant_id, t.shift_name, true
+           FROM transactions t
+           WHERE t.shift_name IS NOT NULL AND t.shift_name <> ''
+             AND t.shift_catalog_id IS NULL
+             AND t.shift_name NOT SIMILAR TO
+                 '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}'
+             AND NOT EXISTS (
+                 SELECT 1 FROM shifts_catalog sc
+                 WHERE sc.tenant_id = t.tenant_id AND sc.name = t.shift_name
+             )""",
+        False,
+    ),
+    # Шаг 2 — проставить FK по совпадению имени
+    (
+        """UPDATE transactions t
+           SET model_id = m.id
+           FROM models m
+           WHERE t.tenant_id = m.tenant_id
+             AND t.model = m.name
+             AND t.model_id IS NULL
+             AND t.model IS NOT NULL AND t.model <> ''""",
+        False,
+    ),
+    (
+        """UPDATE transactions t
+           SET chatter_id = c.id
+           FROM chatters c
+           WHERE t.tenant_id = c.tenant_id
+             AND t.chatter = c.name
+             AND t.chatter_id IS NULL
+             AND t.chatter IS NOT NULL AND t.chatter <> ''""",
+        False,
+    ),
+    (
+        """UPDATE transactions t
+           SET shift_catalog_id = sc.id
+           FROM shifts_catalog sc
+           WHERE t.tenant_id = sc.tenant_id
+             AND t.shift_name = sc.name
+             AND t.shift_catalog_id IS NULL
+             AND t.shift_name IS NOT NULL AND t.shift_name <> ''""",
+        False,
+    ),
+    # Проставить source для ранее импортированных строк (NULL → определяем по notion_id)
+    (
+        """UPDATE transactions
+           SET source = CASE
+               WHEN notion_id LIKE 'gsheet:%'   THEN 'google_sheets'
+               WHEN notion_id LIKE 'file_ai:%'  THEN 'import'
+               WHEN notion_id LIKE 'excel:%'    THEN 'import'
+               ELSE 'import'
+           END
+           WHERE source IS NULL AND notion_id IS NOT NULL""",
+        False,
+    ),
 ]
 
 
