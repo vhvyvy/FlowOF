@@ -867,11 +867,14 @@ async def preview_file_import(
 
 def _file_dedupe_prefix(filename: str, sheet_name: str) -> str:
     """
-    Стабильный sha1-префикс для строк конкретного (файл, лист).
-    Позволяет переимпортировать один лист, не трогая другие листы того же файла.
-    Аналог _gsheet_dedupe_prefix для xlsx/csv-импорта.
+    Стабильный sha1-префикс для строк конкретного листа.
+    Дедупликация только по имени листа (не по имени файла) — это гарантирует
+    что повторный импорт листа 'SalesEvelyne' из любого файла заменит старые
+    данные этого листа, а не добавит рядом.
+    Если лист не задан — fallback на имя файла.
     """
-    raw = f"{filename.strip()}|{sheet_name.strip()}".encode("utf-8")
+    key = sheet_name.strip() if sheet_name.strip() else filename.strip()
+    raw = key.encode("utf-8")
     digest = hashlib.sha1(raw).hexdigest()[:12]
     return f"file_ai:{digest}:"
 
@@ -918,13 +921,13 @@ async def confirm_file_import(
         rows = _reapply_period(rows, body.override_month, body.override_year)
 
     batch_id = new_batch_id()
-    # Стабильный префикс по (filename, sheet_name) — изолирует разные листы
+    # Стабильный префикс по sheet_name — любой файл с тем же листом заменяет старые данные
     prefix = _file_dedupe_prefix(body.filename, body.sheet_name)
     imported = 0
     skipped = 0
 
     try:
-        # Удаляем строки ТОЛЬКО этого листа/файла (новый формат с sha1)
+        # Удаляем строки этого листа (текущий формат sha1 по sheet_name)
         await db.execute(
             delete(Transaction).where(
                 Transaction.tenant_id == tenant.id,
@@ -932,7 +935,6 @@ async def confirm_file_import(
             )
         )
         # Совместимость: чистим старые строки формата file_ai:{uuid}:{idx} (без sha1-prefix)
-        # Они не имеют sha1, поэтому не совпадают с паттерном "file_ai:____________:%"
         await db.execute(
             delete(Transaction).where(
                 Transaction.tenant_id == tenant.id,
@@ -977,3 +979,33 @@ async def confirm_file_import(
         raise HTTPException(status_code=500, detail="Ошибка записи в базу") from e
 
     return FileConfirmResponse(rows_imported=imported, rows_skipped=skipped)
+
+
+class ClearFileImportsRequest(BaseModel):
+    sheet_name: str | None = None  # если передан — чистим только этот лист
+
+
+@router.delete("/file/clear")
+async def clear_file_imports(
+    body: ClearFileImportsRequest,
+    tenant: Tenant = Depends(get_current_tenant),
+    db: AsyncSession = Depends(get_db),
+):
+    """Удалить все file_ai транзакции (или только конкретного листа) текущего тенанта."""
+    if body.sheet_name:
+        prefix = _file_dedupe_prefix("", body.sheet_name)
+        await db.execute(
+            delete(Transaction).where(
+                Transaction.tenant_id == tenant.id,
+                Transaction.notion_id.like(f"{prefix}%"),
+            )
+        )
+    else:
+        await db.execute(
+            delete(Transaction).where(
+                Transaction.tenant_id == tenant.id,
+                Transaction.notion_id.like("file_ai:%"),
+            )
+        )
+    await db.commit()
+    return {"ok": True}

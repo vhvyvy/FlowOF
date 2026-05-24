@@ -869,6 +869,7 @@ function FileImportSection() {
   const [detectedPeriod, setDetectedPeriod] = useState('')
   const [overrideMonth, setOverrideMonth] = useState<number | ''>('')
   const [overrideYear, setOverrideYear] = useState<number | ''>('')
+  const [clearing, setClearing] = useState(false)
   const inputRef = useRef<HTMLInputElement>(null)
   const token = typeof window !== 'undefined' ? localStorage.getItem('token') : null
 
@@ -1000,6 +1001,25 @@ function FileImportSection() {
     }
   }
 
+  const handleClearAll = async () => {
+    if (!confirm('Удалить ВСЕ транзакции из файлов? Это нельзя отменить.')) return
+    setClearing(true); setErr(null)
+    try {
+      await api.delete('/api/v1/import/file/clear', { data: {} })
+      setImportResult(null)
+      qc.invalidateQueries({ queryKey: ['overview'] })
+      qc.invalidateQueries({ queryKey: ['finance'] })
+      qc.invalidateQueries({ queryKey: ['chatters'] })
+      qc.invalidateQueries({ queryKey: ['months-summary'] })
+      alert('Данные очищены')
+    } catch (e: unknown) {
+      const ax = e as { response?: { data?: { detail?: string } }; message?: string }
+      setErr(ax.response?.data?.detail ?? ax.message ?? 'Ошибка')
+    } finally {
+      setClearing(false)
+    }
+  }
+
   const onDrop = (e: React.DragEvent<HTMLDivElement>) => {
     e.preventDefault(); setDragging(false)
     const file = e.dataTransfer.files?.[0]
@@ -1014,7 +1034,17 @@ function FileImportSection() {
 
   return (
     <div className="bg-slate-800/60 border border-slate-700/50 rounded-xl px-5 py-5 space-y-4">
-      <p className="text-xs font-semibold text-slate-400 uppercase tracking-widest">Загрузить файл</p>
+      <div className="flex items-center justify-between">
+        <p className="text-xs font-semibold text-slate-400 uppercase tracking-widest">Загрузить файл</p>
+        <button
+          type="button"
+          onClick={handleClearAll}
+          disabled={clearing}
+          className="text-[11px] text-red-400/70 hover:text-red-300 disabled:opacity-50 transition-colors"
+        >
+          {clearing ? 'Очищаю…' : 'Сбросить все данные файлов'}
+        </button>
+      </div>
 
       {/* Результат прошлого импорта */}
       {importResult && stage === 'done' && (
