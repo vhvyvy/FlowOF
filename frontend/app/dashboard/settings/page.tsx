@@ -859,11 +859,13 @@ function FileImportSection() {
   const [uploadId, setUploadId] = useState('')
   const [sheets, setSheets] = useState<string[]>([])
   const [selectedSheet, setSelectedSheet] = useState('')
+  const [selectedSheets, setSelectedSheets] = useState<Set<string>>(new Set())
   const [previewData, setPreviewData] = useState<FilePreviewResp | null>(null)
   const [aiRows, setAiRows] = useState<FilePreviewRow[]>([])
   const [err, setErr] = useState<string | null>(null)
   const [importResult, setImportResult] = useState<{ count: number; date: string } | null>(null)
   const [importing, setImporting] = useState(false)
+  const [multiProgress, setMultiProgress] = useState<string>('')
   const [detectedPeriod, setDetectedPeriod] = useState('')
   const [overrideMonth, setOverrideMonth] = useState<number | ''>('')
   const [overrideYear, setOverrideYear] = useState<number | ''>('')
@@ -872,8 +874,10 @@ function FileImportSection() {
 
   const reset = () => {
     setStage('idle'); setErr(null); setFileName(''); setUploadId('')
-    setSheets([]); setSelectedSheet(''); setPreviewData(null); setAiRows([])
+    setSheets([]); setSelectedSheet(''); setSelectedSheets(new Set())
+    setPreviewData(null); setAiRows([])
     setDetectedPeriod(''); setOverrideMonth(''); setOverrideYear('')
+    setMultiProgress('')
   }
 
   const detectSheets = async (file: File) => {
@@ -922,6 +926,50 @@ function FileImportSection() {
     } catch (e: unknown) {
       setErr(e instanceof Error ? e.message : 'Ошибка'); setStage('idle')
     }
+  }
+
+  const runMultiImport = async (sheetsToImport: string[]) => {
+    if (!sheetsToImport.length) return
+    setImporting(true); setErr(null); setMultiProgress('')
+    let totalImported = 0
+    let totalSkipped = 0
+    const token2 = typeof window !== 'undefined' ? localStorage.getItem('token') : null
+    for (let i = 0; i < sheetsToImport.length; i++) {
+      const sheet = sheetsToImport[i]
+      setMultiProgress(`Лист ${i + 1}/${sheetsToImport.length}: ${sheet}…`)
+      try {
+        // preview
+        const fd = new FormData()
+        fd.append('upload_id', uploadId)
+        fd.append('sheet_name', sheet)
+        const pvRes = await fetch(`${resolveApiBaseURL()}/api/v1/import/file/preview`, {
+          method: 'POST',
+          headers: token2 ? { Authorization: `Bearer ${token2}` } : {},
+          body: fd,
+        })
+        const pvBody = (await pvRes.json().catch(() => ({}))) as FilePreviewResp & { detail?: string }
+        if (!pvRes.ok) { setErr(pvBody.detail ?? `Ошибка анализа листа ${sheet}`); break }
+        // confirm
+        const payload: Record<string, unknown> = { rows: pvBody.rows, filename: fileName, sheet_name: sheet }
+        const cfRes = await api.post<FileConfirmResp>('/api/v1/import/file/confirm', payload)
+        totalImported += cfRes.data.rows_imported
+        totalSkipped += cfRes.data.rows_skipped
+      } catch (e: unknown) {
+        const ax = e as { response?: { data?: { detail?: string } }; message?: string }
+        setErr(`${sheet}: ${ax.response?.data?.detail ?? ax.message ?? 'Ошибка'}`)
+        break
+      }
+    }
+    setMultiProgress('')
+    if (!err) {
+      setImportResult({ count: totalImported, date: new Date().toLocaleString('ru', { day: '2-digit', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit' }) })
+      setStage('done')
+      qc.invalidateQueries({ queryKey: ['overview'] })
+      qc.invalidateQueries({ queryKey: ['finance'] })
+      qc.invalidateQueries({ queryKey: ['chatters'] })
+      qc.invalidateQueries({ queryKey: ['months-summary'] })
+    }
+    setImporting(false)
   }
 
   const handleConfirm = async () => {
@@ -1013,22 +1061,42 @@ function FileImportSection() {
           <div className="flex items-center gap-2 text-xs text-slate-500 bg-slate-800/40 rounded-lg px-3 py-2 border border-slate-700/40">
             <FileSpreadsheet className="h-3.5 w-3.5 shrink-0" />{fileName}
           </div>
-          <p className="text-slate-400 text-sm">Файл содержит несколько листов. Выбери нужный:</p>
+          <p className="text-slate-400 text-sm">Выбери один или несколько листов для импорта:</p>
           <div className="space-y-1.5 max-h-52 overflow-y-auto">
-            {sheets.map((s) => (
-              <button key={s} type="button" onClick={() => setSelectedSheet(s)}
-                className={`w-full text-left rounded-lg border px-4 py-2.5 text-sm transition-colors ${selectedSheet === s ? 'border-indigo-500 bg-indigo-500/10 text-slate-100' : 'border-slate-700 bg-slate-800/40 text-slate-300 hover:border-slate-500'}`}>
-                {s}
-              </button>
-            ))}
+            {sheets.map((s) => {
+              const checked = selectedSheets.has(s)
+              return (
+                <button key={s} type="button"
+                  onClick={() => setSelectedSheets(prev => { const n = new Set(prev); checked ? n.delete(s) : n.add(s); return n })}
+                  className={`w-full text-left rounded-lg border px-4 py-2.5 text-sm transition-colors flex items-center gap-3 ${checked ? 'border-indigo-500 bg-indigo-500/10 text-slate-100' : 'border-slate-700 bg-slate-800/40 text-slate-300 hover:border-slate-500'}`}>
+                  <span className={`w-4 h-4 rounded border flex-shrink-0 flex items-center justify-center text-xs ${checked ? 'bg-indigo-500 border-indigo-500 text-white' : 'border-slate-500'}`}>
+                    {checked ? '✓' : ''}
+                  </span>
+                  {s}
+                </button>
+              )
+            })}
           </div>
+          {selectedSheets.size > 0 && (
+            <p className="text-xs text-slate-500">Выбрано: {selectedSheets.size} из {sheets.length}</p>
+          )}
           <div className="flex gap-2">
-            <button type="button"
-              disabled={!selectedSheet}
-              onClick={() => void runPreview(uploadId, selectedSheet)}
-              className="flex-1 flex items-center justify-center gap-2 px-4 py-2 text-sm bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 text-white rounded-lg transition-colors">
-              <CloudDownload className="h-4 w-4" />Анализировать лист
-            </button>
+            {importing ? (
+              <div className="flex-1 flex flex-col gap-1">
+                <div className="flex items-center gap-2 px-4 py-2 text-sm bg-indigo-600/50 text-white rounded-lg">
+                  <div className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin flex-shrink-0" />
+                  {multiProgress || 'Импортируем…'}
+                </div>
+              </div>
+            ) : (
+              <button type="button"
+                disabled={selectedSheets.size === 0}
+                onClick={() => void runMultiImport(Array.from(selectedSheets))}
+                className="flex-1 flex items-center justify-center gap-2 px-4 py-2 text-sm bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 text-white rounded-lg transition-colors">
+                <CloudDownload className="h-4 w-4" />
+                {selectedSheets.size > 1 ? `Импортировать ${selectedSheets.size} листа` : 'Анализировать лист'}
+              </button>
+            )}
             <button type="button" onClick={reset} className="px-3 py-2 text-sm border border-slate-700 text-slate-400 hover:text-slate-200 rounded-lg">
               Отмена
             </button>
@@ -1185,7 +1253,7 @@ function GoogleSheetsSection() {
   const [pickerLoading, setPickerLoading] = useState(false)
   const [pickerError, setPickerError] = useState<string | null>(null)
   const [pendingSpreadsheet, setPendingSpreadsheet] = useState<GSpreadsheet | null>(null)
-  const [pendingSheet, setPendingSheet] = useState<string>('')
+  const [pendingSheets, setPendingSheets] = useState<string[]>([])
 
   const { data: status, isLoading } = useQuery<GoogleStatus>({
     queryKey: ['google-status'],
@@ -1224,7 +1292,7 @@ function GoogleSheetsSection() {
 
   const selectSpreadsheet = async (ss: GSpreadsheet) => {
     setPendingSpreadsheet(ss)
-    setPendingSheet('')
+    setPendingSheets([])
     setPickerLoading(true)
     setPickerError(null)
     try {
@@ -1242,7 +1310,7 @@ function GoogleSheetsSection() {
   const cancelPicker = () => {
     setPickerStage('idle')
     setPendingSpreadsheet(null)
-    setPendingSheet('')
+    setPendingSheets([])
     setPickerError(null)
   }
 
@@ -1265,32 +1333,39 @@ function GoogleSheetsSection() {
     }
   }
 
-  const handleImport = async (spreadsheetId: string, sheetName: string) => {
+  const handleImport = async (spreadsheetId: string, sheetNames: string[]) => {
     setImporting(true)
     setImportResult(null)
     setImportError(null)
-    try {
-      const res = await api.post<GoogleImportResult>('/api/v1/import/google-sheets/confirm', {
-        spreadsheet_id: spreadsheetId,
-        sheet_name: sheetName,
-      })
-      setImportResult(res.data)
-      cancelPicker()
-      qc.invalidateQueries({ queryKey: ['google-status'] })
-      qc.invalidateQueries({ queryKey: ['overview'] })
-      qc.invalidateQueries({ queryKey: ['finance'] })
-      qc.invalidateQueries({ queryKey: ['chatters'] })
-      qc.invalidateQueries({ queryKey: ['months-summary'] })
-    } catch (e: unknown) {
-      const ax = e as { response?: { data?: { detail?: string } }; message?: string }
-      setImportError(ax.response?.data?.detail ?? ax.message ?? 'Ошибка импорта')
-    } finally {
-      setImporting(false)
+    let totalImported = 0
+    let totalSkipped = 0
+    for (const sheetName of sheetNames) {
+      try {
+        const res = await api.post<GoogleImportResult>('/api/v1/import/google-sheets/confirm', {
+          spreadsheet_id: spreadsheetId,
+          sheet_name: sheetName,
+        })
+        totalImported += res.data.rows_imported ?? 0
+        totalSkipped += res.data.rows_skipped ?? 0
+      } catch (e: unknown) {
+        const ax = e as { response?: { data?: { detail?: string } }; message?: string }
+        setImportError(`${sheetName}: ${ax.response?.data?.detail ?? ax.message ?? 'Ошибка'}`)
+        setImporting(false)
+        return
+      }
     }
+    setImportResult({ rows_imported: totalImported, rows_skipped: totalSkipped } as GoogleImportResult)
+    cancelPicker()
+    qc.invalidateQueries({ queryKey: ['google-status'] })
+    qc.invalidateQueries({ queryKey: ['overview'] })
+    qc.invalidateQueries({ queryKey: ['finance'] })
+    qc.invalidateQueries({ queryKey: ['chatters'] })
+    qc.invalidateQueries({ queryKey: ['months-summary'] })
+    setImporting(false)
   }
 
   const currentImportId = pendingSpreadsheet?.id ?? status?.spreadsheet_id ?? null
-  const currentImportSheet = pendingSheet || status?.sheet_name || null
+  const currentImportSheet = pendingSheets[0] || status?.sheet_name || null
 
   return (
     <div className="bg-slate-800/60 border border-slate-700/50 rounded-xl px-5 py-5 space-y-4">
@@ -1406,7 +1481,7 @@ function GoogleSheetsSection() {
         <div className="space-y-3">
           <div className="flex items-center justify-between">
             <p className="text-sm font-medium text-slate-200">
-              {pendingSpreadsheet?.name} — выберите лист
+              {pendingSpreadsheet?.name} — выберите листы
             </p>
             <button type="button" onClick={cancelPicker} className="text-slate-500 hover:text-slate-300">
               <X className="h-4 w-4" />
@@ -1415,33 +1490,40 @@ function GoogleSheetsSection() {
           {pickerError && <p className="text-xs text-red-400">{pickerError}</p>}
           {pickerLoading && <p className="text-xs text-slate-500">Загружаем листы…</p>}
           <div className="space-y-1.5 max-h-48 overflow-y-auto">
-            {sheets.map((s) => (
-              <button key={String(s.id)} type="button"
-                onClick={() => setPendingSheet(s.name)}
-                className={`w-full text-left rounded-lg border px-3 py-2.5 transition-colors ${
-                  pendingSheet === s.name
-                    ? 'border-indigo-500 bg-indigo-500/10 text-slate-100'
-                    : 'border-slate-700 bg-slate-800/40 text-slate-300 hover:border-slate-500'
-                }`}>
-                <p className="text-sm font-medium">{s.name}</p>
-              </button>
-            ))}
+            {sheets.map((s) => {
+              const checked = pendingSheets.includes(s.name)
+              return (
+                <button key={String(s.id)} type="button"
+                  onClick={() => setPendingSheets(prev => checked ? prev.filter(x => x !== s.name) : [...prev, s.name])}
+                  className={`w-full text-left rounded-lg border px-3 py-2.5 transition-colors flex items-center gap-3 ${
+                    checked ? 'border-indigo-500 bg-indigo-500/10 text-slate-100' : 'border-slate-700 bg-slate-800/40 text-slate-300 hover:border-slate-500'
+                  }`}>
+                  <span className={`w-4 h-4 rounded border flex-shrink-0 flex items-center justify-center text-xs ${checked ? 'bg-indigo-500 border-indigo-500 text-white' : 'border-slate-500'}`}>
+                    {checked ? '✓' : ''}
+                  </span>
+                  <p className="text-sm font-medium">{s.name}</p>
+                </button>
+              )
+            })}
           </div>
+          {pendingSheets.length > 0 && (
+            <p className="text-xs text-slate-500">Выбрано: {pendingSheets.length} из {sheets.length}</p>
+          )}
           <div className="flex gap-2 pt-1">
             <button type="button"
-              onClick={() => { if (pendingSpreadsheet && pendingSheet) handleImport(pendingSpreadsheet.id, pendingSheet) }}
-              disabled={!pendingSheet || importing}
+              onClick={() => { if (pendingSpreadsheet && pendingSheets.length) handleImport(pendingSpreadsheet.id, pendingSheets) }}
+              disabled={!pendingSheets.length || importing}
               className="flex items-center gap-2 flex-1 justify-center px-4 py-2 text-sm bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 text-white rounded-lg transition-colors">
               {importing
                 ? <><RefreshCw className="h-4 w-4 animate-spin" />Импортируем…</>
-                : <><CloudDownload className="h-4 w-4" />Импортировать</>}
+                : <><CloudDownload className="h-4 w-4" />{pendingSheets.length > 1 ? `Импортировать ${pendingSheets.length} листа` : 'Импортировать'}</>}
             </button>
             <button type="button" onClick={() => setPickerStage('spreadsheets')}
               className="px-3 py-2 text-sm border border-slate-600 text-slate-400 hover:text-slate-200 rounded-lg transition-colors">
               Назад
             </button>
           </div>
-          {!pendingSheet && <p className="text-[11px] text-slate-500">Выберите лист выше, затем нажмите «Импортировать».</p>}
+          {!pendingSheets.length && <p className="text-[11px] text-slate-500">Выберите один или несколько листов выше.</p>}
           {importError && (
             <div className="flex items-start gap-2 text-xs text-red-300 bg-red-500/5 border border-red-500/30 rounded-lg px-3 py-2">
               <AlertCircle className="h-3.5 w-3.5 mt-0.5 shrink-0" />
