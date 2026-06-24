@@ -293,20 +293,19 @@ class MMRService:
             logger.info("MMR KPI: kpi_enabled=False, skip")
             return 0
 
-        # ── Уже есть KPI-событие за этот месяц? (один раз в месяц достаточно) ──
-        existing_result = await self.db.execute(
+        # ── Загрузить chatter_id которые уже имеют KPI-событие за этот месяц ───
+        # Проверка per-chatter (не глобальная), чтобы не пропускать новых чаттеров
+        already_done_result = await self.db.execute(
             text(
-                "SELECT COUNT(*) FROM mmr_events "
+                "SELECT DISTINCT chatter_id FROM mmr_events "
                 "WHERE tenant_id = :tid AND season_id = :sid "
                 "  AND event_type = 'kpi' "
                 "  AND date_trunc('month', event_date) = date_trunc('month', CAST(:dt AS DATE))"
             ),
             {"tid": tenant_id, "sid": season.id, "dt": target_date},
         )
-        existing_count = int(existing_result.scalar() or 0)
-        if existing_count > 0:
-            logger.info("MMR KPI: already have %s kpi events for this month, skip", existing_count)
-            return 0
+        already_done_ids: set[int] = {int(r["chatter_id"]) for r in already_done_result.mappings()}
+        logger.info("MMR KPI: %s chatters already have kpi events this month", len(already_done_ids))
 
         # ── Шаг 1: попробовать live OM API за день ────────────────────────────
         tenant_result = await self.db.execute(
@@ -399,10 +398,32 @@ class MMRService:
 
             for chatter_row in chatters:
                 cid = int(chatter_row["id"])
-                cname = (chatter_row["name"] or "").strip()
-                om_metrics, om_id = _resolve_kpi(cname, kpi_data, name_to_id)
-                logger.info("MMR KPI: chatter %r (id=%s) → om_id=%s metrics=%s",
-                            cname, cid, om_id, om_metrics)
+                if cid in already_done_ids:
+                    logger.debug("MMR KPI: chatter_id=%s already processed this month, skip", cid)
+                    continue
+
+                cname_raw = (chatter_row["name"] or "").strip()
+                # Normalize: strip leading @, lower for comparison
+                cname_norm = cname_raw.lstrip("@").strip()
+
+                # Try raw name first, then @-stripped version
+                om_metrics, om_id = _resolve_kpi(cname_raw, kpi_data, name_to_id)
+                if not om_metrics and cname_norm != cname_raw:
+                    om_metrics, om_id = _resolve_kpi(cname_norm, kpi_data, name_to_id)
+
+                # Final fallback: case-insensitive scan of kpi_data keys
+                if not om_metrics:
+                    cname_lower = cname_norm.lower()
+                    for kpi_key, kpi_val in kpi_data.items():
+                        kpi_key_norm = str(kpi_key).strip().lstrip("@").lower()
+                        if kpi_key_norm == cname_lower:
+                            om_metrics = kpi_val
+                            om_id = name_to_id.get(str(kpi_key).strip())
+                            break
+
+                matched = "YES" if om_metrics else "NO"
+                logger.info("MMR KPI: chatter %r → normalized=%r om_id=%s found: %s",
+                            cname_raw, cname_norm, om_id, matched)
                 if om_metrics:
                     resolved_kpi.append({
                         "chatter_id": cid,
