@@ -274,13 +274,14 @@ _PATCHES: list[tuple[str, bool]] = [
     ("CREATE INDEX IF NOT EXISTS idx_users_email ON users(email)", False),
     # Миграция: для каждого tenant создать user role='owner' (если ещё нет)
     (
-        """INSERT INTO users (tenant_id, email, hashed_password, role, full_name, is_admin)
+        """INSERT INTO users (tenant_id, email, hashed_password, role, full_name, is_admin, active)
            SELECT t.id,
                   t.email,
                   COALESCE(t.password_hash, ''),
                   'owner',
                   COALESCE(t.agency_name, t.name, ''),
-                  COALESCE(t.is_admin, FALSE)
+                  COALESCE(t.is_admin, FALSE),
+                  TRUE
            FROM tenants t
            WHERE NOT EXISTS (
                SELECT 1 FROM users u
