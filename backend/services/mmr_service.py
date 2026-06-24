@@ -288,11 +288,14 @@ class MMRService:
             ),
             {"tid": tenant_id, "sid": season.id},
         )
+        # Consume cursor BEFORE any further db.execute() calls —
+        # asyncpg invalidates an open cursor if another query runs on the same connection.
+        mmr_rows = list(result.mappings())
 
         settings = await self._get_settings(tenant_id)
         calib_days = int(settings.calibration_days or 14)
 
-        for row in result.mappings():
+        for row in mmr_rows:
             total = max(0, int(row["total_mmr"]))
             active_days = int(row["active_days"])
             calibrated = active_days >= calib_days
@@ -331,19 +334,33 @@ class MMRService:
             {"tid": tenant_id},
         )
         row = result.mappings().first()
-        if row:
+        if row is not None:
             return _Row(dict(row))
 
+        # Не нашли — вставляем дефолт
         await self.db.execute(
-            text("INSERT INTO mmr_settings (tenant_id) VALUES (:tid) ON CONFLICT DO NOTHING"),
+            text("INSERT INTO mmr_settings (tenant_id) VALUES (:tid) ON CONFLICT (tenant_id) DO NOTHING"),
             {"tid": tenant_id},
         )
         await self.db.flush()
-        result = await self.db.execute(
+        result2 = await self.db.execute(
             text("SELECT * FROM mmr_settings WHERE tenant_id = :tid"),
             {"tid": tenant_id},
         )
-        return _Row(dict(result.mappings().first()))
+        row2 = result2.mappings().first()
+        if row2 is None:
+            # Последний шанс: вернуть объект с захардкоженными дефолтами
+            logger.warning("mmr_settings not found for tenant=%s, using hardcoded defaults", tenant_id)
+            return _Row({
+                "fin_overperform_threshold": 1.10, "fin_underperform_threshold": 0.90,
+                "fin_overperform_points": 25, "fin_perform_points": 15,
+                "fin_underperform_points": -15, "fin_empty_shift_points": -15,
+                "kpi_threshold_high": 1.15, "kpi_threshold_low": 0.85,
+                "kpi_high_points": 5, "kpi_low_points": -5, "kpi_enabled": True,
+                "season_carry_over": 0.5, "prize_1st": 200, "prize_2nd": 150,
+                "prize_3rd": 100, "calibration_days": 14,
+            })
+        return _Row(dict(row2))
 
     # ── Сезон ─────────────────────────────────────────────────────────────────
 
@@ -354,26 +371,40 @@ class MMRService:
                 """SELECT * FROM mmr_seasons
                    WHERE tenant_id = :tid
                      AND is_active = TRUE
-                     AND :dt BETWEEN start_date AND end_date
+                     AND CAST(:dt AS date) BETWEEN start_date AND end_date
                    LIMIT 1"""
             ),
-            {"tid": tenant_id, "dt": target_date},
+            {"tid": tenant_id, "dt": str(target_date)},
         )
         row = result.mappings().first()
-        if row:
+        if row is not None:
             return _Row(dict(row))
 
         quarter_start, quarter_end, name = self._quarter_bounds(target_date)
-        ins = await self.db.execute(
+        await self.db.execute(
             text(
                 """INSERT INTO mmr_seasons (tenant_id, name, start_date, end_date)
                    VALUES (:tid, :name, :start, :end)
-                   RETURNING *"""
+                   ON CONFLICT DO NOTHING"""
             ),
-            {"tid": tenant_id, "name": name, "start": quarter_start, "end": quarter_end},
+            {"tid": tenant_id, "name": name, "start": str(quarter_start), "end": str(quarter_end)},
         )
         await self.db.flush()
-        return _Row(dict(ins.mappings().first()))
+        # Re-fetch instead of RETURNING * to avoid cursor issues
+        result2 = await self.db.execute(
+            text(
+                """SELECT * FROM mmr_seasons
+                   WHERE tenant_id = :tid
+                     AND is_active = TRUE
+                     AND CAST(:dt AS date) BETWEEN start_date AND end_date
+                   LIMIT 1"""
+            ),
+            {"tid": tenant_id, "dt": str(target_date)},
+        )
+        row2 = result2.mappings().first()
+        if row2 is None:
+            raise RuntimeError(f"Failed to create mmr_season for tenant={tenant_id} date={target_date}")
+        return _Row(dict(row2))
 
     # ── Служебные методы ──────────────────────────────────────────────────────
 
