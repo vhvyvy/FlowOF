@@ -354,13 +354,17 @@ class MMRService:
     # ── Сезон ─────────────────────────────────────────────────────────────────
 
     async def _get_or_create_active_season(self, tenant_id: int, target_date: date) -> _Row:
-        """Найти активный сезон охватывающий target_date или создать новый квартал."""
+        """
+        Найти активный сезон охватывающий target_date или создать новый квартал.
+        Если по какой-то причине существует несколько подходящих сезонов —
+        берём самый ранний по id (ORDER BY id ASC LIMIT 1), не падаем.
+        """
         result = await self.db.execute(
             text(
                 "SELECT * FROM mmr_seasons "
                 "WHERE tenant_id = :tid AND is_active = TRUE "
                 "  AND :dt BETWEEN start_date AND end_date "
-                "LIMIT 1"
+                "ORDER BY id ASC LIMIT 1"
             ),
             {"tid": tenant_id, "dt": target_date},
         )
@@ -368,6 +372,7 @@ class MMRService:
         if row is not None:
             return _Row(dict(row))
 
+        # Сезон не найден — создаём на текущий квартал
         quarter_start, quarter_end, name = self._quarter_bounds(target_date)
         await self.db.execute(
             text(
@@ -377,18 +382,22 @@ class MMRService:
             {"tid": tenant_id, "name": name, "start": quarter_start, "end": quarter_end},
         )
         await self.db.flush()
+
+        # Re-fetch — ORDER BY id ASC на случай гонки при параллельных запросах
         result2 = await self.db.execute(
             text(
                 "SELECT * FROM mmr_seasons "
                 "WHERE tenant_id = :tid AND is_active = TRUE "
                 "  AND :dt BETWEEN start_date AND end_date "
-                "LIMIT 1"
+                "ORDER BY id ASC LIMIT 1"
             ),
             {"tid": tenant_id, "dt": target_date},
         )
         row2 = result2.mappings().first()
         if row2 is None:
-            raise RuntimeError(f"Failed to create mmr_season for tenant={tenant_id} date={target_date}")
+            raise RuntimeError(
+                f"Failed to create/find mmr_season for tenant={tenant_id} date={target_date}"
+            )
         return _Row(dict(row2))
 
     # ── Служебные методы ──────────────────────────────────────────────────────

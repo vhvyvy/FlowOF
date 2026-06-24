@@ -395,6 +395,40 @@ _PATCHES: list[tuple[str, bool]] = [
         )""",
         False,
     ),
+    # ── Повторная попытка создать MMR-таблицы (идемпотентно, IF NOT EXISTS) ───
+    # chatter_mmr и season_results могли не создаться если предыдущие запуски
+    # прерывались из-за InFailedSqlTransaction. Повтор в отдельной транзакции.
+    (
+        """CREATE TABLE IF NOT EXISTS chatter_mmr (
+            id SERIAL PRIMARY KEY,
+            tenant_id INTEGER REFERENCES tenants(id) ON DELETE CASCADE,
+            chatter_id INTEGER REFERENCES chatters(id) ON DELETE CASCADE,
+            season_id INTEGER REFERENCES mmr_seasons(id) ON DELETE CASCADE,
+            current_mmr INTEGER NOT NULL DEFAULT 0,
+            peak_mmr INTEGER NOT NULL DEFAULT 0,
+            current_league TEXT,
+            calibration_complete BOOLEAN NOT NULL DEFAULT FALSE,
+            days_active INTEGER NOT NULL DEFAULT 0,
+            UNIQUE (tenant_id, chatter_id, season_id)
+        )""",
+        False,
+    ),
+    (
+        """CREATE TABLE IF NOT EXISTS season_results (
+            id SERIAL PRIMARY KEY,
+            tenant_id INTEGER REFERENCES tenants(id) ON DELETE CASCADE,
+            season_id INTEGER REFERENCES mmr_seasons(id) ON DELETE CASCADE,
+            chatter_id INTEGER REFERENCES chatters(id) ON DELETE CASCADE,
+            final_mmr INTEGER,
+            final_league TEXT,
+            rank INTEGER,
+            prize_amount NUMERIC(12,2) NOT NULL DEFAULT 0,
+            prize_paid BOOLEAN NOT NULL DEFAULT FALSE,
+            prize_paid_at TIMESTAMP,
+            created_at TIMESTAMP NOT NULL DEFAULT NOW()
+        )""",
+        False,
+    ),
 ]
 
 
