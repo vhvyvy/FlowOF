@@ -14,6 +14,7 @@ from dependencies import require_chatter
 from economics import PLAN_TIERS, DEFAULT_TIER, RETENTION_RATE, load_settings, _norm_model_name
 from models import AppSetting, ChatterKpi, Plan, Transaction, User
 from team_helpers import list_teams, ensure_default_team
+from routers.kpi import _load_kpi_data, _load_mapping, _resolve_kpi
 
 logger = logging.getLogger("flowof.chatter_portal")
 router = APIRouter(prefix="/api/v1/me", tags=["chatter_portal"])
@@ -285,22 +286,23 @@ async def my_kpi(
     user: User = Depends(require_chatter),
     db: AsyncSession = Depends(get_db),
 ):
-    """KPI чаттера из Onlymonster (только его метрики)."""
+    """KPI чаттера из Onlymonster — переиспользует ту же логику что owner /api/v1/kpi."""
     if not user.chatter_id:
         raise HTTPException(status_code=400, detail="Чаттер не привязан к аккаунту")
 
-    # Получить имя чаттера из справочника
+    # ── Имя чаттера из справочника ────────────────────────────────────────────
     chatter_name_result = await db.execute(
         text("SELECT name FROM chatters WHERE id = :cid"),
         {"cid": user.chatter_id},
     )
-    row = chatter_name_result.mappings().first()
-    chatter_name = row["name"] if row else None
+    name_row = chatter_name_result.mappings().first()
+    chatter_name = (name_row["name"] or "").strip() if name_row else ""
 
     if not chatter_name:
+        logger.warning("KPI /me/kpi: no name for chatter_id=%s", user.chatter_id)
         return {"kpi": None, "has_onlymonster_key": False}
 
-    # Проверить наличие ключа Onlymonster у tenant
+    # ── Наличие ключа Onlymonster ─────────────────────────────────────────────
     tenant_result = await db.execute(
         text("SELECT onlymonster_key FROM tenants WHERE id = :tid"),
         {"tid": user.tenant_id},
@@ -308,37 +310,37 @@ async def my_kpi(
     tenant_row = tenant_result.mappings().first()
     has_om_key = bool(tenant_row and tenant_row.get("onlymonster_key"))
 
-    # Поискать метрики в chatter_kpi_mt по имени
-    kpi_result = await db.execute(
-        select(ChatterKpi).where(
-            and_(
-                ChatterKpi.tenant_id == user.tenant_id,
-                ChatterKpi.year == year,
-                ChatterKpi.month == month,
-                ChatterKpi.chatter == chatter_name,
-            )
-        )
-    )
-    kpi_row = kpi_result.scalar_one_or_none()
+    # ── Загрузить KPI за месяц (тот же источник что owner-эндпоинт) ──────────
+    kpi_data = await _load_kpi_data(db, user.tenant_id, year, month)
+    id_to_name, name_to_id = await _load_mapping(db, user.tenant_id)
 
-    if kpi_row is None:
+    logger.info(
+        "KPI /me/kpi: chatter_id=%s name=%r month=%s/%s, "
+        "kpi_data keys=%s, name_to_id keys=%s",
+        user.chatter_id, chatter_name, month, year,
+        list(kpi_data.keys())[:20],
+        list(name_to_id.keys())[:20],
+    )
+
+    # ── Разрешить метрики через _resolve_kpi (multi-strategy fuzzy match) ─────
+    om_metrics, om_id = _resolve_kpi(chatter_name, kpi_data, name_to_id)
+
+    logger.info(
+        "KPI /me/kpi: resolved om_id=%s metrics=%s",
+        om_id, om_metrics,
+    )
+
+    if not om_metrics:
         return {"kpi": None, "has_onlymonster_key": has_om_key}
 
-    # Вернуть метрики
-    ppv_or = float(kpi_row.ppv_open_rate) if kpi_row.ppv_open_rate is not None else None
-    apv = float(kpi_row.apv) if kpi_row.apv is not None else None
-    chats = int(kpi_row.total_chats) if kpi_row.total_chats is not None else None
-
-    rpc = round(
-        (lambda r, c: r / c if c and c > 0 else None)(
-            0, chats  # placeholder — revenue не хранится в kpi_mt
-        ) or 0,
-        2,
-    )
+    ppv_or  = om_metrics.get("ppv_open_rate")
+    apv     = om_metrics.get("apv")
+    chats   = om_metrics.get("total_chats")
 
     return {
         "kpi": {
             "chatter": chatter_name,
+            "onlymonster_id": om_id,
             "ppv_open_rate": ppv_or,
             "apv": apv,
             "total_chats": chats,
