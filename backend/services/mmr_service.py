@@ -277,89 +277,147 @@ class MMRService:
         target_date: date,
     ) -> int:
         """
-        Для каждого чаттера за target_date сравниваем KPI с личным средним
-        (или агентским если < calibration_days активных дней) и записываем MMR-событие.
+        KPI-часть MMR: для каждого чаттера сравниваем OM метрики месяца с личным/агентским средним.
+
+        Источник данных (в порядке приоритета):
+        1. Живой OM API за конкретный день (если доступен и маппинг настроен)
+        2. Fallback: ежемесячные данные из chatter_kpi_mt (тот же источник что /dashboard/kpi)
+
+        KPI-событие создаётся не более одного раза в месяц на чаттера (идемпотентность по месяцу).
         """
+        logger.info("MMR KPI: started tenant=%s date=%s kpi_enabled=%s",
+                    tenant_id, target_date, settings.kpi_enabled)
+
         if not settings.kpi_enabled:
-            logger.info("MMR KPI: kpi_enabled=False for tenant=%s, skipping", tenant_id)
+            logger.info("MMR KPI: kpi_enabled=False, skip")
             return 0
 
-        # Получить onlymonster_key и api_url из БД (tenant)
+        # ── Уже есть KPI-событие за этот месяц? (один раз в месяц достаточно) ──
+        existing_result = await self.db.execute(
+            text(
+                "SELECT COUNT(*) FROM mmr_events "
+                "WHERE tenant_id = :tid AND season_id = :sid "
+                "  AND event_type = 'kpi' "
+                "  AND date_trunc('month', event_date) = date_trunc('month', CAST(:dt AS DATE))"
+            ),
+            {"tid": tenant_id, "sid": season.id, "dt": target_date},
+        )
+        existing_count = int(existing_result.scalar() or 0)
+        if existing_count > 0:
+            logger.info("MMR KPI: already have %s kpi events for this month, skip", existing_count)
+            return 0
+
+        # ── Шаг 1: попробовать live OM API за день ────────────────────────────
         tenant_result = await self.db.execute(
             text("SELECT onlymonster_key FROM tenants WHERE id = :tid"),
             {"tid": tenant_id},
         )
         tenant_row = tenant_result.mappings().first()
-        om_key = tenant_row["onlymonster_key"] if tenant_row else None
-        if not om_key:
-            logger.info("MMR KPI: no onlymonster_key for tenant=%s, skipping", tenant_id)
-            return 0
+        om_key = (tenant_row["onlymonster_key"] or "").strip() if tenant_row else ""
 
-        # Идемпотентность — удалить kpi-события за этот день
-        await self.db.execute(
-            text(
-                "DELETE FROM mmr_events "
-                "WHERE tenant_id = :tid AND season_id = :sid "
-                "AND event_date = :dt AND event_type = 'kpi'"
-            ),
-            {"tid": tenant_id, "sid": season.id, "dt": target_date},
-        )
+        resolved_kpi: list[dict] = []  # [{chatter_id, ppv_open_rate, rpc, ...}]
 
-        # Fetch daily KPI from Onlymonster API
-        from services.onlymonster import get_daily_metrics
-        api_url = "https://omapi.onlymonster.ai"
-        daily = await get_daily_metrics(api_url, om_key, target_date)
-        if not daily:
-            logger.info("MMR KPI: no data from OM for tenant=%s date=%s", tenant_id, target_date)
-            return 0
-
-        # Build OM user_id → chatter_id mapping via chatter_onlymonster_mapping + chatters catalog
-        # Step 1: load OM id → display names
-        mapping_result = await self.db.execute(
-            text("SELECT onlymonster_id, display_names FROM chatter_onlymonster_mapping WHERE tenant_id = :tid"),
-            {"tid": tenant_id},
-        )
-        import json as _json
-        om_id_to_names: dict[str, list[str]] = {}
-        for mr in mapping_result.mappings():
-            oid = str(mr["onlymonster_id"])
-            raw = mr["display_names"] or ""
+        if om_key:
             try:
-                names = _json.loads(raw) if raw.startswith("[") else [raw]
-            except Exception:
-                names = [raw]
-            om_id_to_names[oid] = [n for n in names if n]
+                from services.onlymonster import get_daily_metrics
+                import json as _json
 
-        # Step 2: load chatters catalog (id, name)
-        chatters_result = await self.db.execute(
-            text("SELECT id, name FROM chatters WHERE tenant_id = :tid AND active = TRUE"),
-            {"tid": tenant_id},
-        )
-        name_to_chatter_id: dict[str, int] = {
-            r["name"].strip().lower(): int(r["id"])
-            for r in chatters_result.mappings()
-        }
+                api_url = "https://omapi.onlymonster.ai"
+                daily = await get_daily_metrics(api_url, om_key, target_date)
+                logger.info("MMR KPI: daily OM API returned %s records for date=%s", len(daily), target_date)
+                if daily:
+                    logger.info("MMR KPI: first OM record sample: %s", daily[0])
 
-        # Step 3: resolve OM records → chatter_id
-        resolved_kpi: list[dict] = []
-        for rec in daily:
-            om_id = rec["om_user_id"]
-            display_names = om_id_to_names.get(om_id, [])
-            chatter_id: int | None = None
-            for dname in display_names:
-                chatter_id = name_to_chatter_id.get(dname.strip().lower())
-                if chatter_id is not None:
-                    break
-            if chatter_id is None:
-                logger.debug("MMR KPI: no chatter match for OM user_id=%s tenant=%s", om_id, tenant_id)
-                continue
-            resolved_kpi.append({"chatter_id": chatter_id, **rec})
+                if daily:
+                    # Load OM id → display names mapping
+                    mapping_result = await self.db.execute(
+                        text("SELECT onlymonster_id, display_names FROM chatter_onlymonster_mapping WHERE tenant_id = :tid"),
+                        {"tid": tenant_id},
+                    )
+                    om_id_to_names: dict[str, list[str]] = {}
+                    for mr in mapping_result.mappings():
+                        oid = str(mr["onlymonster_id"])
+                        raw = mr["display_names"] or ""
+                        try:
+                            names = _json.loads(raw) if raw.startswith("[") else [raw]
+                        except Exception:
+                            names = [raw]
+                        om_id_to_names[oid] = [n for n in names if n]
+
+                    logger.info("MMR KPI: chatter_onlymonster_mapping has %s entries: %s",
+                                len(om_id_to_names), list(om_id_to_names.keys())[:10])
+
+                    # Load chatters catalog
+                    chatters_result = await self.db.execute(
+                        text("SELECT id, name FROM chatters WHERE tenant_id = :tid AND active = TRUE"),
+                        {"tid": tenant_id},
+                    )
+                    name_to_chatter_id: dict[str, int] = {
+                        r["name"].strip().lower(): int(r["id"])
+                        for r in chatters_result.mappings()
+                    }
+                    logger.info("MMR KPI: chatters catalog has %s entries", len(name_to_chatter_id))
+
+                    # Resolve OM records → chatter_id
+                    for rec in daily:
+                        om_id = rec["om_user_id"]
+                        display_names = om_id_to_names.get(om_id, [])
+                        chatter_id: int | None = None
+                        for dname in display_names:
+                            chatter_id = name_to_chatter_id.get(dname.strip().lower())
+                            if chatter_id is not None:
+                                break
+                        logger.info("MMR KPI: OM user_id=%s display_names=%s → chatter_id=%s",
+                                    om_id, display_names, chatter_id)
+                        if chatter_id is not None:
+                            resolved_kpi.append({"chatter_id": chatter_id, **rec})
+
+                    logger.info("MMR KPI: daily API resolved %s/%s chatters", len(resolved_kpi), len(daily))
+            except Exception as exc:
+                logger.warning("MMR KPI: daily OM API error: %s", exc)
+
+        # ── Шаг 2: fallback — monthly chatter_kpi_mt (тот же источник что /dashboard/kpi) ─
+        if not resolved_kpi:
+            logger.info("MMR KPI: falling back to monthly chatter_kpi_mt for %s/%s",
+                        target_date.month, target_date.year)
+            from routers.kpi import _load_kpi_data, _load_mapping, _resolve_kpi
+
+            kpi_data = await _load_kpi_data(self.db, tenant_id, target_date.year, target_date.month)
+            id_to_name, name_to_id = await _load_mapping(self.db, tenant_id)
+
+            logger.info("MMR KPI: monthly kpi_data has %s entries: %s",
+                        len(kpi_data), list(kpi_data.keys())[:15])
+
+            # Load chatters catalog
+            chatters_result = await self.db.execute(
+                text("SELECT id, name FROM chatters WHERE tenant_id = :tid AND active = TRUE"),
+                {"tid": tenant_id},
+            )
+            chatters = list(chatters_result.mappings())
+            logger.info("MMR KPI: chatters catalog: %s", [r["name"] for r in chatters])
+
+            for chatter_row in chatters:
+                cid = int(chatter_row["id"])
+                cname = (chatter_row["name"] or "").strip()
+                om_metrics, om_id = _resolve_kpi(cname, kpi_data, name_to_id)
+                logger.info("MMR KPI: chatter %r (id=%s) → om_id=%s metrics=%s",
+                            cname, cid, om_id, om_metrics)
+                if om_metrics:
+                    resolved_kpi.append({
+                        "chatter_id": cid,
+                        "ppv_open_rate": om_metrics.get("ppv_open_rate"),
+                        "rpc": om_metrics.get("apv"),  # APV as RPC proxy
+                        "conversion": None,
+                    })
 
         if not resolved_kpi:
-            logger.info("MMR KPI: 0 resolved chatters for tenant=%s date=%s", tenant_id, target_date)
+            logger.info("MMR KPI: 0 resolved chatters after all attempts, tenant=%s date=%s",
+                        tenant_id, target_date)
             return 0
 
-        # UPSERT daily KPI into chatter_kpi_history
+        logger.info("MMR KPI: will process %s chatters", len(resolved_kpi))
+
+        # ── UPSERT into chatter_kpi_history ──────────────────────────────────
         for rec in resolved_kpi:
             await self.db.execute(
                 text(
@@ -381,11 +439,11 @@ class MMRService:
                 },
             )
 
-        # Load calibration thresholds
-        kpi_high = float(settings.kpi_threshold_high or 1.15)
-        kpi_low  = float(settings.kpi_threshold_low  or 0.85)
-        pts_high = int(settings.kpi_high_points  or 5)
-        pts_low  = int(settings.kpi_low_points   or -5)
+        # ── Compute MMR events ────────────────────────────────────────────────
+        kpi_high   = float(settings.kpi_threshold_high or 1.15)
+        kpi_low    = float(settings.kpi_threshold_low  or 0.85)
+        pts_high   = int(settings.kpi_high_points  or 5)
+        pts_low    = int(settings.kpi_low_points   or -5)
         calib_days = int(settings.calibration_days or 14)
 
         METRICS = [
@@ -397,7 +455,7 @@ class MMRService:
         for rec in resolved_kpi:
             cid = rec["chatter_id"]
 
-            # Is chatter calibrated? (active_days from chatter_mmr)
+            # Calibration status
             days_result = await self.db.execute(
                 text(
                     "SELECT days_active FROM chatter_mmr "
@@ -412,32 +470,35 @@ class MMRService:
             for metric_col, metric_label in METRICS:
                 value = rec.get(metric_col)
                 if value is None:
+                    logger.debug("MMR KPI: chatter_id=%s metric=%s value=None, skip", cid, metric_col)
                     continue
 
                 avg = await self._get_avg_metric(
                     tenant_id, cid, metric_col, personal=use_personal,
                     exclude_date=target_date,
                 )
+                logger.info("MMR KPI: chatter_id=%s metric=%s value=%.2f avg=%s personal=%s",
+                            cid, metric_col, value, avg, use_personal)
+
                 if avg is None or avg == 0:
-                    # No historical baseline — skip
+                    logger.info("MMR KPI: no avg baseline for chatter_id=%s metric=%s, skip", cid, metric_col)
                     continue
 
                 ratio = value / avg
                 if ratio >= kpi_high:
-                    category = "kpi_high"
-                    points = pts_high
+                    category, points = "kpi_high", pts_high
                     trend = f"+{round((ratio - 1) * 100):.0f}%"
                 elif ratio <= kpi_low:
-                    category = "kpi_low"
-                    points = pts_low
+                    category, points = "kpi_low", pts_low
                     trend = f"{round((ratio - 1) * 100):.0f}%"
                 else:
-                    continue  # within normal range — no event
+                    logger.debug("MMR KPI: chatter_id=%s metric=%s ratio=%.2f in normal range, no event",
+                                 cid, metric_col, ratio)
+                    continue
 
-                desc = (
-                    f"{metric_label}: {value:.2f} "
-                    f"(среднее {avg:.2f}, {trend})"
-                )
+                desc = f"{metric_label}: {value:.2f} (среднее {avg:.2f}, {trend})"
+                logger.info("MMR KPI: creating event chatter_id=%s metric=%s category=%s points=%s",
+                            cid, metric_col, category, points)
                 await self._create_event(
                     tenant_id=tenant_id,
                     chatter_id=cid,
@@ -450,7 +511,7 @@ class MMRService:
                 )
                 events_created += 1
 
-        logger.info("MMR KPI done: tenant=%s date=%s events=%s", tenant_id, target_date, events_created)
+        logger.info("MMR KPI done: tenant=%s date=%s events_created=%s", tenant_id, target_date, events_created)
         return events_created
 
     # ── Средний KPI по истории ────────────────────────────────────────────────
