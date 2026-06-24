@@ -275,6 +275,14 @@ function SettingsTab() {
   const [recalcResult, setRecalcResult] = useState<string | null>(null)
   const [saving, setSaving] = useState(false)
 
+  // Range recalculation state
+  const today = new Date().toISOString().slice(0, 10)
+  const firstOfMonth = new Date(new Date().getFullYear(), new Date().getMonth(), 1).toISOString().slice(0, 10)
+  const [rangeFrom, setRangeFrom] = useState(firstOfMonth)
+  const [rangeTo, setRangeTo] = useState(today)
+  const [rangeRunning, setRangeRunning] = useState(false)
+  const [rangeResult, setRangeResult] = useState<{ success: boolean; days: number; events: number; errors: string[] } | null>(null)
+
   const { data: settings } = useQuery<MmrSettings>({
     queryKey: ['mmr-settings'],
     queryFn: () => api.get('/api/v1/mmr/settings').then(r => r.data),
@@ -308,6 +316,25 @@ function SettingsTab() {
     }
   }
 
+  const handleRangeRecalc = async () => {
+    setRangeResult(null)
+    setRangeRunning(true)
+    try {
+      const res = await api.post('/api/v1/mmr/recalculate-range', {
+        date_from: rangeFrom,
+        date_to: rangeTo,
+      })
+      const d = res.data
+      setRangeResult({ success: d.success, days: d.days_processed, events: d.total_events, errors: d.errors ?? [] })
+      qc.invalidateQueries({ queryKey: ['mmr-leaderboard'] })
+    } catch (e: unknown) {
+      const msg = (e as { response?: { data?: { detail?: string } } })?.response?.data?.detail ?? 'Ошибка пересчёта диапазона'
+      setRangeResult({ success: false, days: 0, events: 0, errors: [msg] })
+    } finally {
+      setRangeRunning(false)
+    }
+  }
+
   if (!settings) return <p className="text-slate-500 text-sm">Загрузка…</p>
 
   return (
@@ -334,6 +361,75 @@ function SettingsTab() {
           <p className={cn('mt-3 text-sm', recalcResult.startsWith('Успешно') ? 'text-emerald-400' : 'text-red-400')}>
             {recalcResult}
           </p>
+        )}
+      </div>
+
+      {/* Range recalculation */}
+      <div className="bg-slate-800/40 border border-slate-700/40 rounded-xl p-5">
+        <p className="text-xs font-semibold uppercase tracking-widest text-slate-400 mb-4">Пересчитать диапазон</p>
+        <div className="flex items-center gap-3 flex-wrap">
+          <div className="flex items-center gap-2">
+            <span className="text-xs text-slate-500">с</span>
+            <input
+              type="date"
+              value={rangeFrom}
+              onChange={e => setRangeFrom(e.target.value)}
+              className="bg-slate-900 border border-slate-600 rounded-lg px-3 py-2 text-sm text-slate-200 focus:outline-none focus:border-indigo-500"
+            />
+          </div>
+          <div className="flex items-center gap-2">
+            <span className="text-xs text-slate-500">по</span>
+            <input
+              type="date"
+              value={rangeTo}
+              onChange={e => setRangeTo(e.target.value)}
+              className="bg-slate-900 border border-slate-600 rounded-lg px-3 py-2 text-sm text-slate-200 focus:outline-none focus:border-indigo-500"
+            />
+          </div>
+          <button
+            onClick={handleRangeRecalc}
+            disabled={rangeRunning}
+            className="flex items-center gap-2 px-4 py-2 bg-indigo-600 hover:bg-indigo-500 disabled:opacity-60 disabled:cursor-not-allowed text-white text-sm rounded-lg transition-colors"
+          >
+            <RefreshCw className={cn('h-3.5 w-3.5', rangeRunning && 'animate-spin')} />
+            {rangeRunning ? 'Обрабатываем…' : 'Пересчитать диапазон'}
+          </button>
+        </div>
+        <p className="text-xs text-slate-600 mt-2">Максимум 90 дней. Дефолт: первое число месяца → сегодня.</p>
+
+        {rangeRunning && (
+          <div className="mt-3 flex items-center gap-2 text-sm text-slate-400">
+            <RefreshCw className="h-3.5 w-3.5 animate-spin text-indigo-400" />
+            Идёт пересчёт, это может занять несколько секунд…
+          </div>
+        )}
+
+        {rangeResult && (
+          <div className={cn('mt-3 rounded-lg p-3 text-sm', rangeResult.success ? 'bg-emerald-500/10 border border-emerald-500/20' : 'bg-red-500/10 border border-red-500/20')}>
+            {rangeResult.success ? (
+              <div className="space-y-1">
+                <p className="text-emerald-400 font-medium">
+                  ✓ Обработано {rangeResult.days} дней, создано {rangeResult.events} событий
+                </p>
+                <button
+                  onClick={() => qc.invalidateQueries({ queryKey: ['mmr-leaderboard'] })}
+                  className="text-xs text-indigo-400 hover:text-indigo-300 underline"
+                >
+                  Обновить лидерборд
+                </button>
+              </div>
+            ) : (
+              <div>
+                <p className="text-red-400 font-medium mb-1">Ошибка пересчёта</p>
+                {rangeResult.errors.map((e, i) => (
+                  <p key={i} className="text-xs text-red-300/70">{e}</p>
+                ))}
+                {rangeResult.days > 0 && (
+                  <p className="text-xs text-slate-400 mt-1">Обработано до ошибки: {rangeResult.days} дн., {rangeResult.events} событий</p>
+                )}
+              </div>
+            )}
+          </div>
         )}
       </div>
 

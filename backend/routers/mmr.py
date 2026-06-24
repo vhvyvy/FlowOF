@@ -26,6 +26,11 @@ class RecalculateRequest(BaseModel):
     date: date
 
 
+class RecalculateRangeRequest(BaseModel):
+    date_from: date
+    date_to: date
+
+
 class MmrSettingsUpdate(BaseModel):
     fin_overperform_threshold: Optional[float] = None
     fin_underperform_threshold: Optional[float] = None
@@ -75,6 +80,53 @@ async def recalculate_day(
         return {"success": True, **result}
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+@router.post("/recalculate-range")
+async def recalculate_range(
+    body: RecalculateRangeRequest,
+    owner: User = Depends(require_owner),
+    db: AsyncSession = Depends(get_db),
+):
+    """Пересчёт MMR за диапазон дат. Максимум 90 дней за раз."""
+    import logging
+    logger = logging.getLogger("flowof.mmr")
+
+    if body.date_from > body.date_to:
+        raise HTTPException(status_code=400, detail="date_from должна быть ≤ date_to")
+
+    delta = (body.date_to - body.date_from).days + 1
+    if delta > 90:
+        raise HTTPException(status_code=400, detail=f"Максимум 90 дней за раз, запрошено {delta}")
+
+    service = MMRService(db)
+    days_processed = 0
+    total_events = 0
+    errors: list[str] = []
+
+    current = body.date_from
+    while current <= body.date_to:
+        try:
+            logger.info("MMR range: processing tenant=%s date=%s (%d/%d)",
+                        owner.tenant_id, current, days_processed + 1, delta)
+            result = await service.process_day(owner.tenant_id, current)
+            total_events += result.get("events_created", 0)
+            days_processed += 1
+        except Exception as exc:
+            err_msg = f"{current}: {exc}"
+            logger.error("MMR range error: %s", err_msg)
+            errors.append(err_msg)
+        current += timedelta(days=1)
+
+    logger.info("MMR range done: tenant=%s days=%d events=%d errors=%d",
+                owner.tenant_id, days_processed, total_events, len(errors))
+    return {
+        "success": len(errors) == 0,
+        "days_processed": days_processed,
+        "total_days": delta,
+        "total_events": total_events,
+        "errors": errors[:10],  # cap to avoid huge responses
+    }
 
 
 # ── Лидерборд ─────────────────────────────────────────────────────────────────
