@@ -398,13 +398,21 @@ _PATCHES: list[tuple[str, bool]] = [
 
 
 async def apply_schema_patches(engine: AsyncEngine) -> None:
-    """Idempotent column / index additions."""
-    async with engine.begin() as conn:
-        for sql, critical in _PATCHES:
-            try:
+    """
+    Idempotent column / index additions.
+
+    Each patch runs in its OWN transaction so that a single failure does not
+    put the connection into InFailedSqlTransaction state and block all
+    subsequent patches.  (PostgreSQL aborts every statement in a transaction
+    after the first error, causing perfectly valid CREATE TABLE statements to
+    be silently skipped when they share a transaction with a failed ALTER.)
+    """
+    for sql, critical in _PATCHES:
+        try:
+            async with engine.begin() as conn:
                 await conn.execute(text(sql))
-            except Exception as e:
-                if critical:
-                    logger.exception("schema_patch critical: %s — %s", sql[:120], e)
-                    raise
-                logger.warning("schema_patch optional skip: %s — %s", sql[:120], e)
+        except Exception as e:
+            if critical:
+                logger.exception("schema_patch critical: %s — %s", sql[:120], e)
+                raise
+            logger.warning("schema_patch optional skip: %s — %s", sql[:120], e)
