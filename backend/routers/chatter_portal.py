@@ -491,19 +491,33 @@ async def my_mmr(
 async def my_mmr_events(
     user: User = Depends(require_chatter),
     db: AsyncSession = Depends(get_db),
+    event_type: str | None = Query(None, description="finance | kpi — фильтр по типу"),
+    offset: int = Query(0, ge=0),
+    limit: int = Query(30, ge=1, le=100),
 ):
-    """Последние 30 MMR-событий чаттера."""
+    """MMR-события чаттера с JOIN на модели и смены, пагинацией и фильтром."""
     if not user.chatter_id:
         raise HTTPException(status_code=400, detail="Chatter not linked")
 
+    type_filter = "AND me.event_type = :etype" if event_type else ""
+    params: dict = {"tid": user.tenant_id, "cid": user.chatter_id,
+                    "lim": limit, "off": offset}
+    if event_type:
+        params["etype"] = event_type
+
     result = await db.execute(
         text(
-            "SELECT event_date, event_type, category, points, description "
-            "FROM mmr_events "
-            "WHERE tenant_id = :tid AND chatter_id = :cid "
-            "ORDER BY event_date DESC, id DESC LIMIT 30"
+            f"SELECT me.event_date, me.event_type, me.category, me.points, "
+            f"       me.description, me.model_id, me.shift_id, "
+            f"       m.name AS model_name, sc.name AS shift_name "
+            f"FROM mmr_events me "
+            f"LEFT JOIN models m ON me.model_id = m.id "
+            f"LEFT JOIN shifts_catalog sc ON me.shift_id = sc.id "
+            f"WHERE me.tenant_id = :tid AND me.chatter_id = :cid {type_filter} "
+            f"ORDER BY me.event_date DESC, me.id DESC "
+            f"LIMIT :lim OFFSET :off"
         ),
-        {"tid": user.tenant_id, "cid": user.chatter_id},
+        params,
     )
     events = []
     for r in result.mappings():
@@ -513,8 +527,10 @@ async def my_mmr_events(
             "category": r["category"],
             "points": int(r["points"]),
             "description": r["description"] or "",
+            "model_name": r["model_name"],
+            "shift_name": r["shift_name"],
         })
-    return {"events": events}
+    return {"events": events, "offset": offset, "limit": limit}
 
 
 @router.get("/mmr/history")

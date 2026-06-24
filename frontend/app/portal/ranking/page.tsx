@@ -1,10 +1,12 @@
 'use client'
 
+import { useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import {
-  AreaChart, Area, XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid,
+  AreaChart, Area, XAxis, YAxis, Tooltip, ResponsiveContainer,
+  CartesianGrid, Dot,
 } from 'recharts'
-import { TrendingUp, TrendingDown, Trophy, Star, CalendarDays } from 'lucide-react'
+import { TrendingUp, TrendingDown, Trophy, CalendarDays } from 'lucide-react'
 import { LeagueBadge } from '@/components/mmr/LeagueBadge'
 import { Skeleton } from '@/components/ui/skeleton'
 import api from '@/lib/api'
@@ -37,6 +39,8 @@ interface MmrEvent {
   category: string
   points: number
   description: string
+  model_name: string | null
+  shift_name: string | null
 }
 
 interface HistoryPoint { date: string; mmr: number }
@@ -85,7 +89,6 @@ function RankBadge({ rank }: { rank: number }) {
 function HeroCard({ data }: { data: MmrMain }) {
   const progressPct = data.next_league && data.mmr_to_next != null
     ? (() => {
-        // find current league threshold to compute filled %
         const thresholds = [0,100,200,300,450,600,800,1000,1250,1500,1800,2100,2500,3000,3500,4500,6000]
         const currentThreshold = thresholds.filter(t => t <= data.current_mmr).at(-1) ?? 0
         const nextThreshold = currentThreshold + data.mmr_to_next
@@ -97,7 +100,6 @@ function HeroCard({ data }: { data: MmrMain }) {
   return (
     <div className="bg-gradient-to-br from-violet-500/10 via-slate-800/60 to-slate-800/40 border border-violet-500/20 rounded-2xl p-6">
       <div className="flex items-start justify-between gap-4 flex-wrap">
-        {/* League + MMR */}
         <div>
           <div className="mb-2">
             <LeagueBadge league={data.current_league} className="text-sm px-3 py-1" />
@@ -108,16 +110,12 @@ function HeroCard({ data }: { data: MmrMain }) {
           </div>
           <p className="text-xs text-slate-500 mt-1">Пик: {data.peak_mmr} MMR</p>
         </div>
-
-        {/* Rank */}
         <div className="text-right">
           <p className="text-xs text-slate-500 mb-1">Место в агентстве</p>
           <p className="text-3xl font-bold text-violet-300">{data.rank}</p>
           <p className="text-xs text-slate-500">из {data.total_chatters}</p>
         </div>
       </div>
-
-      {/* Progress / Calibration */}
       <div className="mt-5">
         {!data.calibration_complete ? (
           <div>
@@ -188,6 +186,29 @@ function SeasonCard({ data }: { data: MmrMain }) {
 
 // ── Section: MMR history chart ────────────────────────────────────────────
 
+// Custom active dot — shown on hover
+function ActiveDot(props: { cx?: number; cy?: number; [key: string]: unknown }) {
+  const { cx, cy } = props
+  return (
+    <circle
+      cx={cx} cy={cy} r={5}
+      fill="#8b5cf6" stroke="#1e293b" strokeWidth={2}
+    />
+  )
+}
+
+// Regular dot — small circle on every data point
+function RegularDot(props: { cx?: number; cy?: number; [key: string]: unknown }) {
+  const { cx, cy } = props
+  return (
+    <circle
+      cx={cx} cy={cy} r={3}
+      fill="#8b5cf6" stroke="#1e293b" strokeWidth={1.5}
+      opacity={0.7}
+    />
+  )
+}
+
 function MmrChart() {
   const { data, isLoading } = useQuery<{ history: HistoryPoint[] }>({
     queryKey: ['portal-mmr-history'],
@@ -222,9 +243,18 @@ function MmrChart() {
           <Tooltip
             contentStyle={{ background: '#1e293b', border: '1px solid #334155', borderRadius: 8 }}
             labelStyle={{ color: '#94a3b8', fontSize: 12 }}
-            formatter={(v) => [`${Number(v)} MMR`, '']}
+            labelFormatter={(label: string) => label}
+            formatter={(v) => [`${Number(v)} MMR`, 'MMR']}
           />
-          <Area type="monotone" dataKey="mmr" stroke="#8b5cf6" strokeWidth={2} fill="url(#mmrGrad)" dot={false} />
+          <Area
+            type="monotone"
+            dataKey="mmr"
+            stroke="#8b5cf6"
+            strokeWidth={2}
+            fill="url(#mmrGrad)"
+            dot={<RegularDot />}
+            activeDot={<ActiveDot />}
+          />
         </AreaChart>
       </ResponsiveContainer>
     </div>
@@ -242,58 +272,164 @@ const CATEGORY_CONFIG: Record<string, { label: string; color: string }> = {
   season_carry: { label: 'Перенос MMR',    color: 'text-violet-400' },
 }
 
+const TYPE_FILTERS = [
+  { key: '', label: 'Все' },
+  { key: 'finance', label: 'Финансы' },
+  { key: 'kpi', label: 'KPI' },
+] as const
+
 function EventsFeed() {
-  const { data, isLoading } = useQuery<{ events: MmrEvent[] }>({
-    queryKey: ['portal-mmr-events'],
-    queryFn: () => api.get('/api/v1/me/mmr/events').then(r => r.data),
+  const [typeFilter, setTypeFilter] = useState<'' | 'finance' | 'kpi'>('')
+  const [offset, setOffset] = useState(0)
+  const PAGE = 30
+
+  const buildUrl = (off: number) => {
+    const base = `/api/v1/me/mmr/events?limit=${PAGE}&offset=${off}`
+    return typeFilter ? `${base}&event_type=${typeFilter}` : base
+  }
+
+  // Load pages accumulative — store all events
+  const [allEvents, setAllEvents] = useState<MmrEvent[]>([])
+  const [hasMore, setHasMore] = useState(true)
+
+  const { isLoading, isFetching } = useQuery<{ events: MmrEvent[]; offset: number; limit: number }>({
+    queryKey: ['portal-mmr-events', typeFilter, offset],
+    queryFn: () => api.get(buildUrl(offset)).then(r => r.data),
+    onSuccess: (res) => {
+      if (offset === 0) {
+        setAllEvents(res.events)
+      } else {
+        setAllEvents(prev => [...prev, ...res.events])
+      }
+      setHasMore(res.events.length === PAGE)
+    },
   })
-  const events = data?.events ?? []
+
+  // Reset when filter changes
+  const handleFilter = (f: '' | 'finance' | 'kpi') => {
+    setTypeFilter(f)
+    setOffset(0)
+    setAllEvents([])
+    setHasMore(true)
+  }
+
+  const loadMore = () => setOffset(prev => prev + PAGE)
 
   return (
     <div className="bg-slate-800/60 border border-slate-700/50 rounded-xl overflow-hidden">
-      <div className="px-5 py-3 border-b border-slate-700/40">
+      {/* Header + filter tabs */}
+      <div className="px-5 py-3 border-b border-slate-700/40 flex items-center justify-between gap-3 flex-wrap">
         <p className="text-sm font-semibold text-slate-300">Лента событий</p>
-      </div>
-      {isLoading ? (
-        <div className="p-4 space-y-3">
-          {[1,2,3].map(i => <Skeleton key={i} className="h-10 w-full" />)}
+        <div className="flex gap-1">
+          {TYPE_FILTERS.map(f => (
+            <button
+              key={f.key}
+              onClick={() => handleFilter(f.key)}
+              className={cn(
+                'px-3 py-1 rounded-full text-xs font-medium transition-colors',
+                typeFilter === f.key
+                  ? 'bg-violet-500/20 text-violet-300 border border-violet-500/30'
+                  : 'text-slate-500 hover:text-slate-300 hover:bg-slate-700/40',
+              )}
+            >
+              {f.label}
+            </button>
+          ))}
         </div>
-      ) : events.length === 0 ? (
+      </div>
+
+      {isLoading && offset === 0 ? (
+        <div className="p-4 space-y-3">
+          {[1,2,3].map(i => <Skeleton key={i} className="h-12 w-full" />)}
+        </div>
+      ) : allEvents.length === 0 ? (
         <p className="text-slate-500 text-sm p-5">Событий пока нет</p>
       ) : (
-        <div className="divide-y divide-slate-700/30">
-          {events.map((ev, i) => {
-            const cfg = CATEGORY_CONFIG[ev.category] ?? { label: ev.category, color: 'text-slate-400' }
-            const positive = ev.points > 0
-            return (
-              <div key={i} className="flex items-center gap-3 px-5 py-3 hover:bg-slate-700/20">
-                <div className={cn('p-1.5 rounded-lg', positive ? 'bg-emerald-500/10' : 'bg-red-500/10')}>
-                  {positive
-                    ? <TrendingUp className="h-3.5 w-3.5 text-emerald-400" />
-                    : <TrendingDown className="h-3.5 w-3.5 text-red-400" />}
-                </div>
-                <div className="flex-1 min-w-0">
-                  <div className="flex items-center gap-2">
-                    <span className={cn('text-xs font-medium', cfg.color)}>{cfg.label}</span>
-                    <span className="text-xs text-slate-600">·</span>
-                    <span className="text-xs text-slate-500">
-                      {ev.event_type === 'finance' ? 'Финансы' : ev.event_type === 'kpi' ? 'KPI' : ev.event_type}
-                    </span>
+        <>
+          <div className="divide-y divide-slate-700/30">
+            {allEvents.map((ev, i) => {
+              const cfg = CATEGORY_CONFIG[ev.category] ?? { label: ev.category, color: 'text-slate-400' }
+              const positive = ev.points > 0
+              const typeBadge = ev.event_type === 'finance' ? 'Финансы'
+                : ev.event_type === 'kpi' ? 'KPI'
+                : ev.event_type
+              const dateStr = ev.event_date.slice(5).replace('-', '.')
+
+              return (
+                <div key={i} className="flex items-start gap-3 px-5 py-3 hover:bg-slate-700/20">
+                  {/* Trend icon */}
+                  <div className={cn(
+                    'mt-0.5 p-1.5 rounded-lg shrink-0',
+                    positive ? 'bg-emerald-500/10' : 'bg-red-500/10',
+                  )}>
+                    {positive
+                      ? <TrendingUp className="h-3.5 w-3.5 text-emerald-400" />
+                      : <TrendingDown className="h-3.5 w-3.5 text-red-400" />}
                   </div>
-                  {ev.description && (
-                    <p className="text-xs text-slate-500 truncate mt-0.5">{ev.description}</p>
-                  )}
+
+                  {/* Main content */}
+                  <div className="flex-1 min-w-0">
+                    {/* Row 1: date · type badge · category */}
+                    <div className="flex items-center gap-1.5 flex-wrap">
+                      <span className="text-xs text-slate-500 shrink-0">{dateStr}</span>
+                      <span className="text-xs text-slate-600">·</span>
+                      <span className={cn(
+                        'text-xs font-semibold px-1.5 py-0.5 rounded',
+                        ev.event_type === 'finance'
+                          ? 'bg-sky-500/10 text-sky-400'
+                          : 'bg-purple-500/10 text-purple-400',
+                      )}>
+                        {typeBadge}
+                      </span>
+                      <span className="text-xs text-slate-600">·</span>
+                      <span className={cn('text-xs font-medium', cfg.color)}>{cfg.label}</span>
+                    </div>
+
+                    {/* Row 2: model · shift (if present) */}
+                    {(ev.model_name || ev.shift_name) && (
+                      <div className="flex items-center gap-1 mt-0.5">
+                        {ev.model_name && (
+                          <span className="text-xs text-slate-400 font-medium">{ev.model_name}</span>
+                        )}
+                        {ev.model_name && ev.shift_name && (
+                          <span className="text-xs text-slate-600">·</span>
+                        )}
+                        {ev.shift_name && (
+                          <span className="text-xs text-slate-500">{ev.shift_name}</span>
+                        )}
+                      </div>
+                    )}
+
+                    {/* Row 3: description */}
+                    {ev.description && (
+                      <p className="text-xs text-slate-500 mt-0.5 truncate">{ev.description}</p>
+                    )}
+                  </div>
+
+                  {/* Points */}
+                  <div className="text-right shrink-0 ml-2">
+                    <p className={cn('text-sm font-bold', positive ? 'text-emerald-400' : 'text-red-400')}>
+                      {positive ? '+' : ''}{ev.points}
+                    </p>
+                  </div>
                 </div>
-                <div className="text-right shrink-0">
-                  <p className={cn('text-sm font-bold', positive ? 'text-emerald-400' : 'text-red-400')}>
-                    {positive ? '+' : ''}{ev.points}
-                  </p>
-                  <p className="text-xs text-slate-600">{ev.event_date.slice(5)}</p>
-                </div>
-              </div>
-            )
-          })}
-        </div>
+              )
+            })}
+          </div>
+
+          {/* Load more */}
+          {hasMore && (
+            <div className="px-5 py-3 border-t border-slate-700/40">
+              <button
+                onClick={loadMore}
+                disabled={isFetching}
+                className="w-full text-xs text-slate-400 hover:text-violet-300 transition-colors disabled:opacity-50"
+              >
+                {isFetching ? 'Загружаем...' : 'Показать ещё'}
+              </button>
+            </div>
+          )}
+        </>
       )}
     </div>
   )
