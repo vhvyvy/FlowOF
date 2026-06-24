@@ -79,22 +79,26 @@ class MMRService:
         Обработать один день для tenant.
         Возвращает словарь со статистикой обработки.
         """
-        settings = await self._get_settings(tenant_id)
-        season = await self._get_or_create_active_season(tenant_id, target_date)
+        step = "get_settings"
+        try:
+            settings = await self._get_settings(tenant_id)
 
-        events_created = await self._process_finance(tenant_id, season, settings, target_date)
+            step = "get_or_create_season"
+            season = await self._get_or_create_active_season(tenant_id, target_date)
 
-        # KPI-часть подключается в Этапе 2:
-        # if settings.kpi_enabled:
-        #     await self._process_kpi(tenant_id, season, settings, target_date)
+            step = "process_finance"
+            events_created = await self._process_finance(tenant_id, season, settings, target_date)
 
-        await self._recalculate_mmr_state(tenant_id, season)
-        await self.db.commit()
+            step = "recalculate_mmr_state"
+            await self._recalculate_mmr_state(tenant_id, season)
 
-        logger.info(
-            "MMR обработан: tenant=%s date=%s events=%s season=%s",
-            tenant_id, target_date, events_created, season.id,
-        )
+            step = "commit"
+            await self.db.commit()
+        except Exception as exc:
+            logger.exception("MMR process_day failed at step=%s tenant=%s date=%s", step, tenant_id, target_date)
+            raise RuntimeError(f"MMR failed at step '{step}': {exc}") from exc
+
+        logger.info("MMR done: tenant=%s date=%s events=%s season=%s", tenant_id, target_date, events_created, season.id)
         return {
             "tenant_id": tenant_id,
             "date": str(target_date),
@@ -115,143 +119,131 @@ class MMRService:
         """
         Для каждой группы (chatter × shift × model) за день:
         сравниваем выручку с дневным планом и записываем MMR-событие.
-
-        Работает с обоими типами транзакций:
-        - chatter_id (FK) проставлен → прямой lookup
-        - chatter_id NULL, но есть текстовый chatter → матчинг через JOIN на chatters
         """
-        # Удалить уже существующие finance-события за этот день (идемпотентность)
+        # Идемпотентность — удалить finance-события за этот день
         await self.db.execute(
             text(
-                """DELETE FROM mmr_events
-                   WHERE tenant_id = :tid
-                     AND season_id = :sid
-                     AND event_date = :dt
-                     AND event_type = 'finance'"""
+                "DELETE FROM mmr_events "
+                "WHERE tenant_id = :tid AND season_id = :sid "
+                "AND event_date = :dt AND event_type = 'finance'"
             ),
             {"tid": tenant_id, "sid": season.id, "dt": target_date},
         )
 
-        # Транзакции за день с разрешением chatter_id через FK или текстовый JOIN.
-        # COALESCE(t.chatter_id, c.id) покрывает оба случая:
-        #   1) chatter_id заполнен (backfill прошёл)
-        #   2) chatter_id NULL, но t.chatter (текст) матчится с chatters.name
+        # Шаг 1: агрегируем транзакции за день по (chatter_id, chatter_text, shift, model).
+        # Передаём target_date как Python date — asyncpg сопоставляет с DATE-колонкой.
         txn_result = await self.db.execute(
             text(
-                """SELECT
-                       COALESCE(t.chatter_id, c_text.id)                       AS chatter_id,
-                       t.shift_catalog_id                                        AS shift_id,
-                       t.model_id,
-                       COALESCE(mo.name, t.model, '')                           AS model_name,
-                       SUM(t.amount)                                             AS revenue
-                   FROM transactions t
-                   -- resolved chatter via FK
-                   LEFT JOIN chatters c_fk
-                          ON c_fk.id = t.chatter_id
-                         AND c_fk.tenant_id = :tid
-                   -- fallback: resolve chatter via text name
-                   LEFT JOIN chatters c_text
-                          ON c_text.tenant_id = :tid
-                         AND t.chatter_id IS NULL
-                         AND LOWER(TRIM(c_text.name)) = LOWER(TRIM(t.chatter))
-                   -- model name from catalog
-                   LEFT JOIN models mo
-                          ON mo.id = t.model_id
-                   WHERE t.tenant_id = :tid
-                     AND t.date = CAST(:dt AS date)
-                     AND COALESCE(t.chatter_id, c_text.id) IS NOT NULL
-                   GROUP BY
-                       COALESCE(t.chatter_id, c_text.id),
-                       t.shift_catalog_id,
-                       t.model_id,
-                       COALESCE(mo.name, t.model, '')"""
+                "SELECT t.chatter_id, t.chatter AS chatter_text, "
+                "       t.shift_catalog_id AS shift_id, "
+                "       t.model_id, "
+                "       COALESCE(mo.name, t.model, '') AS model_name, "
+                "       SUM(t.amount) AS revenue "
+                "FROM transactions t "
+                "LEFT JOIN models mo ON mo.id = t.model_id "
+                "WHERE t.tenant_id = :tid "
+                "  AND t.date = :dt "
+                "  AND (t.chatter_id IS NOT NULL OR (t.chatter IS NOT NULL AND t.chatter <> '')) "
+                "GROUP BY t.chatter_id, t.chatter, t.shift_catalog_id, t.model_id, mo.name, t.model"
             ),
-            {"tid": tenant_id, "dt": str(target_date)},
+            {"tid": tenant_id, "dt": target_date},
         )
-        day_groups = list(txn_result.mappings())
+        raw_groups = list(txn_result.mappings())
 
-        logger.debug(
-            "_process_finance: tenant=%s date=%s day_groups=%s",
-            tenant_id, target_date, len(day_groups),
-        )
-
-        if not day_groups:
-            logger.info(
-                "MMR finance: 0 транзакций с chatter для tenant=%s date=%s",
-                tenant_id, target_date,
-            )
+        logger.debug("_process_finance: tenant=%s date=%s raw_groups=%s", tenant_id, target_date, len(raw_groups))
+        if not raw_groups:
+            logger.info("MMR finance: 0 транзакций с chatter для tenant=%s date=%s", tenant_id, target_date)
             return 0
 
-        # Количество активных смен в агентстве (минимум 1)
-        shifts_count_result = await self.db.execute(
+        # Шаг 2: разрешить chatter_id для строк без FK (текстовый матчинг по имени).
+        # Кешируем lookups, чтобы не делать N+1 запросов.
+        chatter_text_cache: dict[str, int | None] = {}
+
+        resolved: list[dict] = []
+        for row in raw_groups:
+            cid = row["chatter_id"]
+            if cid is None:
+                ct = (row["chatter_text"] or "").strip()
+                if not ct:
+                    continue
+                if ct not in chatter_text_cache:
+                    cr = await self.db.execute(
+                        text(
+                            "SELECT id FROM chatters "
+                            "WHERE tenant_id = :tid AND LOWER(TRIM(name)) = LOWER(TRIM(:name)) "
+                            "LIMIT 1"
+                        ),
+                        {"tid": tenant_id, "name": ct},
+                    )
+                    cr_row = cr.mappings().first()
+                    chatter_text_cache[ct] = int(cr_row["id"]) if cr_row else None
+                cid = chatter_text_cache.get(ct)
+            if cid is None:
+                continue
+            resolved.append({
+                "chatter_id": int(cid),
+                "shift_id": row["shift_id"],
+                "model_id": row["model_id"],
+                "model_name": (row["model_name"] or "").strip(),
+                "revenue": float(row["revenue"] or 0),
+            })
+
+        logger.debug("_process_finance: resolved groups=%s", len(resolved))
+        if not resolved:
+            return 0
+
+        # Шаг 3: число активных смен (минимум 1)
+        sc_result = await self.db.execute(
             text("SELECT COUNT(*) FROM shifts_catalog WHERE tenant_id = :tid AND active = TRUE"),
             {"tid": tenant_id},
         )
-        shifts_count = int(shifts_count_result.scalar() or 1)
-
+        shifts_count = int(sc_result.scalar() or 1)
         days_in_month = self._days_in_month(target_date)
+
+        # Кеш планов за месяц: {lower_model_name: plan_amount}
+        plan_cache_result = await self.db.execute(
+            text(
+                "SELECT LOWER(TRIM(model)) AS model_key, plan_amount "
+                "FROM plans "
+                "WHERE tenant_id = :tid AND month = :m AND year = :y"
+            ),
+            {"tid": tenant_id, "m": target_date.month, "y": target_date.year},
+        )
+        plan_cache: dict[str, float] = {
+            r["model_key"]: float(r["plan_amount"] or 0)
+            for r in plan_cache_result.mappings()
+            if r["plan_amount"]
+        }
+
+        fin_over = float(settings.fin_overperform_threshold or 1.10)
+        fin_under = float(settings.fin_underperform_threshold or 0.90)
+
         events_created = 0
         skipped_no_plan = 0
 
-        for row in day_groups:
-            # Имя модели: из FK на models → иначе текстовое поле t.model
-            model_name: str = (row["model_name"] or "").strip()
+        for row in resolved:
+            model_name = row["model_name"]
             if not model_name:
-                logger.debug("MMR: пропуск — нет имени модели для chatter=%s", row["chatter_id"])
                 continue
 
-            revenue = float(row["revenue"] or 0)
-
-            # Ищем план по имени модели.
-            # plans.model — текстовый столбец с именем анкеты.
-            # model_name получен через: COALESCE(models.name, t.model)
-            # то есть: если есть FK model_id → берём имя из catalog; иначе текст из транзакции.
-            plan_result = await self.db.execute(
-                text(
-                    """SELECT plan_amount FROM plans
-                       WHERE tenant_id = :tid
-                         AND month     = :m
-                         AND year      = :y
-                         AND LOWER(TRIM(model)) = LOWER(TRIM(:mname))
-                       LIMIT 1"""
-                ),
-                {
-                    "tid": tenant_id,
-                    "m": target_date.month,
-                    "y": target_date.year,
-                    "mname": model_name,
-                },
-            )
-            plan_row = plan_result.mappings().first()
-
-            if not plan_row or not plan_row["plan_amount"]:
+            plan_amount = plan_cache.get(model_name.lower())
+            if not plan_amount:
                 skipped_no_plan += 1
-                logger.debug(
-                    "MMR: нет плана для модели '%s' tenant=%s %s/%s",
-                    model_name, tenant_id, target_date.month, target_date.year,
-                )
+                logger.debug("MMR: нет плана для '%s' tenant=%s %s/%s", model_name, tenant_id, target_date.month, target_date.year)
                 continue
 
-            monthly_plan = float(plan_row["plan_amount"])
-            daily_plan = monthly_plan / shifts_count / days_in_month
+            revenue = row["revenue"]
+            daily_plan = plan_amount / shifts_count / days_in_month
             performance = revenue / daily_plan if daily_plan > 0 else 0.0
 
-            fin_over = float(settings.fin_overperform_threshold or 1.10)
-            fin_under = float(settings.fin_underperform_threshold or 0.90)
-
             if performance >= fin_over:
-                category = "overperform"
-                points = int(settings.fin_overperform_points or 25)
+                category, points = "overperform", int(settings.fin_overperform_points or 25)
             elif performance >= fin_under:
-                category = "perform"
-                points = int(settings.fin_perform_points or 15)
+                category, points = "perform", int(settings.fin_perform_points or 15)
             else:
-                category = "underperform"
-                points = int(settings.fin_underperform_points or -15)
+                category, points = "underperform", int(settings.fin_underperform_points or -15)
 
-            description = (
-                f"План ${daily_plan:.0f}, выручка ${revenue:.0f} ({performance * 100:.0f}%)"
-            )
+            description = f"Plan ${daily_plan:.0f}, revenue ${revenue:.0f} ({performance * 100:.0f}%)"
 
             await self._create_event(
                 tenant_id=tenant_id,
@@ -267,10 +259,7 @@ class MMRService:
             )
             events_created += 1
 
-        logger.info(
-            "MMR finance: tenant=%s date=%s created=%s skipped_no_plan=%s",
-            tenant_id, target_date, events_created, skipped_no_plan,
-        )
+        logger.info("MMR finance done: tenant=%s date=%s created=%s skipped_no_plan=%s", tenant_id, target_date, events_created, skipped_no_plan)
         return events_created
 
     # ── Пересчёт состояния ────────────────────────────────────────────────────
@@ -368,13 +357,12 @@ class MMRService:
         """Найти активный сезон охватывающий target_date или создать новый квартал."""
         result = await self.db.execute(
             text(
-                """SELECT * FROM mmr_seasons
-                   WHERE tenant_id = :tid
-                     AND is_active = TRUE
-                     AND CAST(:dt AS date) BETWEEN start_date AND end_date
-                   LIMIT 1"""
+                "SELECT * FROM mmr_seasons "
+                "WHERE tenant_id = :tid AND is_active = TRUE "
+                "  AND :dt BETWEEN start_date AND end_date "
+                "LIMIT 1"
             ),
-            {"tid": tenant_id, "dt": str(target_date)},
+            {"tid": tenant_id, "dt": target_date},
         )
         row = result.mappings().first()
         if row is not None:
@@ -383,23 +371,20 @@ class MMRService:
         quarter_start, quarter_end, name = self._quarter_bounds(target_date)
         await self.db.execute(
             text(
-                """INSERT INTO mmr_seasons (tenant_id, name, start_date, end_date)
-                   VALUES (:tid, :name, :start, :end)
-                   ON CONFLICT DO NOTHING"""
+                "INSERT INTO mmr_seasons (tenant_id, name, start_date, end_date) "
+                "VALUES (:tid, :name, :start, :end)"
             ),
-            {"tid": tenant_id, "name": name, "start": str(quarter_start), "end": str(quarter_end)},
+            {"tid": tenant_id, "name": name, "start": quarter_start, "end": quarter_end},
         )
         await self.db.flush()
-        # Re-fetch instead of RETURNING * to avoid cursor issues
         result2 = await self.db.execute(
             text(
-                """SELECT * FROM mmr_seasons
-                   WHERE tenant_id = :tid
-                     AND is_active = TRUE
-                     AND CAST(:dt AS date) BETWEEN start_date AND end_date
-                   LIMIT 1"""
+                "SELECT * FROM mmr_seasons "
+                "WHERE tenant_id = :tid AND is_active = TRUE "
+                "  AND :dt BETWEEN start_date AND end_date "
+                "LIMIT 1"
             ),
-            {"tid": tenant_id, "dt": str(target_date)},
+            {"tid": tenant_id, "dt": target_date},
         )
         row2 = result2.mappings().first()
         if row2 is None:
