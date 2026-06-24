@@ -18,6 +18,7 @@ import {
   CalendarDays,
   BookOpen,
   NotebookPen,
+  Trophy,
 } from 'lucide-react'
 import { useState } from 'react'
 import { cn } from '@/lib/utils'
@@ -35,6 +36,7 @@ const NAV_ITEMS = [
   { href: '/dashboard/plans', label: 'Планы', icon: ClipboardList },
   { href: '/dashboard/entries', label: 'Учёт', icon: NotebookPen },
   { href: '/dashboard/catalog', label: 'Справочники', icon: BookOpen },
+  { href: '/dashboard/ranking', label: 'Рейтинг', icon: Trophy },
   { href: '/dashboard/lab', label: 'Лаборатория', icon: FlaskConical },
   { href: '/dashboard/ai', label: 'AI Аналитик', icon: Sparkles },
   { href: '/dashboard/settings', label: 'Настройки', icon: Settings },
