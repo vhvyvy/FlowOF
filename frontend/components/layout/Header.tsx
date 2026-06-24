@@ -14,9 +14,10 @@ import type { TeamOut } from '@/types'
 
 interface HeaderProps {
   title: string
+  actions?: React.ReactNode
 }
 
-export function Header({ title }: HeaderProps) {
+export function Header({ title, actions }: HeaderProps) {
   const { month, year, setMonth } = useMonthStore()
   const { teamId, setTeamId } = useTeamStore()
   const { data: summary } = useMonthsSummary(teamId)
@@ -62,6 +63,7 @@ export function Header({ title }: HeaderProps) {
     <header className="flex items-center justify-between px-6 py-4 border-b border-slate-700/50 bg-slate-900">
       <h1 className="text-lg font-semibold text-slate-100">{title}</h1>
       <div className="flex items-center gap-3 flex-wrap justify-end">
+        {actions}
         {teams && teams.length > 0 && (
           <label className="flex items-center gap-2 text-xs text-slate-500">
             <span className="hidden sm:inline">Команда</span>

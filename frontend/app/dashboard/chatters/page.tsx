@@ -10,7 +10,8 @@ import { useMonthStore } from '@/lib/hooks/useMonth'
 import { useTeamStore } from '@/lib/hooks/useTeam'
 import { formatCurrency } from '@/lib/utils'
 import type { ChatterStatus, ChatterModelBreakdown } from '@/types'
-import { DollarSign, Users, Target, TrendingUp, X, AlertCircle } from 'lucide-react'
+import { DollarSign, Users, Target, TrendingUp, X, AlertCircle, Download } from 'lucide-react'
+import { resolveApiBaseURL } from '@/lib/api'
 
 const STATUS_BADGE: Record<ChatterStatus, { label: string; variant: 'success' | 'default' | 'warning' | 'danger' }> = {
   top:  { label: 'Топ',    variant: 'success' },
@@ -157,6 +158,30 @@ export default function ChattersPage() {
   const { data, isLoading, error } = useChatters(month, year, teamId)
 
   const [openPopover, setOpenPopover] = useState<string | null>(null)
+  const [exporting, setExporting] = useState(false)
+
+  async function handleExport() {
+    setExporting(true)
+    try {
+      const base = resolveApiBaseURL()
+      const token = typeof window !== 'undefined' ? localStorage.getItem('token') : null
+      const url = `${base}/api/v1/export/chatters?month=${month}&year=${year}`
+      const res = await fetch(url, {
+        headers: token ? { Authorization: `Bearer ${token}` } : {},
+      })
+      if (!res.ok) throw new Error('Ошибка сервера')
+      const blob = await res.blob()
+      const a = document.createElement('a')
+      a.href = URL.createObjectURL(blob)
+      a.download = `chatters_${year}_${String(month).padStart(2, '0')}.csv`
+      a.click()
+      URL.revokeObjectURL(a.href)
+    } catch (e) {
+      console.error(e)
+    } finally {
+      setExporting(false)
+    }
+  }
   const btnRefs = useRef<Record<string, HTMLButtonElement | null>>({})
   const anchorRef = useRef<HTMLElement | null>(null)
 
@@ -171,7 +196,16 @@ export default function ChattersPage() {
 
   return (
     <div className="flex flex-col h-full">
-      <Header title="Чаттеры" />
+      <Header title="Чаттеры" actions={
+        <button
+          onClick={handleExport}
+          disabled={exporting || isLoading}
+          className="flex items-center gap-1.5 px-3 py-1.5 bg-slate-700/60 hover:bg-slate-700 disabled:opacity-50 border border-slate-600/50 text-slate-300 text-sm rounded-lg transition-colors"
+        >
+          <Download className="h-4 w-4" />
+          {exporting ? 'Экспорт...' : 'Экспорт CSV'}
+        </button>
+      } />
 
       <div className="flex-1 p-6 space-y-6 overflow-y-auto">
         {error && (
