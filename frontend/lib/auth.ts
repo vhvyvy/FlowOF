@@ -7,13 +7,24 @@ import type {
   OnboardingStatus,
 } from '@/types'
 
+function setCookie(name: string, value: string, days = 30) {
+  if (typeof document === 'undefined') return
+  const expires = new Date(Date.now() + days * 864e5).toUTCString()
+  document.cookie = `${name}=${encodeURIComponent(value)}; path=/; expires=${expires}; SameSite=Lax`
+}
+
+function deleteCookie(name: string) {
+  if (typeof document === 'undefined') return
+  document.cookie = `${name}=; path=/; expires=Thu, 01 Jan 1970 00:00:00 GMT`
+}
+
 export async function login(data: LoginRequest): Promise<TokenResponse> {
   const res = await api.post<TokenResponse>('/auth/login', data)
   if (typeof window !== 'undefined') {
     localStorage.setItem('token', res.data.access_token)
-    if (res.data.role) {
-      localStorage.setItem('user_role', res.data.role)
-    }
+    const role = res.data.role ?? 'owner'
+    localStorage.setItem('user_role', role)
+    setCookie('user_role', role)
   }
   return res.data
 }
@@ -42,7 +53,9 @@ export async function register(data: {
   const res = await api.post<RegisterResponse>('/auth/register', data)
   if (typeof window !== 'undefined') {
     localStorage.setItem('token', res.data.access_token)
-    localStorage.setItem('user_role', res.data.role ?? 'owner')
+    const role = res.data.role ?? 'owner'
+    localStorage.setItem('user_role', role)
+    setCookie('user_role', role)
   }
   return res.data
 }
@@ -56,6 +69,7 @@ export function logout(): void {
   if (typeof window !== 'undefined') {
     localStorage.removeItem('token')
     localStorage.removeItem('user_role')
+    deleteCookie('user_role')
     window.location.href = '/login'
   }
 }

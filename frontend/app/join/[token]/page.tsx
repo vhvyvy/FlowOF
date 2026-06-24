@@ -68,8 +68,12 @@ export default function JoinPage() {
       }
       // Сохраняем токен и редиректим в портал
       if (typeof window !== 'undefined') {
+        const role = data.role ?? 'chatter'
         localStorage.setItem('token', data.access_token)
-        localStorage.setItem('user_role', data.role ?? 'chatter')
+        localStorage.setItem('user_role', role)
+        // Устанавливаем cookie для middleware
+        const expires = new Date(Date.now() + 30 * 864e5).toUTCString()
+        document.cookie = `user_role=${encodeURIComponent(role)}; path=/; expires=${expires}; SameSite=Lax`
       }
       router.replace('/portal')
     } catch {

@@ -514,3 +514,2212 @@ finance → chatters → kpi → lab → ai
 - [ ] JWT авторизация — СТРОИМ
 - [ ] Мультитенантность — СТРОИМ
 - [ ] Vercel + Railway деплой — ПОСЛЕ
+# FlowOF — Google Sheets импорт через AI
+# Добавь в .cursorrules или используй как отдельное задание для Cursor
+
+---
+
+## Задача
+
+Реализовать полный рабочий флоу импорта данных из Google Sheets через AI (GPT-4o).
+Никакого ручного маппинга — нейронка сама разбирается в структуре таблицы.
+
+---
+
+## Полный флоу
+
+```
+1. Пользователь нажимает "Google Таблицы" в онбординге
+2. Google OAuth → получаем access_token
+3. Показываем список его таблиц → он выбирает нужную
+4. Скачиваем таблицу как CSV
+5. Отправляем GPT-4o → получаем нормализованный JSON
+6. Показываем превью (первые 10 строк)
+7. Пользователь подтверждает → INSERT в БД
+8. Сохраняем источник для автосинка
+```
+
+---
+
+## Backend
+
+### 1. Google OAuth — routers/auth_google.py (новый файл)
+
+```python
+from fastapi import APIRouter, Depends, HTTPException
+from fastapi.responses import RedirectResponse
+import httpx
+import os
+from dependencies import get_current_tenant, get_db
+from models import Tenant, TenantSource
+from sqlalchemy.ext.asyncio import AsyncSession
+
+router = APIRouter(prefix="/api/v1/google", tags=["google"])
+
+GOOGLE_CLIENT_ID = os.getenv("GOOGLE_CLIENT_ID")
+GOOGLE_CLIENT_SECRET = os.getenv("GOOGLE_CLIENT_SECRET")
+GOOGLE_REDIRECT_URI = os.getenv("GOOGLE_REDIRECT_URI")  # https://api.flowof.io/api/v1/google/callback
+
+SCOPES = "https://www.googleapis.com/auth/spreadsheets.readonly https://www.googleapis.com/auth/drive.readonly"
+
+@router.get("/auth-url")
+async def get_google_auth_url(tenant: Tenant = Depends(get_current_tenant)):
+    """Вернуть URL для Google OAuth."""
+    url = (
+        "https://accounts.google.com/o/oauth2/v2/auth"
+        f"?client_id={GOOGLE_CLIENT_ID}"
+        f"&redirect_uri={GOOGLE_REDIRECT_URI}"
+        f"&response_type=code"
+        f"&scope={SCOPES}"
+        f"&access_type=offline"
+        f"&prompt=consent"
+        f"&state={tenant.id}"  # передаём tenant_id чтобы знать кому сохранить токен
+    )
+    return {"url": url}
+
+@router.get("/callback")
+async def google_callback(
+    code: str,
+    state: str,  # tenant_id
+    db: AsyncSession = Depends(get_db)
+):
+    """Google редиректит сюда после авторизации."""
+    # Обменять code на токены
+    async with httpx.AsyncClient() as client:
+        response = await client.post(
+            "https://oauth2.googleapis.com/token",
+            data={
+                "code": code,
+                "client_id": GOOGLE_CLIENT_ID,
+                "client_secret": GOOGLE_CLIENT_SECRET,
+                "redirect_uri": GOOGLE_REDIRECT_URI,
+                "grant_type": "authorization_code"
+            }
+        )
+
+    tokens = response.json()
+    if "error" in tokens:
+        raise HTTPException(status_code=400, detail=tokens["error"])
+
+    access_token = tokens["access_token"]
+    refresh_token = tokens.get("refresh_token")
+    tenant_id = int(state)
+
+    # Сохранить токены в tenant_sources
+    source = TenantSource(
+        tenant_id=tenant_id,
+        source_type="google_sheets",
+        credentials={
+            "access_token": access_token,
+            "refresh_token": refresh_token
+        },
+        active=False  # станет True после выбора таблицы
+    )
+    db.add(source)
+    await db.commit()
+
+    # Редиректим обратно на фронтенд с флагом успеха
+    frontend_url = os.getenv("FRONTEND_URL", "https://flowof.io")
+    return RedirectResponse(f"{frontend_url}/onboarding?google_connected=true")
+
+
+@router.get("/spreadsheets")
+async def list_spreadsheets(tenant: Tenant = Depends(get_current_tenant)):
+    """Получить список Google Sheets пользователя."""
+    access_token = await get_google_token(tenant.id)
+
+    async with httpx.AsyncClient() as client:
+        response = await client.get(
+            "https://www.googleapis.com/drive/v3/files",
+            headers={"Authorization": f"Bearer {access_token}"},
+            params={
+                "q": "mimeType='application/vnd.google-apps.spreadsheet'",
+                "fields": "files(id,name,modifiedTime)",
+                "orderBy": "modifiedTime desc",
+                "pageSize": 20
+            }
+        )
+
+    files = response.json().get("files", [])
+    return {"spreadsheets": files}
+
+
+@router.get("/sheets/{spreadsheet_id}")
+async def list_sheets(
+    spreadsheet_id: str,
+    tenant: Tenant = Depends(get_current_tenant)
+):
+    """Получить список листов внутри таблицы."""
+    access_token = await get_google_token(tenant.id)
+
+    async with httpx.AsyncClient() as client:
+        response = await client.get(
+            f"https://sheets.googleapis.com/v4/spreadsheets/{spreadsheet_id}",
+            headers={"Authorization": f"Bearer {access_token}"},
+            params={"fields": "sheets.properties"}
+        )
+
+    sheets = response.json().get("sheets", [])
+    return {
+        "sheets": [
+            {"id": s["properties"]["sheetId"], "name": s["properties"]["title"]}
+            for s in sheets
+        ]
+    }
+```
+
+### 2. AI импорт — routers/import_data.py (обновить)
+
+```python
+from fastapi import APIRouter, Depends, HTTPException, UploadFile, File
+from sqlalchemy.ext.asyncio import AsyncSession
+from dependencies import get_current_tenant, get_db
+from models import Tenant
+from services.ai_importer import AIImporter
+from services.google_sheets_service import GoogleSheetsService
+import pandas as pd
+import io
+
+router = APIRouter(prefix="/api/v1/import", tags=["import"])
+
+
+@router.post("/google-sheets/preview")
+async def preview_google_sheets(
+    spreadsheet_id: str,
+    sheet_name: str,
+    tenant: Tenant = Depends(get_current_tenant),
+    db: AsyncSession = Depends(get_db)
+):
+    """
+    Скачать Google Sheet, прогнать через AI, вернуть превью.
+    """
+    try:
+        # 1. Получить токен
+        access_token = await get_google_token(tenant.id, db)
+
+        # 2. Скачать таблицу как CSV
+        sheets_service = GoogleSheetsService(access_token)
+        csv_content = await sheets_service.download_as_csv(spreadsheet_id, sheet_name)
+
+        # 3. Прогнать через AI
+        importer = AIImporter(openai_key=tenant.openai_key or os.getenv("OPENAI_API_KEY"))
+        result = await importer.process(csv_content)
+
+        # 4. Сохранить конфиг источника
+        await save_source_config(tenant.id, spreadsheet_id, sheet_name, db)
+
+        return {
+            "preview": result["rows"][:10],        # первые 10 строк
+            "total_rows": result["total"],
+            "columns_detected": result["original_columns"],
+            "mapping_used": result["mapping"],
+            "warnings": result["warnings"]          # строки которые не распознались
+        }
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Ошибка импорта: {str(e)}")
+
+
+@router.post("/google-sheets/confirm")
+async def confirm_google_sheets_import(
+    spreadsheet_id: str,
+    sheet_name: str,
+    tenant: Tenant = Depends(get_current_tenant),
+    db: AsyncSession = Depends(get_db)
+):
+    """
+    Подтвердить импорт — загрузить все данные в БД.
+    """
+    access_token = await get_google_token(tenant.id, db)
+    sheets_service = GoogleSheetsService(access_token)
+    csv_content = await sheets_service.download_as_csv(spreadsheet_id, sheet_name)
+
+    importer = AIImporter(openai_key=tenant.openai_key or os.getenv("OPENAI_API_KEY"))
+    result = await importer.process(csv_content)
+
+    # INSERT в БД
+    imported = 0
+    skipped = 0
+    for row in result["rows"]:
+        try:
+            await db.execute(
+                """
+                INSERT INTO transactions (tenant_id, date, model, chatter, amount, shift_id)
+                VALUES (:tenant_id, :date, :model, :chatter, :amount, :shift_id)
+                ON CONFLICT DO NOTHING
+                """,
+                {
+                    "tenant_id": tenant.id,
+                    "date": row.get("date"),
+                    "model": row.get("model"),
+                    "chatter": row.get("chatter"),
+                    "amount": row.get("amount"),
+                    "shift_id": row.get("shift_id")
+                }
+            )
+            imported += 1
+        except Exception:
+            skipped += 1
+
+    # Активировать источник + отметить онбординг завершён
+    await db.execute(
+        "UPDATE tenant_sources SET active = true WHERE tenant_id = :tid AND source_type = 'google_sheets'",
+        {"tid": tenant.id}
+    )
+    await db.execute(
+        "UPDATE tenants SET onboarding_completed = true, last_sync_at = NOW() WHERE id = :tid",
+        {"tid": tenant.id}
+    )
+    await db.commit()
+
+    return {
+        "success": True,
+        "rows_imported": imported,
+        "rows_skipped": skipped
+    }
+```
+
+### 3. AI Importer — services/ai_importer.py (новый файл)
+
+```python
+from openai import AsyncOpenAI
+import json
+import pandas as pd
+import io
+import logging
+
+logger = logging.getLogger(__name__)
+
+class AIImporter:
+    """
+    Принимает CSV любой структуры.
+    Использует GPT-4o чтобы привести к стандарту FlowOF.
+    """
+
+    SCHEMA = {
+        "date": "дата транзакции или смены (YYYY-MM-DD)",
+        "model": "имя или ник модели/исполнителя",
+        "chatter": "имя или ник чаттера/менеджера",
+        "amount": "сумма выручки в деньгах (число без символов валюты)",
+        "shift_id": "номер или ID смены (опционально, может отсутствовать)"
+    }
+
+    def __init__(self, openai_key: str):
+        self.client = AsyncOpenAI(api_key=openai_key)
+
+    async def process(self, csv_content: str) -> dict:
+        """
+        Основной метод.
+        Принимает CSV строку, возвращает нормализованные данные.
+        """
+        # Прочитать CSV чтобы узнать колонки и количество строк
+        df = pd.read_csv(io.StringIO(csv_content))
+        original_columns = df.columns.tolist()
+        total_rows = len(df)
+
+        logger.info(f"AIImporter: {total_rows} строк, колонки: {original_columns}")
+
+        # Если таблица большая — обрабатываем батчами по 200 строк
+        if total_rows > 200:
+            rows = await self._process_in_batches(df)
+        else:
+            rows = await self._process_chunk(csv_content)
+
+        # Определить маппинг (для отображения пользователю)
+        mapping = await self._detect_mapping(original_columns)
+
+        return {
+            "rows": rows,
+            "total": len(rows),
+            "original_columns": original_columns,
+            "mapping": mapping,
+            "warnings": self._find_warnings(rows, total_rows)
+        }
+
+    async def _process_chunk(self, csv_content: str) -> list[dict]:
+        """Обработать один кусок CSV через GPT-4o."""
+
+        # Ограничим размер чтобы не превышать контекст
+        lines = csv_content.split('\n')
+        if len(lines) > 300:
+            csv_content = '\n'.join(lines[:300])
+
+        prompt = f"""Ты помощник по импорту данных для FlowOF — системы аналитики OF-агентств.
+
+Вот CSV таблица агентства:
+```
+{csv_content}
+```
+
+Наша стандартная схема транзакций:
+{json.dumps(self.SCHEMA, ensure_ascii=False, indent=2)}
+
+Задача:
+1. Найди колонки которые соответствуют нашей схеме (названия могут быть на любом языке)
+2. Преобразуй КАЖДУЮ строку данных в наш формат
+3. Очисти суммы: убери $, руб, €, пробелы, запятые → оставь только число (например "1 500,50 $" → 1500.50)
+4. Нормализуй даты → формат YYYY-MM-DD (например "01.04.2026" → "2026-04-01")
+5. Если строка не содержит транзакцию (итоги, заголовки, пустые) — пропусти её
+6. Верни ТОЛЬКО валидный JSON массив без пояснений, markdown и текста:
+
+[
+  {{"date": "2026-04-01", "model": "Anna", "chatter": "Max", "amount": 150.0, "shift_id": "1"}},
+  ...
+]
+
+Если поле не найдено в таблице — ставь null.
+Не придумывай данные которых нет в таблице."""
+
+        response = await self.client.chat.completions.create(
+            model="gpt-4o",
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0,  # максимальная точность
+            response_format={"type": "json_object"}
+        )
+
+        content = response.choices[0].message.content
+
+        # GPT иногда возвращает {"data": [...]} вместо [...]
+        parsed = json.loads(content)
+        if isinstance(parsed, list):
+            return parsed
+        if isinstance(parsed, dict):
+            # найти первый список в ответе
+            for value in parsed.values():
+                if isinstance(value, list):
+                    return value
+
+        return []
+
+    async def _process_in_batches(self, df: pd.DataFrame) -> list[dict]:
+        """Обработать большую таблицу батчами."""
+        all_rows = []
+        batch_size = 150
+        header = df.columns.tolist()
+
+        for i in range(0, len(df), batch_size):
+            batch_df = df.iloc[i:i + batch_size]
+            batch_csv = batch_df.to_csv(index=False)
+            batch_rows = await self._process_chunk(batch_csv)
+            all_rows.extend(batch_rows)
+            logger.info(f"Батч {i//batch_size + 1}: получено {len(batch_rows)} строк")
+
+        return all_rows
+
+    async def _detect_mapping(self, columns: list[str]) -> dict:
+        """Определить маппинг колонок для отображения пользователю."""
+        prompt = f"""Колонки таблицы: {columns}
+
+Наша схема: date, model, chatter, amount, shift_id
+
+Верни JSON маппинг (колонка_пользователя → наше_поле):
+{{"Дата выхода": "date", "Ник модели": "model", ...}}
+
+Только те колонки которые явно соответствуют. ТОЛЬКО JSON."""
+
+        response = await self.client.chat.completions.create(
+            model="gpt-4o-mini",  # для маппинга хватит mini
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0,
+            response_format={"type": "json_object"}
+        )
+
+        try:
+            return json.loads(response.choices[0].message.content)
+        except Exception:
+            return {}
+
+    def _find_warnings(self, rows: list[dict], original_count: int) -> list[str]:
+        """Предупреждения для пользователя."""
+        warnings = []
+        imported = len(rows)
+
+        if imported < original_count * 0.5:
+            warnings.append(
+                f"Распознано только {imported} из {original_count} строк. "
+                f"Возможно таблица содержит нестандартный формат."
+            )
+
+        no_amount = sum(1 for r in rows if not r.get("amount"))
+        if no_amount > 0:
+            warnings.append(f"{no_amount} строк без суммы — проверь колонку с выручкой.")
+
+        no_model = sum(1 for r in rows if not r.get("model"))
+        if no_model > imported * 0.3:
+            warnings.append(f"У {no_model} строк не определена модель.")
+
+        return warnings
+```
+
+### 4. Google Sheets Service — services/google_sheets_service.py (новый файл)
+
+```python
+import httpx
+
+class GoogleSheetsService:
+    def __init__(self, access_token: str):
+        self.access_token = access_token
+        self.headers = {"Authorization": f"Bearer {access_token}"}
+
+    async def download_as_csv(self, spreadsheet_id: str, sheet_name: str) -> str:
+        """Скачать лист как CSV строку."""
+        # Получить данные через Sheets API
+        url = f"https://sheets.googleapis.com/v4/spreadsheets/{spreadsheet_id}/values/{sheet_name}"
+
+        async with httpx.AsyncClient() as client:
+            response = await client.get(url, headers=self.headers)
+
+        data = response.json()
+        rows = data.get("values", [])
+
+        if not rows:
+            return ""
+
+        # Конвертировать в CSV
+        import csv
+        import io
+        output = io.StringIO()
+        writer = csv.writer(output)
+        for row in rows:
+            writer.writerow(row)
+
+        return output.getvalue()
+
+    async def refresh_token(self, refresh_token: str) -> str:
+        """Обновить access_token если истёк."""
+        import os
+        async with httpx.AsyncClient() as client:
+            response = await client.post(
+                "https://oauth2.googleapis.com/token",
+                data={
+                    "refresh_token": refresh_token,
+                    "client_id": os.getenv("GOOGLE_CLIENT_ID"),
+                    "client_secret": os.getenv("GOOGLE_CLIENT_SECRET"),
+                    "grant_type": "refresh_token"
+                }
+            )
+        return response.json().get("access_token")
+```
+
+---
+
+## Frontend
+
+### Обновить Step2Source.tsx — убрать "Скоро" у Google Sheets:
+
+```typescript
+// components/onboarding/steps/Step2Source.tsx
+'use client'
+import { useState } from 'react'
+
+const SOURCES = [
+  {
+    id: 'google_sheets',
+    title: 'Google Таблицы',
+    description: 'Импорт из Google Sheets через AI',
+    available: true,
+    icon: '📊'
+  },
+  {
+    id: 'notion',
+    title: 'Notion',
+    description: 'База транзакций в Notion',
+    available: true,
+    icon: '📝'
+  },
+  {
+    id: 'excel',
+    title: 'Excel / CSV',
+    description: 'Загрузка файла',
+    available: true,
+    icon: '📁'
+  },
+  {
+    id: 'manual',
+    title: 'Пока без импорта',
+    description: 'Заполнение вручную в дашборде',
+    available: true,
+    icon: '✏️'
+  }
+]
+
+export default function Step2Source({ onNext, data }: StepProps) {
+  const [selected, setSelected] = useState<string>(data.source_type ?? '')
+
+  return (
+    <div>
+      <h2 className="text-xl font-semibold text-white mb-2">Источник данных</h2>
+      <p className="text-gray-400 text-sm mb-6">
+        Откуда будем подтягивать транзакции. Можно сменить позже.
+      </p>
+
+      <div className="space-y-3 mb-6">
+        {SOURCES.map(source => (
+          <button
+            key={source.id}
+            onClick={() => setSelected(source.id)}
+            className={`w-full text-left p-4 rounded-xl border transition-all ${
+              selected === source.id
+                ? 'border-violet-500 bg-violet-500/10'
+                : 'border-gray-800 bg-gray-900 hover:border-gray-600'
+            }`}
+          >
+            <div className="flex items-center gap-3">
+              <span className="text-2xl">{source.icon}</span>
+              <div>
+                <p className="text-white font-medium">{source.title}</p>
+                <p className="text-gray-400 text-sm">{source.description}</p>
+              </div>
+              {selected === source.id && (
+                <div className="ml-auto w-5 h-5 rounded-full bg-violet-500 flex items-center justify-center">
+                  <svg className="w-3 h-3 text-white" fill="currentColor" viewBox="0 0 20 20">
+                    <path d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z"/>
+                  </svg>
+                </div>
+              )}
+            </div>
+          </button>
+        ))}
+      </div>
+
+      <button
+        onClick={() => onNext({ source_type: selected })}
+        disabled={!selected}
+        className="w-full bg-violet-600 hover:bg-violet-700 disabled:opacity-40 disabled:cursor-not-allowed text-white rounded-xl py-3 font-medium transition-colors"
+      >
+        Далее
+      </button>
+    </div>
+  )
+}
+```
+
+### Новый Step3GoogleSheets.tsx:
+
+```typescript
+// components/onboarding/steps/Step3GoogleSheets.tsx
+'use client'
+import { useState, useEffect } from 'react'
+import api from '@/lib/api'
+
+type Spreadsheet = { id: string; name: string; modifiedTime: string }
+type Sheet = { id: number; name: string }
+
+export default function Step3GoogleSheets({ onNext, data }: StepProps) {
+  const [stage, setStage] = useState<'connect' | 'select' | 'sheet'>('connect')
+  const [spreadsheets, setSpreadsheets] = useState<Spreadsheet[]>([])
+  const [sheets, setSheets] = useState<Sheet[]>([])
+  const [selectedSpreadsheet, setSelectedSpreadsheet] = useState('')
+  const [selectedSheet, setSelectedSheet] = useState('')
+  const [loading, setLoading] = useState(false)
+
+  // Проверить — может Google уже подключён (после редиректа)
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search)
+    if (params.get('google_connected') === 'true') {
+      loadSpreadsheets()
+    }
+  }, [])
+
+  const connectGoogle = async () => {
+    const res = await api.get('/api/v1/google/auth-url')
+    window.location.href = res.data.url  // редирект на Google
+  }
+
+  const loadSpreadsheets = async () => {
+    setLoading(true)
+    setStage('select')
+    try {
+      const res = await api.get('/api/v1/google/spreadsheets')
+      setSpreadsheets(res.data.spreadsheets)
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  const selectSpreadsheet = async (id: string) => {
+    setSelectedSpreadsheet(id)
+    setLoading(true)
+    try {
+      const res = await api.get(`/api/v1/google/sheets/${id}`)
+      setSheets(res.data.sheets)
+      setStage('sheet')
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  const handleNext = () => {
+    onNext({
+      spreadsheet_id: selectedSpreadsheet,
+      sheet_name: selectedSheet
+    })
+  }
+
+  // Стадия 1 — подключить Google
+  if (stage === 'connect') {
+    return (
+      <div>
+        <h2 className="text-xl font-semibold text-white mb-2">Подключи Google Таблицы</h2>
+        <p className="text-gray-400 text-sm mb-8">
+          Мы запросим доступ только на чтение. Данные не передаются третьим лицам.
+        </p>
+        <button
+          onClick={connectGoogle}
+          className="w-full flex items-center justify-center gap-3 bg-white text-gray-900 rounded-xl py-3 font-medium hover:bg-gray-100 transition-colors"
+        >
+          <svg className="w-5 h-5" viewBox="0 0 24 24">
+            <path fill="#4285F4" d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z"/>
+            <path fill="#34A853" d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z"/>
+            <path fill="#FBBC05" d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.07H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.93l2.85-2.22.81-.62z"/>
+            <path fill="#EA4335" d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.07l3.66 2.84c.87-2.6 3.3-4.53 6.16-4.53z"/>
+          </svg>
+          Войти через Google
+        </button>
+      </div>
+    )
+  }
+
+  // Стадия 2 — выбрать таблицу
+  if (stage === 'select') {
+    return (
+      <div>
+        <h2 className="text-xl font-semibold text-white mb-2">Выбери таблицу</h2>
+        <p className="text-gray-400 text-sm mb-6">Последние изменённые таблицы из твоего Google Drive.</p>
+
+        {loading ? (
+          <div className="text-center py-8 text-gray-400">Загружаем таблицы...</div>
+        ) : (
+          <div className="space-y-2">
+            {spreadsheets.map(s => (
+              <button
+                key={s.id}
+                onClick={() => selectSpreadsheet(s.id)}
+                className="w-full text-left p-4 rounded-xl border border-gray-800 bg-gray-900 hover:border-violet-500 transition-all"
+              >
+                <p className="text-white font-medium">{s.name}</p>
+                <p className="text-gray-500 text-xs mt-1">
+                  Изменено: {new Date(s.modifiedTime).toLocaleDateString('ru')}
+                </p>
+              </button>
+            ))}
+          </div>
+        )}
+      </div>
+    )
+  }
+
+  // Стадия 3 — выбрать лист
+  return (
+    <div>
+      <h2 className="text-xl font-semibold text-white mb-2">Выбери лист</h2>
+      <p className="text-gray-400 text-sm mb-6">Какой лист содержит транзакции?</p>
+
+      <div className="space-y-2 mb-6">
+        {sheets.map(s => (
+          <button
+            key={s.id}
+            onClick={() => setSelectedSheet(s.name)}
+            className={`w-full text-left p-4 rounded-xl border transition-all ${
+              selectedSheet === s.name
+                ? 'border-violet-500 bg-violet-500/10'
+                : 'border-gray-800 bg-gray-900 hover:border-gray-600'
+            }`}
+          >
+            <p className="text-white">{s.name}</p>
+          </button>
+        ))}
+      </div>
+
+      <button
+        onClick={handleNext}
+        disabled={!selectedSheet}
+        className="w-full bg-violet-600 hover:bg-violet-700 disabled:opacity-40 text-white rounded-xl py-3 font-medium"
+      >
+        Анализировать таблицу
+      </button>
+    </div>
+  )
+}
+```
+
+### Новый Step4AIPreview.tsx — AI анализирует и показывает превью:
+
+```typescript
+// components/onboarding/steps/Step4AIPreview.tsx
+'use client'
+import { useState, useEffect } from 'react'
+import api from '@/lib/api'
+
+export default function Step4AIPreview({ onNext, data }: StepProps) {
+  const [status, setStatus] = useState<'loading' | 'ready' | 'error'>('loading')
+  const [preview, setPreview] = useState<any[]>([])
+  const [stats, setStats] = useState({ total: 0, warnings: [] as string[] })
+  const [importing, setImporting] = useState(false)
+
+  useEffect(() => {
+    analyzeSheet()
+  }, [])
+
+  const analyzeSheet = async () => {
+    try {
+      const res = await api.post('/api/v1/import/google-sheets/preview', {
+        spreadsheet_id: data.spreadsheet_id,
+        sheet_name: data.sheet_name
+      })
+      setPreview(res.data.preview)
+      setStats({ total: res.data.total_rows, warnings: res.data.warnings })
+      setStatus('ready')
+    } catch (e) {
+      setStatus('error')
+    }
+  }
+
+  const confirmImport = async () => {
+    setImporting(true)
+    try {
+      const res = await api.post('/api/v1/import/google-sheets/confirm', {
+        spreadsheet_id: data.spreadsheet_id,
+        sheet_name: data.sheet_name
+      })
+      onNext({ imported: res.data.rows_imported })
+    } finally {
+      setImporting(false)
+    }
+  }
+
+  if (status === 'loading') {
+    return (
+      <div className="text-center py-12">
+        <div className="w-12 h-12 border-2 border-violet-500 border-t-transparent rounded-full animate-spin mx-auto mb-4" />
+        <p className="text-white font-medium mb-1">AI анализирует таблицу...</p>
+        <p className="text-gray-400 text-sm">Это займёт 10–30 секунд</p>
+      </div>
+    )
+  }
+
+  if (status === 'error') {
+    return (
+      <div className="text-center py-12">
+        <p className="text-red-400 font-medium mb-4">Не удалось проанализировать таблицу</p>
+        <button onClick={analyzeSheet} className="text-violet-400 hover:text-violet-300 text-sm">
+          Попробовать снова
+        </button>
+      </div>
+    )
+  }
+
+  return (
+    <div>
+      <h2 className="text-xl font-semibold text-white mb-1">Превью данных</h2>
+      <p className="text-gray-400 text-sm mb-6">
+        AI нашёл <span className="text-white font-medium">{stats.total} транзакций</span>.
+        Проверь что всё верно.
+      </p>
+
+      {/* Предупреждения */}
+      {stats.warnings.length > 0 && (
+        <div className="bg-amber-500/10 border border-amber-500/30 rounded-xl p-4 mb-4">
+          {stats.warnings.map((w, i) => (
+            <p key={i} className="text-amber-300 text-sm">⚠️ {w}</p>
+          ))}
+        </div>
+      )}
+
+      {/* Таблица превью */}
+      <div className="bg-gray-900 rounded-xl overflow-hidden mb-6">
+        <div className="overflow-x-auto">
+          <table className="w-full text-sm">
+            <thead>
+              <tr className="border-b border-gray-800">
+                <th className="text-left p-3 text-gray-400 font-medium">Дата</th>
+                <th className="text-left p-3 text-gray-400 font-medium">Модель</th>
+                <th className="text-left p-3 text-gray-400 font-medium">Чаттер</th>
+                <th className="text-right p-3 text-gray-400 font-medium">Сумма</th>
+              </tr>
+            </thead>
+            <tbody>
+              {preview.map((row, i) => (
+                <tr key={i} className="border-b border-gray-800/50 hover:bg-gray-800/30">
+                  <td className="p-3 text-gray-300">{row.date ?? '—'}</td>
+                  <td className="p-3 text-white">{row.model ?? '—'}</td>
+                  <td className="p-3 text-gray-300">{row.chatter ?? '—'}</td>
+                  <td className="p-3 text-right text-emerald-400 font-medium">
+                    {row.amount ? `$${Number(row.amount).toFixed(2)}` : '—'}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+        <p className="text-gray-500 text-xs p-3">Показаны первые 10 из {stats.total} строк</p>
+      </div>
+
+      <button
+        onClick={confirmImport}
+        disabled={importing}
+        className="w-full bg-violet-600 hover:bg-violet-700 disabled:opacity-40 text-white rounded-xl py-3 font-medium transition-colors"
+      >
+        {importing ? 'Импортируем...' : `Импортировать ${stats.total} транзакций`}
+      </button>
+    </div>
+  )
+}
+```
+
+---
+
+## Переменные окружения — добавить
+
+### Backend .env:
+```
+GOOGLE_CLIENT_ID=твой_client_id
+GOOGLE_CLIENT_SECRET=твой_client_secret
+GOOGLE_REDIRECT_URI=https://api.flowof.io/api/v1/google/callback
+FRONTEND_URL=https://flowof.io
+```
+
+### Как получить Google Client ID:
+1. Зайди на console.cloud.google.com
+2. Создай проект FlowOF
+3. APIs & Services → Enable APIs → включи Google Sheets API + Google Drive API
+4. Credentials → Create OAuth 2.0 Client ID
+5. Authorized redirect URIs: https://api.flowof.io/api/v1/google/callback
+6. Скопируй Client ID и Client Secret
+
+---
+
+## requirements.txt — добавить:
+```
+openai>=1.0.0
+httpx>=0.24.0
+apscheduler>=3.10.0
+cryptography>=41.0.0
+```
+
+---
+
+## Порядок реализации для Cursor
+
+### Этап 1 (backend):
+1. Создать services/ai_importer.py
+2. Создать services/google_sheets_service.py
+3. Создать routers/auth_google.py
+4. Обновить routers/import_data.py
+5. Зарегистрировать роутеры в main.py
+6. Добавить переменные в .env
+
+### Этап 2 (frontend):
+1. Обновить Step2Source.tsx (убрать "Скоро", добавить выделение выбранного)
+2. Создать Step3GoogleSheets.tsx
+3. Создать Step4AIPreview.tsx
+4. Обновить роутер онбординга чтобы Step3 зависел от выбранного source_type
+
+### Этап 3 (тест):
+1. Зарегистрировать тестового пользователя
+2. Пройти полный флоу с реальной Google Sheet
+3. Проверить что данные появились в дашборде
+
+---
+
+## Важные правила
+
+- access_token от Google живёт 1 час — всегда проверяй и обновляй через refresh_token
+- Не хранить access_token в открытом виде — шифровать через Fernet
+- ON CONFLICT DO NOTHING при INSERT — повторный импорт безопасен
+- Лимит GPT-4o контекста ~128k токенов — при больших таблицах обязательно батчи по 150-200 строк
+- Показывать spinner пока AI работает — это 10-30 секунд, пользователь должен понимать что происходит
+# FlowOF — Ручной учёт внутри приложения
+# Добавь в конец .cursorrules
+
+---
+
+## Задача
+
+Дать пользователю вести учёт прямо в FlowOF без импорта.
+Пользователь настраивает свои справочники (модели, чаттеры, смены, категории
+расходов) и добавляет транзакции и расходы через формы.
+
+Всё настраивается под себя — никаких фиксированных значений.
+
+---
+
+## Новые таблицы в БД
+
+```sql
+-- Справочник: модели агентства
+CREATE TABLE IF NOT EXISTS models (
+  id SERIAL PRIMARY KEY,
+  tenant_id INTEGER REFERENCES tenants(id) ON DELETE CASCADE,
+  name TEXT NOT NULL,
+  active BOOLEAN DEFAULT TRUE,
+  created_at TIMESTAMP DEFAULT NOW()
+);
+
+-- Справочник: чаттеры
+CREATE TABLE IF NOT EXISTS chatters (
+  id SERIAL PRIMARY KEY,
+  tenant_id INTEGER REFERENCES tenants(id) ON DELETE CASCADE,
+  name TEXT NOT NULL,
+  active BOOLEAN DEFAULT TRUE,
+  created_at TIMESTAMP DEFAULT NOW()
+);
+
+-- Справочник: смены (настраиваются пользователем)
+CREATE TABLE IF NOT EXISTS shifts_catalog (
+  id SERIAL PRIMARY KEY,
+  tenant_id INTEGER REFERENCES tenants(id) ON DELETE CASCADE,
+  name TEXT NOT NULL,                  -- 'Ночь', 'Утро', 'Вечер' или свои
+  sort_order INTEGER DEFAULT 0,
+  active BOOLEAN DEFAULT TRUE,
+  created_at TIMESTAMP DEFAULT NOW()
+);
+
+-- Справочник: категории расходов
+CREATE TABLE IF NOT EXISTS expense_categories (
+  id SERIAL PRIMARY KEY,
+  tenant_id INTEGER REFERENCES tenants(id) ON DELETE CASCADE,
+  name TEXT NOT NULL,                  -- 'Реклама', 'Зарплаты', 'Подписки'
+  active BOOLEAN DEFAULT TRUE,
+  created_at TIMESTAMP DEFAULT NOW()
+);
+```
+
+Таблицы transactions и expenses уже существуют. Привести к структуре:
+
+```sql
+-- transactions: добавить ссылки на справочники
+ALTER TABLE transactions ADD COLUMN IF NOT EXISTS model_id INTEGER REFERENCES models(id);
+ALTER TABLE transactions ADD COLUMN IF NOT EXISTS chatter_id INTEGER REFERENCES chatters(id);
+ALTER TABLE transactions ADD COLUMN IF NOT EXISTS shift_id INTEGER REFERENCES shifts_catalog(id);
+ALTER TABLE transactions ADD COLUMN IF NOT EXISTS source TEXT DEFAULT 'manual';
+-- source: 'manual' | 'import' | 'google_sheets' — чтобы различать
+
+-- expenses: добавить категорию и опциональную модель
+ALTER TABLE expenses ADD COLUMN IF NOT EXISTS category_id INTEGER REFERENCES expense_categories(id);
+ALTER TABLE expenses ADD COLUMN IF NOT EXISTS model_id INTEGER REFERENCES models(id);
+ALTER TABLE expenses ADD COLUMN IF NOT EXISTS description TEXT;
+ALTER TABLE expenses ADD COLUMN IF NOT EXISTS source TEXT DEFAULT 'manual';
+```
+
+---
+
+## Backend — модели SQLAlchemy
+
+```python
+# models.py — добавить
+
+class Model(Base):
+    __tablename__ = "models"
+    id = Column(Integer, primary_key=True)
+    tenant_id = Column(Integer, ForeignKey("tenants.id"), nullable=False)
+    name = Column(String, nullable=False)
+    active = Column(Boolean, default=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+class Chatter(Base):
+    __tablename__ = "chatters"
+    id = Column(Integer, primary_key=True)
+    tenant_id = Column(Integer, ForeignKey("tenants.id"), nullable=False)
+    name = Column(String, nullable=False)
+    active = Column(Boolean, default=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+class ShiftCatalog(Base):
+    __tablename__ = "shifts_catalog"
+    id = Column(Integer, primary_key=True)
+    tenant_id = Column(Integer, ForeignKey("tenants.id"), nullable=False)
+    name = Column(String, nullable=False)
+    sort_order = Column(Integer, default=0)
+    active = Column(Boolean, default=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+class ExpenseCategory(Base):
+    __tablename__ = "expense_categories"
+    id = Column(Integer, primary_key=True)
+    tenant_id = Column(Integer, ForeignKey("tenants.id"), nullable=False)
+    name = Column(String, nullable=False)
+    active = Column(Boolean, default=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+```
+
+---
+
+## Backend — роутер справочников
+
+```python
+# routers/catalog.py — новый файл
+from fastapi import APIRouter, Depends, HTTPException
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
+from dependencies import get_db, get_current_tenant
+from models import Tenant, Model, Chatter, ShiftCatalog, ExpenseCategory
+
+router = APIRouter(prefix="/api/v1/catalog", tags=["catalog"])
+
+# --- МОДЕЛИ ---
+@router.get("/models")
+async def list_models(tenant: Tenant = Depends(get_current_tenant), db: AsyncSession = Depends(get_db)):
+    result = await db.execute(
+        select(Model).where(Model.tenant_id == tenant.id, Model.active == True)
+    )
+    return {"items": [{"id": m.id, "name": m.name} for m in result.scalars()]}
+
+@router.post("/models")
+async def create_model(name: str, tenant: Tenant = Depends(get_current_tenant), db: AsyncSession = Depends(get_db)):
+    model = Model(tenant_id=tenant.id, name=name)
+    db.add(model)
+    await db.commit()
+    await db.refresh(model)
+    return {"id": model.id, "name": model.name}
+
+@router.delete("/models/{model_id}")
+async def delete_model(model_id: int, tenant: Tenant = Depends(get_current_tenant), db: AsyncSession = Depends(get_db)):
+    model = await db.get(Model, model_id)
+    if not model or model.tenant_id != tenant.id:
+        raise HTTPException(404)
+    model.active = False  # soft delete — транзакции остаются
+    await db.commit()
+    return {"success": True}
+
+# --- Аналогично для chatters, shifts_catalog, expense_categories ---
+# Скопировать паттерн выше для каждого справочника:
+#   GET /chatters, POST /chatters, DELETE /chatters/{id}
+#   GET /shifts, POST /shifts, DELETE /shifts/{id}, PATCH /shifts/{id} (для sort_order)
+#   GET /expense-categories, POST /expense-categories, DELETE /expense-categories/{id}
+```
+
+---
+
+## Backend — роутер транзакций и расходов
+
+```python
+# routers/entries.py — новый файл
+from fastapi import APIRouter, Depends, HTTPException, Query
+from sqlalchemy import select, delete
+from sqlalchemy.ext.asyncio import AsyncSession
+from pydantic import BaseModel
+from datetime import date
+from dependencies import get_db, get_current_tenant
+from models import Tenant, Transaction, Expense
+
+router = APIRouter(prefix="/api/v1/entries", tags=["entries"])
+
+class TransactionCreate(BaseModel):
+    date: date
+    model_id: int
+    chatter_id: int
+    shift_id: int | None = None
+    amount: float
+
+class ExpenseCreate(BaseModel):
+    date: date
+    category_id: int
+    amount: float
+    model_id: int | None = None      # опционально
+    description: str | None = None
+
+# --- ТРАНЗАКЦИИ ---
+@router.post("/transactions")
+async def create_transaction(
+    data: TransactionCreate,
+    tenant: Tenant = Depends(get_current_tenant),
+    db: AsyncSession = Depends(get_db)
+):
+    tx = Transaction(
+        tenant_id=tenant.id,
+        date=data.date,
+        model_id=data.model_id,
+        chatter_id=data.chatter_id,
+        shift_id=data.shift_id,
+        amount=data.amount,
+        source="manual"
+    )
+    db.add(tx)
+    await db.commit()
+    await db.refresh(tx)
+    return {"id": tx.id, "success": True}
+
+@router.get("/transactions")
+async def list_transactions(
+    month: int = Query(...),
+    year: int = Query(...),
+    tenant: Tenant = Depends(get_current_tenant),
+    db: AsyncSession = Depends(get_db)
+):
+    """Список транзакций за месяц с именами из справочников (JOIN)."""
+    query = """
+        SELECT t.id, t.date, t.amount, t.shift_id,
+               m.name AS model_name, c.name AS chatter_name, s.name AS shift_name
+        FROM transactions t
+        LEFT JOIN models m ON t.model_id = m.id
+        LEFT JOIN chatters c ON t.chatter_id = c.id
+        LEFT JOIN shifts_catalog s ON t.shift_id = s.id
+        WHERE t.tenant_id = :tid
+          AND EXTRACT(MONTH FROM t.date) = :month
+          AND EXTRACT(YEAR FROM t.date) = :year
+        ORDER BY t.date DESC, t.id DESC
+    """
+    result = await db.execute(query, {"tid": tenant.id, "month": month, "year": year})
+    return {"items": [dict(r) for r in result.mappings()]}
+
+@router.put("/transactions/{tx_id}")
+async def update_transaction(
+    tx_id: int,
+    data: TransactionCreate,
+    tenant: Tenant = Depends(get_current_tenant),
+    db: AsyncSession = Depends(get_db)
+):
+    tx = await db.get(Transaction, tx_id)
+    if not tx or tx.tenant_id != tenant.id:
+        raise HTTPException(404)
+    tx.date = data.date
+    tx.model_id = data.model_id
+    tx.chatter_id = data.chatter_id
+    tx.shift_id = data.shift_id
+    tx.amount = data.amount
+    await db.commit()
+    return {"success": True}
+
+@router.delete("/transactions/{tx_id}")
+async def delete_transaction(
+    tx_id: int,
+    tenant: Tenant = Depends(get_current_tenant),
+    db: AsyncSession = Depends(get_db)
+):
+    tx = await db.get(Transaction, tx_id)
+    if not tx or tx.tenant_id != tenant.id:
+        raise HTTPException(404)
+    await db.delete(tx)
+    await db.commit()
+    return {"success": True}
+
+# --- РАСХОДЫ ---
+# Аналогичный паттерн: POST/GET/PUT/DELETE /expenses
+# В GET делать JOIN с expense_categories и models для имён
+```
+
+---
+
+## Frontend — страница справочников
+
+Новая страница /dashboard/settings/catalog или вкладка в настройках.
+Четыре секции: Модели, Чаттеры, Смены, Категории расходов.
+
+```typescript
+// components/catalog/CatalogSection.tsx
+'use client'
+import { useState, useEffect } from 'react'
+import api from '@/lib/api'
+
+interface CatalogSectionProps {
+  title: string
+  endpoint: string  // 'models' | 'chatters' | 'shifts' | 'expense-categories'
+}
+
+export function CatalogSection({ title, endpoint }: CatalogSectionProps) {
+  const [items, setItems] = useState<{id: number; name: string}[]>([])
+  const [newName, setNewName] = useState('')
+
+  const load = async () => {
+    const res = await api.get(`/api/v1/catalog/${endpoint}`)
+    setItems(res.data.items)
+  }
+  useEffect(() => { load() }, [])
+
+  const add = async () => {
+    if (!newName.trim()) return
+    await api.post(`/api/v1/catalog/${endpoint}`, null, { params: { name: newName } })
+    setNewName('')
+    load()
+  }
+
+  const remove = async (id: number) => {
+    await api.delete(`/api/v1/catalog/${endpoint}/${id}`)
+    load()
+  }
+
+  return (
+    <div className="bg-gray-900 rounded-xl border border-gray-800 p-5">
+      <h3 className="text-white font-medium mb-4">{title}</h3>
+
+      <div className="flex flex-wrap gap-2 mb-4">
+        {items.map(item => (
+          <span key={item.id} className="flex items-center gap-2 bg-gray-800 rounded-lg px-3 py-1.5 text-sm text-white">
+            {item.name}
+            <button onClick={() => remove(item.id)} className="text-gray-500 hover:text-red-400">×</button>
+          </span>
+        ))}
+        {items.length === 0 && <span className="text-gray-500 text-sm">Пока пусто</span>}
+      </div>
+
+      <div className="flex gap-2">
+        <input
+          value={newName}
+          onChange={e => setNewName(e.target.value)}
+          onKeyDown={e => e.key === 'Enter' && add()}
+          placeholder={`Добавить ${title.toLowerCase()}`}
+          className="flex-1 bg-gray-800 text-white rounded-lg px-3 py-2 text-sm border border-gray-700 focus:border-violet-500 outline-none"
+        />
+        <button onClick={add} className="bg-violet-600 hover:bg-violet-700 text-white rounded-lg px-4 text-sm font-medium">
+          Добавить
+        </button>
+      </div>
+    </div>
+  )
+}
+```
+
+---
+
+## Frontend — форма добавления транзакции
+
+```typescript
+// components/entries/AddTransactionForm.tsx
+'use client'
+import { useState, useEffect } from 'react'
+import api from '@/lib/api'
+
+export function AddTransactionForm({ onAdded }: { onAdded: () => void }) {
+  const [models, setModels] = useState<any[]>([])
+  const [chatters, setChatters] = useState<any[]>([])
+  const [shifts, setShifts] = useState<any[]>([])
+  const [form, setForm] = useState({
+    date: new Date().toISOString().split('T')[0],
+    model_id: '', chatter_id: '', shift_id: '', amount: ''
+  })
+
+  useEffect(() => {
+    api.get('/api/v1/catalog/models').then(r => setModels(r.data.items))
+    api.get('/api/v1/catalog/chatters').then(r => setChatters(r.data.items))
+    api.get('/api/v1/catalog/shifts').then(r => setShifts(r.data.items))
+  }, [])
+
+  const submit = async () => {
+    await api.post('/api/v1/entries/transactions', {
+      date: form.date,
+      model_id: Number(form.model_id),
+      chatter_id: Number(form.chatter_id),
+      shift_id: form.shift_id ? Number(form.shift_id) : null,
+      amount: Number(form.amount)
+    })
+    setForm({ ...form, amount: '' })  // сумму обнуляем, остальное оставляем для быстрого ввода
+    onAdded()
+  }
+
+  return (
+    <div className="bg-gray-900 rounded-xl border border-gray-800 p-4">
+      <div className="grid grid-cols-5 gap-3">
+        <input type="date" value={form.date}
+          onChange={e => setForm({...form, date: e.target.value})}
+          className="bg-gray-800 text-white rounded-lg px-3 py-2 text-sm border border-gray-700" />
+
+        <select value={form.model_id}
+          onChange={e => setForm({...form, model_id: e.target.value})}
+          className="bg-gray-800 text-white rounded-lg px-3 py-2 text-sm border border-gray-700">
+          <option value="">Модель</option>
+          {models.map(m => <option key={m.id} value={m.id}>{m.name}</option>)}
+        </select>
+
+        <select value={form.chatter_id}
+          onChange={e => setForm({...form, chatter_id: e.target.value})}
+          className="bg-gray-800 text-white rounded-lg px-3 py-2 text-sm border border-gray-700">
+          <option value="">Чаттер</option>
+          {chatters.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
+        </select>
+
+        <select value={form.shift_id}
+          onChange={e => setForm({...form, shift_id: e.target.value})}
+          className="bg-gray-800 text-white rounded-lg px-3 py-2 text-sm border border-gray-700">
+          <option value="">Смена</option>
+          {shifts.map(s => <option key={s.id} value={s.id}>{s.name}</option>)}
+        </select>
+
+        <input type="number" placeholder="Сумма $" value={form.amount}
+          onChange={e => setForm({...form, amount: e.target.value})}
+          onKeyDown={e => e.key === 'Enter' && submit()}
+          className="bg-gray-800 text-white rounded-lg px-3 py-2 text-sm border border-gray-700" />
+      </div>
+      <button onClick={submit}
+        disabled={!form.model_id || !form.chatter_id || !form.amount}
+        className="w-full mt-3 bg-violet-600 hover:bg-violet-700 disabled:opacity-40 text-white rounded-lg py-2 text-sm font-medium">
+        Добавить транзакцию
+      </button>
+    </div>
+  )
+}
+```
+
+Форма расхода — аналогично, но поля: дата, категория (select), сумма,
+модель (select, опционально, с вариантом "Общий расход"), описание (text).
+
+---
+
+## Frontend — страница учёта
+
+Новая вкладка в сайдбаре "Учёт" → /dashboard/entries.
+Две под-вкладки: Транзакции и Расходы.
+Каждая: форма добавления сверху + таблица записей за выбранный месяц снизу.
+Таблица — с возможностью удалить и редактировать строку.
+
+---
+
+## Важные детали
+
+- Все справочники — soft delete (active = false), чтобы старые транзакции
+  не сломались если удалить модель/чаттера
+- В форме после добавления транзакции обнулять только сумму — дату, модель,
+  чаттера, смену оставлять. Это ускоряет ввод нескольких транзакций подряд
+- source = 'manual' у всех записей через формы — чтобы отличать от импорта
+- Если у tenant пустые справочники — на странице учёта показать подсказку
+  "Сначала добавьте модели и чаттеров в настройках"
+- transactions и expenses из manual-ввода участвуют в дашборде наравне
+  с импортированными — никакой разницы для аналитики
+
+---
+
+## Порядок реализации
+
+### Этап 1 — справочники:
+1. Создать таблицы models, chatters, shifts_catalog, expense_categories (Alembic)
+2. Модели SQLAlchemy
+3. routers/catalog.py — CRUD для всех четырёх справочников
+4. Frontend: страница справочников с CatalogSection
+
+### Этап 2 — транзакции:
+1. ALTER transactions — добавить model_id, chatter_id, shift_id, source
+2. routers/entries.py — CRUD транзакций
+3. Frontend: AddTransactionForm + таблица транзакций
+
+### Этап 3 — расходы:
+1. ALTER expenses — добавить category_id, model_id, description, source
+2. Расширить routers/entries.py — CRUD расходов
+3. Frontend: форма расхода + таблица расходов
+
+### Этап 4 — интеграция:
+1. Вкладка "Учёт" в сайдбаре
+2. Проверить что manual-данные видны в дашборде
+3. Подсказка про пустые справочники
+
+---
+
+## ДОПОЛНЕНИЕ — Просмотр и редактирование импортированных транзакций
+
+Импортированные транзакции (из Google Sheets и других источников) должны
+вести себя так же как ручные: видны в таблице учёта, редактируются, удаляются.
+Таблица одна, поле source различает происхождение.
+
+### Логика source
+
+Значения поля source у транзакций и расходов:
+- 'manual' — добавлено вручную через форму
+- 'google_sheets' — пришло из Google Sheets
+- 'import' — пришло из загрузки файла Excel/CSV
+
+### Правило: ручная правка "отвязывает" от синка
+
+Если пользователь редактирует импортированную транзакцию — при следующем
+автосинке его правку нельзя затирать. Решение: при редактировании любой
+транзакции через PUT — менять source на 'manual'.
+
+```python
+@router.put("/transactions/{tx_id}")
+async def update_transaction(
+    tx_id: int,
+    data: TransactionCreate,
+    tenant: Tenant = Depends(get_current_tenant),
+    db: AsyncSession = Depends(get_db)
+):
+    tx = await db.get(Transaction, tx_id)
+    if not tx or tx.tenant_id != tenant.id:
+        raise HTTPException(404)
+    tx.date = data.date
+    tx.model_id = data.model_id
+    tx.chatter_id = data.chatter_id
+    tx.shift_id = data.shift_id
+    tx.amount = data.amount
+    tx.source = "manual"   # ВАЖНО: правка отвязывает от автосинка
+    await db.commit()
+    return {"success": True}
+```
+
+При автосинке — обновлять только строки где source != 'manual':
+
+```python
+# в sync_service.py при импорте новых данных
+# НЕ трогать транзакции которые пользователь правил руками
+await db.execute(
+    """DELETE FROM transactions
+       WHERE tenant_id = :tid
+       AND source = :src
+       AND EXTRACT(MONTH FROM date) = :month
+       AND EXTRACT(YEAR FROM date) = :year""",
+    {"tid": tenant_id, "src": "google_sheets", "month": month, "year": year}
+)
+# затем INSERT свежих данных с source = 'google_sheets'
+# строки с source = 'manual' остаются нетронутыми
+```
+
+### GET транзакций — добавить source и фильтр
+
+```python
+@router.get("/transactions")
+async def list_transactions(
+    month: int = Query(...),
+    year: int = Query(...),
+    source: str | None = Query(None),  # фильтр: 'manual' | 'google_sheets' | 'import'
+    tenant: Tenant = Depends(get_current_tenant),
+    db: AsyncSession = Depends(get_db)
+):
+    base_query = """
+        SELECT t.id, t.date, t.amount, t.shift_id, t.source,
+               m.name AS model_name, c.name AS chatter_name, s.name AS shift_name
+        FROM transactions t
+        LEFT JOIN models m ON t.model_id = m.id
+        LEFT JOIN chatters c ON t.chatter_id = c.id
+        LEFT JOIN shifts_catalog s ON t.shift_id = s.id
+        WHERE t.tenant_id = :tid
+          AND EXTRACT(MONTH FROM t.date) = :month
+          AND EXTRACT(YEAR FROM t.date) = :year
+    """
+    params = {"tid": tenant.id, "month": month, "year": year}
+
+    if source:
+        base_query += " AND t.source = :source"
+        params["source"] = source
+
+    base_query += " ORDER BY t.date DESC, t.id DESC"
+
+    result = await db.execute(base_query, params)
+    return {"items": [dict(r) for r in result.mappings()]}
+```
+
+### Frontend — колонка источника + фильтр
+
+В таблице транзакций добавить колонку "Источник" с бейджем:
+
+```typescript
+// Бейдж источника
+function SourceBadge({ source }: { source: string }) {
+  const config: Record<string, { label: string; cls: string }> = {
+    manual:        { label: 'Вручную',       cls: 'bg-violet-500/15 text-violet-300' },
+    google_sheets: { label: 'Google Sheets', cls: 'bg-emerald-500/15 text-emerald-300' },
+    import:        { label: 'Импорт',        cls: 'bg-blue-500/15 text-blue-300' },
+  }
+  const c = config[source] ?? config.manual
+  return (
+    <span className={`text-xs px-2 py-0.5 rounded ${c.cls}`}>
+      {c.label}
+    </span>
+  )
+}
+```
+
+Фильтр над таблицей:
+
+```typescript
+const [sourceFilter, setSourceFilter] = useState<string>('')
+
+const loadTransactions = async () => {
+  const params: any = { month, year }
+  if (sourceFilter) params.source = sourceFilter
+  const res = await api.get('/api/v1/entries/transactions', { params })
+  setTransactions(res.data.items)
+}
+
+// UI фильтра — кнопки-переключатели
+<div className="flex gap-2 mb-4">
+  <button onClick={() => setSourceFilter('')}
+    className={sourceFilter === '' ? 'active-filter' : 'filter'}>
+    Все
+  </button>
+  <button onClick={() => setSourceFilter('manual')}
+    className={sourceFilter === 'manual' ? 'active-filter' : 'filter'}>
+    Вручную
+  </button>
+  <button onClick={() => setSourceFilter('google_sheets')}
+    className={sourceFilter === 'google_sheets' ? 'active-filter' : 'filter'}>
+    Google Sheets
+  </button>
+  <button onClick={() => setSourceFilter('import')}
+    className={sourceFilter === 'import' ? 'active-filter' : 'filter'}>
+    Импорт
+  </button>
+</div>
+```
+
+### Нюанс редактирования импортированных строк
+
+У импортированной транзакции model_id / chatter_id / shift_id могут быть
+не заполнены — при импорте приходят имена строками (model_name "Anna"),
+а не ID из справочника. Варианты:
+
+1. При импорте — матчить имена со справочником: если в справочнике есть
+   модель "Anna" — проставить её model_id. Если нет — создать новую запись
+   в справочнике автоматически.
+
+2. При редактировании импортированной строки в форме — если model_id пустой,
+   но есть model_name, показать в селекте подсказку и дать выбрать/создать.
+
+Рекомендация: вариант 1 — при импорте автоматически создавать недостающие
+модели/чаттеров в справочниках. Тогда импортированные и ручные транзакции
+полностью унифицированы.
+
+```python
+# при импорте — функция матчинга имени со справочником
+async def resolve_model_id(name: str, tenant_id: int, db) -> int:
+    """Найти модель по имени или создать новую."""
+    if not name:
+        return None
+    result = await db.execute(
+        select(Model).where(Model.tenant_id == tenant_id, Model.name == name)
+    )
+    model = result.scalar_one_or_none()
+    if model:
+        return model.id
+    # создать новую
+    model = Model(tenant_id=tenant_id, name=name)
+    db.add(model)
+    await db.flush()
+    return model.id
+
+# аналогично resolve_chatter_id, resolve_shift_id
+```
+
+### Обновлённый порядок реализации
+
+Добавить в Этап 2 (транзакции):
+4. Добавить колонку source в GET транзакций + фильтр
+5. SourceBadge компонент в таблице
+6. PUT транзакции — менять source на 'manual' при редактировании
+
+Добавить в Этап 4 (интеграция):
+4. При импорте — функции resolve_model_id / resolve_chatter_id / resolve_shift_id
+   автоматически создают недостающие записи в справочниках
+5. Автосинк удаляет и пересоздаёт только строки source != 'manual'
+# FlowOF — Личный кабинет чаттера (Chatter Portal)
+# Добавь в конец .cursorrules
+
+---
+
+## Задача
+
+Добавить роли пользователей внутри одного агентства (tenant).
+Owner приглашает чаттера по ссылке, чаттер регистрируется, видит свой
+личный кабинет с урезанным функционалом — только свои данные.
+
+---
+
+## Архитектурное изменение — разделение Tenant и User
+
+Сейчас tenant смешивает агентство и аккаунт владельца. Нужно разделить:
+
+- tenants — само агентство (название, валюта, план FlowOF, настройки)
+- users — конкретный человек (email, пароль, роль), привязанный к tenant
+
+У одного tenant может быть несколько users с разными ролями.
+
+### Новая таблица users
+
+```sql
+CREATE TABLE IF NOT EXISTS users (
+  id SERIAL PRIMARY KEY,
+  tenant_id INTEGER REFERENCES tenants(id) ON DELETE CASCADE,
+  email TEXT UNIQUE NOT NULL,
+  hashed_password TEXT NOT NULL,
+  role TEXT NOT NULL,                  -- 'owner' | 'chatter'
+  full_name TEXT,
+  chatter_id INTEGER REFERENCES chatters(id),  -- только для role='chatter'
+  is_admin BOOLEAN DEFAULT FALSE,      -- для разработчика FlowOF
+  active BOOLEAN DEFAULT TRUE,
+  created_at TIMESTAMP DEFAULT NOW(),
+  last_login_at TIMESTAMP
+);
+
+CREATE INDEX idx_users_tenant ON users(tenant_id);
+CREATE INDEX idx_users_email ON users(email);
+```
+
+### Миграция существующих tenant
+
+Для каждого существующего tenant создать запись в users:
+- email, hashed_password — переносим из tenants
+- role = 'owner'
+- is_admin переносим из tenants
+
+В таблице tenants поля email, hashed_password, is_admin становятся
+ненужными (но не удаляем сразу — на всякий случай).
+
+```python
+# в schema_patch.py — одноразовая миграция
+async def migrate_tenants_to_users(db):
+    result = await db.execute("SELECT id, email, hashed_password, is_admin, agency_name FROM tenants")
+    for row in result:
+        # проверить что user ещё не создан
+        existing = await db.execute(
+            "SELECT id FROM users WHERE tenant_id = :tid AND role = 'owner'",
+            {"tid": row.id}
+        )
+        if existing.scalar_one_or_none():
+            continue
+
+        await db.execute(
+            """INSERT INTO users (tenant_id, email, hashed_password, role, full_name, is_admin)
+               VALUES (:tid, :email, :pwd, 'owner', :name, :admin)""",
+            {
+                "tid": row.id,
+                "email": row.email,
+                "pwd": row.hashed_password,
+                "name": row.agency_name,
+                "admin": row.is_admin or False
+            }
+        )
+    await db.commit()
+```
+
+---
+
+## JWT — теперь содержит user_id и role
+
+```python
+# auth.py
+def create_access_token(user_id: int, tenant_id: int, role: str, email: str) -> str:
+    payload = {
+        "user_id": user_id,
+        "tenant_id": tenant_id,
+        "role": role,
+        "email": email,
+        "exp": datetime.utcnow() + timedelta(days=7)
+    }
+    return jwt.encode(payload, SECRET_KEY, algorithm=ALGORITHM)
+```
+
+---
+
+## Dependencies — новые проверки роли
+
+```python
+# dependencies.py
+async def get_current_user(
+    token: str = Depends(oauth2_scheme),
+    db: AsyncSession = Depends(get_db)
+) -> User:
+    payload = decode_jwt(token)
+    user = await db.get(User, payload.get("user_id"))
+    if not user or not user.active:
+        raise HTTPException(status_code=401)
+    return user
+
+async def get_current_tenant(
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db)
+) -> Tenant:
+    """Вернуть tenant текущего user."""
+    return await db.get(Tenant, user.tenant_id)
+
+async def require_owner(user: User = Depends(get_current_user)) -> User:
+    """Только для owner — для существующих эндпоинтов."""
+    if user.role != "owner":
+        raise HTTPException(status_code=403, detail="Только для владельцев агентства")
+    return user
+
+async def require_chatter(user: User = Depends(get_current_user)) -> User:
+    """Только для чаттера."""
+    if user.role != "chatter":
+        raise HTTPException(status_code=403, detail="Доступ только для чаттеров")
+    return user
+```
+
+### Применить require_owner ко всем существующим эндпоинтам
+
+Все текущие эндпоинты (overview, finance, chatters, kpi, catalog, entries,
+admin) должны принимать `user = Depends(require_owner)` вместо просто
+`tenant = Depends(get_current_tenant)`. Это закрывает их от чаттеров.
+
+Если эндпоинту нужен tenant — берём через user.tenant_id или отдельной
+зависимостью get_current_tenant.
+
+---
+
+## Система инвайтов
+
+### Таблица chatter_invites
+
+```sql
+CREATE TABLE IF NOT EXISTS chatter_invites (
+  id SERIAL PRIMARY KEY,
+  tenant_id INTEGER REFERENCES tenants(id) ON DELETE CASCADE,
+  chatter_id INTEGER REFERENCES chatters(id) ON DELETE CASCADE,
+  token TEXT UNIQUE NOT NULL,           -- одноразовый токен в ссылке
+  email TEXT,                            -- опционально, email кому отправлено
+  used BOOLEAN DEFAULT FALSE,
+  used_at TIMESTAMP,
+  expires_at TIMESTAMP NOT NULL,         -- срок жизни инвайта
+  created_by_user_id INTEGER REFERENCES users(id),
+  created_at TIMESTAMP DEFAULT NOW()
+);
+
+CREATE INDEX idx_invites_token ON chatter_invites(token);
+```
+
+### Backend — роутер инвайтов
+
+```python
+# routers/invites.py
+from fastapi import APIRouter, Depends, HTTPException
+from sqlalchemy.ext.asyncio import AsyncSession
+from dependencies import get_db, require_owner
+from models import ChatterInvite, Chatter, User
+from datetime import datetime, timedelta
+import secrets
+
+router = APIRouter(prefix="/api/v1/invites", tags=["invites"])
+
+@router.post("/chatter/{chatter_id}")
+async def create_chatter_invite(
+    chatter_id: int,
+    owner: User = Depends(require_owner),
+    db: AsyncSession = Depends(get_db)
+):
+    """Owner создаёт инвайт-ссылку для конкретного чаттера из справочника."""
+    # Проверить что чаттер принадлежит tenant
+    chatter = await db.get(Chatter, chatter_id)
+    if not chatter or chatter.tenant_id != owner.tenant_id:
+        raise HTTPException(404)
+
+    # Проверить что у чаттера ещё нет привязанного user
+    existing = await db.execute(
+        "SELECT id FROM users WHERE chatter_id = :cid",
+        {"cid": chatter_id}
+    )
+    if existing.scalar_one_or_none():
+        raise HTTPException(400, "У этого чаттера уже есть аккаунт")
+
+    # Создать инвайт
+    invite = ChatterInvite(
+        tenant_id=owner.tenant_id,
+        chatter_id=chatter_id,
+        token=secrets.token_urlsafe(32),
+        expires_at=datetime.utcnow() + timedelta(days=7),
+        created_by_user_id=owner.id
+    )
+    db.add(invite)
+    await db.commit()
+    await db.refresh(invite)
+
+    invite_url = f"{os.getenv('FRONTEND_URL')}/join?token={invite.token}"
+
+    return {
+        "invite_id": invite.id,
+        "token": invite.token,
+        "url": invite_url,
+        "expires_at": invite.expires_at,
+        "chatter_name": chatter.name
+    }
+
+@router.get("/chatter")
+async def list_chatter_invites(
+    owner: User = Depends(require_owner),
+    db: AsyncSession = Depends(get_db)
+):
+    """Список всех инвайтов owner — активные и использованные."""
+    result = await db.execute(
+        """SELECT i.id, i.token, i.used, i.expires_at, i.created_at,
+                  c.name AS chatter_name
+           FROM chatter_invites i
+           JOIN chatters c ON i.chatter_id = c.id
+           WHERE i.tenant_id = :tid
+           ORDER BY i.created_at DESC""",
+        {"tid": owner.tenant_id}
+    )
+    return {"items": [dict(r) for r in result.mappings()]}
+
+@router.delete("/chatter/{invite_id}")
+async def revoke_invite(
+    invite_id: int,
+    owner: User = Depends(require_owner),
+    db: AsyncSession = Depends(get_db)
+):
+    """Отозвать инвайт."""
+    invite = await db.get(ChatterInvite, invite_id)
+    if not invite or invite.tenant_id != owner.tenant_id:
+        raise HTTPException(404)
+    await db.delete(invite)
+    await db.commit()
+    return {"success": True}
+
+
+# --- Публичные эндпоинты для регистрации по инвайту ---
+
+@router.get("/info/{token}")
+async def get_invite_info(token: str, db: AsyncSession = Depends(get_db)):
+    """Чаттер получает информацию об инвайте перед регистрацией."""
+    result = await db.execute(
+        """SELECT i.id, i.used, i.expires_at,
+                  c.name AS chatter_name,
+                  t.agency_name
+           FROM chatter_invites i
+           JOIN chatters c ON i.chatter_id = c.id
+           JOIN tenants t ON i.tenant_id = t.id
+           WHERE i.token = :token""",
+        {"token": token}
+    )
+    row = result.mappings().first()
+    if not row:
+        raise HTTPException(404, "Инвайт не найден")
+    if row["used"]:
+        raise HTTPException(400, "Инвайт уже использован")
+    if row["expires_at"] < datetime.utcnow():
+        raise HTTPException(400, "Срок действия инвайта истёк")
+
+    return {
+        "chatter_name": row["chatter_name"],
+        "agency_name": row["agency_name"]
+    }
+
+
+class AcceptInviteRequest(BaseModel):
+    token: str
+    email: str
+    password: str
+    full_name: str
+
+@router.post("/accept")
+async def accept_invite(
+    data: AcceptInviteRequest,
+    db: AsyncSession = Depends(get_db)
+):
+    """Чаттер принимает инвайт и создаёт свой аккаунт."""
+    # Найти инвайт
+    invite = await db.execute(
+        "SELECT * FROM chatter_invites WHERE token = :token",
+        {"token": data.token}
+    )
+    invite = invite.mappings().first()
+    if not invite or invite["used"] or invite["expires_at"] < datetime.utcnow():
+        raise HTTPException(400, "Инвайт недействителен")
+
+    # Проверить что email не занят
+    existing = await db.execute(
+        "SELECT id FROM users WHERE email = :email",
+        {"email": data.email}
+    )
+    if existing.scalar_one_or_none():
+        raise HTTPException(400, "Email уже зарегистрирован")
+
+    # Создать user с ролью chatter
+    user = User(
+        tenant_id=invite["tenant_id"],
+        email=data.email,
+        hashed_password=hash_password(data.password),
+        role="chatter",
+        full_name=data.full_name,
+        chatter_id=invite["chatter_id"]
+    )
+    db.add(user)
+    await db.flush()
+
+    # Пометить инвайт использованным
+    await db.execute(
+        "UPDATE chatter_invites SET used = TRUE, used_at = NOW() WHERE id = :iid",
+        {"iid": invite["id"]}
+    )
+    await db.commit()
+    await db.refresh(user)
+
+    # Сразу выдать токен
+    token = create_access_token(user.id, user.tenant_id, "chatter", user.email)
+    return {"access_token": token, "token_type": "bearer", "role": "chatter"}
+```
+
+---
+
+## Backend — эндпоинты личного кабинета чаттера
+
+```python
+# routers/chatter_portal.py
+from fastapi import APIRouter, Depends, Query
+from dependencies import get_db, require_chatter
+from models import User
+
+router = APIRouter(prefix="/api/v1/me", tags=["chatter_portal"])
+
+@router.get("/profile")
+async def get_my_profile(
+    user: User = Depends(require_chatter),
+    db: AsyncSession = Depends(get_db)
+):
+    """Профиль чаттера + название агентства."""
+    result = await db.execute(
+        """SELECT u.email, u.full_name, c.name AS chatter_name,
+                  t.agency_name, t.currency
+           FROM users u
+           JOIN chatters c ON u.chatter_id = c.id
+           JOIN tenants t ON u.tenant_id = t.id
+           WHERE u.id = :uid""",
+        {"uid": user.id}
+    )
+    return dict(result.mappings().first())
+
+@router.get("/overview")
+async def my_overview(
+    month: int = Query(...),
+    year: int = Query(...),
+    user: User = Depends(require_chatter),
+    db: AsyncSession = Depends(get_db)
+):
+    """Главные метрики чаттера за месяц."""
+    # Выручка чаттера = сумма его транзакций
+    result = await db.execute(
+        """SELECT COALESCE(SUM(amount), 0) AS revenue,
+                  COUNT(*) AS transactions
+           FROM transactions
+           WHERE tenant_id = :tid
+             AND chatter_id = :cid
+             AND EXTRACT(MONTH FROM date) = :month
+             AND EXTRACT(YEAR FROM date) = :year""",
+        {"tid": user.tenant_id, "cid": user.chatter_id, "month": month, "year": year}
+    )
+    row = result.mappings().first()
+    revenue = float(row["revenue"])
+    transactions = row["transactions"]
+
+    # Зарплата — переиспользовать существующую логику из routers/chatters.py
+    # или сервис расчёта зарплат (если есть в проекте)
+    salary = calculate_chatter_salary(
+        tenant_id=user.tenant_id,
+        chatter_id=user.chatter_id,
+        month=month,
+        year=year,
+        db=db
+    )
+
+    # Выполнение плана — из таблицы plans
+    plan_result = await db.execute(
+        """SELECT plan_amount FROM plans
+           WHERE tenant_id = :tid AND chatter_id = :cid
+             AND month = :month AND year = :year""",
+        {"tid": user.tenant_id, "cid": user.chatter_id, "month": month, "year": year}
+    )
+    plan_row = plan_result.mappings().first()
+    plan_amount = float(plan_row["plan_amount"]) if plan_row else 0
+    plan_pct = (revenue / plan_amount * 100) if plan_amount else 0
+
+    # Выручка по дням для графика
+    daily_result = await db.execute(
+        """SELECT DATE(date) AS day, SUM(amount) AS amount
+           FROM transactions
+           WHERE tenant_id = :tid AND chatter_id = :cid
+             AND EXTRACT(MONTH FROM date) = :month
+             AND EXTRACT(YEAR FROM date) = :year
+           GROUP BY day
+           ORDER BY day""",
+        {"tid": user.tenant_id, "cid": user.chatter_id, "month": month, "year": year}
+    )
+    daily = [{"date": str(r["day"]), "amount": float(r["amount"])} for r in daily_result.mappings()]
+
+    return {
+        "revenue": revenue,
+        "transactions": transactions,
+        "salary": salary,
+        "plan_amount": plan_amount,
+        "plan_pct": round(plan_pct, 1),
+        "daily_revenue": daily
+    }
+
+@router.get("/transactions")
+async def my_transactions(
+    month: int = Query(...),
+    year: int = Query(...),
+    user: User = Depends(require_chatter),
+    db: AsyncSession = Depends(get_db)
+):
+    """Список транзакций чаттера."""
+    result = await db.execute(
+        """SELECT t.date, t.amount,
+                  m.name AS model_name,
+                  s.name AS shift_name
+           FROM transactions t
+           LEFT JOIN models m ON t.model_id = m.id
+           LEFT JOIN shifts_catalog s ON t.shift_id = s.id
+           WHERE t.tenant_id = :tid AND t.chatter_id = :cid
+             AND EXTRACT(MONTH FROM t.date) = :month
+             AND EXTRACT(YEAR FROM t.date) = :year
+           ORDER BY t.date DESC""",
+        {"tid": user.tenant_id, "cid": user.chatter_id, "month": month, "year": year}
+    )
+    return {"items": [dict(r) for r in result.mappings()]}
+
+@router.get("/kpi")
+async def my_kpi(
+    month: int = Query(...),
+    year: int = Query(...),
+    user: User = Depends(require_chatter),
+    db: AsyncSession = Depends(get_db)
+):
+    """KPI чаттера из Onlymonster — только его метрики."""
+    # Переиспользовать сервис onlymonster.py с фильтром по имени чаттера
+    pass
+```
+
+---
+
+## Frontend — страницы
+
+### Структура
+
+```
+app/
+├── join/
+│   └── page.tsx              # форма регистрации по инвайту
+└── portal/                   # личный кабинет чаттера
+    ├── layout.tsx            # сайдбар с урезанным меню
+    ├── page.tsx              # Мой обзор
+    ├── transactions/
+    └── kpi/
+```
+
+### Логика редиректов после логина
+
+```typescript
+// после успешного логина
+if (response.data.role === 'owner') {
+  router.push('/dashboard')
+} else if (response.data.role === 'chatter') {
+  router.push('/portal')
+}
+```
+
+### Middleware — защита маршрутов
+
+```typescript
+// middleware.ts
+export function middleware(request: NextRequest) {
+  const token = request.cookies.get('token')?.value
+  const path = request.nextUrl.pathname
+
+  if (!token) {
+    if (path.startsWith('/dashboard') || path.startsWith('/portal')) {
+      return NextResponse.redirect(new URL('/login', request.url))
+    }
+    return NextResponse.next()
+  }
+
+  // декодировать JWT (без проверки подписи, только для редиректов)
+  const payload = JSON.parse(atob(token.split('.')[1]))
+  const role = payload.role
+
+  // Owner не должен попадать в portal
+  if (role === 'owner' && path.startsWith('/portal')) {
+    return NextResponse.redirect(new URL('/dashboard', request.url))
+  }
+  // Chatter не должен попадать в dashboard
+  if (role === 'chatter' && path.startsWith('/dashboard')) {
+    return NextResponse.redirect(new URL('/portal', request.url))
+  }
+}
+```
+
+### app/join/[token]/page.tsx — приём инвайта
+
+Страница принимает токен из URL, показывает "Вас приглашают в агентство X
+как чаттер Y", форма регистрации (email, пароль, имя), после успеха —
+редирект на /portal.
+
+### app/portal/layout.tsx — урезанный сайдбар
+
+Сайдбар содержит только:
+- Мой обзор
+- Мои транзакции
+- Мой KPI
+- Профиль
+- Выход
+
+Никаких настроек, справочников, расходов, других чаттеров.
+
+### app/portal/page.tsx — главный экран
+
+- Карточка приветствия: "Привет, {имя}! Агентство {agency_name}, месяц {месяц}"
+- 3 карточки метрик: Моя выручка, Моя зарплата, Выполнение плана
+- График выручки по дням
+- Превью последних 5 транзакций со ссылкой "Все мои транзакции"
+
+---
+
+## Owner-сторона — управление чаттерами
+
+В существующей странице справочника /dashboard/catalog у каждого чаттера
+добавить кнопку действий:
+
+- Если у чаттера нет аккаунта (chatter.user_id IS NULL) — кнопка
+  "Пригласить в кабинет" → создаёт инвайт, показывает ссылку для копирования
+- Если есть аккаунт — статус "Активен" + last_login_at, кнопка "Отвязать аккаунт"
+
+```typescript
+// в карточке чаттера в справочнике
+{!chatter.has_account ? (
+  <button onClick={() => createInvite(chatter.id)}>
+    Пригласить в кабинет
+  </button>
+) : (
+  <div>
+    <span className="badge-green">Активен</span>
+    <span className="text-xs text-gray-500">
+      последний вход: {chatter.last_login_at}
+    </span>
+  </div>
+)}
+```
+
+После создания инвайта — модалка со ссылкой:
+```
+https://flowof.io/join?token=abc123...
+```
+Кнопки: копировать ссылку, отправить в Telegram, отправить на email
+(пока — копировать в буфер, остальное потом).
+
+---
+
+## Что НЕЛЬЗЯ забыть
+
+- ВСЕ существующие эндпоинты owner-функционала должны проверять role='owner'
+  через require_owner — иначе чаттер сможет зайти на /api/v1/overview и
+  увидеть финансы агентства
+- Эндпоинты /api/v1/me/* доступны только role='chatter' (require_chatter)
+- Чаттер видит только данные привязанные к его chatter_id — ВСЕГДА
+  фильтровать WHERE chatter_id = user.chatter_id
+- При расчёте зарплаты переиспользовать существующую логику агентства
+  (не дублировать формулы), но применить только к конкретному чаттеру
+- Чаттер НЕ видит чужих чаттеров, расходы, прибыль, маржу, планы других
+- Инвайт одноразовый — после использования used=true
+- Срок жизни инвайта 7 дней
+- При отвязке аккаунта (owner снимает доступ) — user.active = false,
+  его транзакции в справочнике остаются (chatter в справочнике не удаляется)
+
+---
+
+## Порядок реализации
+
+### Этап 1 — архитектура users:
+1. Создать таблицу users (Alembic)
+2. Миграция: для каждого tenant создать user role='owner'
+3. Модель User в SQLAlchemy
+4. Обновить JWT: добавить user_id, role
+5. Обновить dependencies: get_current_user, require_owner, require_chatter
+6. Применить require_owner ко ВСЕМ существующим эндпоинтам
+7. Обновить логин: возвращать role в ответе
+8. На фронтенде: после логина редирект в зависимости от role
+
+### Этап 2 — инвайты:
+1. Таблица chatter_invites
+2. routers/invites.py — CRUD инвайтов и accept
+3. В справочнике /dashboard/catalog у каждого чаттера — кнопка "Пригласить"
+4. Страница /join/[token] — приём инвайта и регистрация
+
+### Этап 3 — личный кабинет:
+1. routers/chatter_portal.py — эндпоинты /api/v1/me/*
+2. app/portal/ — layout с урезанным сайдбаром
+3. app/portal/page.tsx — главный экран с метриками и графиком
+4. app/portal/transactions/ — таблица транзакций
+5. app/portal/kpi/ — KPI чаттера
+6. middleware.ts — защита маршрутов по роли
