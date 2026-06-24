@@ -367,42 +367,52 @@ async def my_mmr(
     if not user.chatter_id:
         raise HTTPException(status_code=400, detail="Chatter not linked")
 
-    # Активный сезон
-    season_result = await db.execute(
+    logger.info("[MMR] /me/mmr called: user_id=%s chatter_id=%s tenant_id=%s",
+                user.id, user.chatter_id, user.tenant_id)
+
+    # ── Шаг 1: ищем запись чаттера по последнему сезону (без фильтра is_active)
+    mmr_result = await db.execute(
         text(
-            "SELECT * FROM mmr_seasons "
-            "WHERE tenant_id = :tid AND is_active IS NOT FALSE "
-            "ORDER BY id DESC LIMIT 1"
+            "SELECT cm.current_mmr, cm.peak_mmr, cm.current_league, "
+            "       cm.calibration_complete, cm.days_active, cm.season_id "
+            "FROM chatter_mmr cm "
+            "WHERE cm.tenant_id = :tid AND cm.chatter_id = :cid "
+            "ORDER BY cm.season_id DESC LIMIT 1"
         ),
-        {"tid": user.tenant_id},
+        {"tid": user.tenant_id, "cid": user.chatter_id},
     )
-    season = season_result.mappings().first()
-    if not season:
+    mmr_row = mmr_result.mappings().first()
+
+    logger.info("[MMR] chatter_mmr row: %s", dict(mmr_row) if mmr_row else None)
+
+    # Если в chatter_mmr вообще нет записи — рейтинг не запущен
+    if mmr_row is None:
         return {
             "has_season": False,
             "current_mmr": 0, "peak_mmr": 0,
             "current_league": None, "calibration_complete": False,
         }
 
-    season_id = season["id"]
+    season_id = mmr_row["season_id"]
 
-    # MMR чаттера
-    mmr_result = await db.execute(
-        text(
-            "SELECT current_mmr, peak_mmr, current_league, "
-            "       calibration_complete, days_active "
-            "FROM chatter_mmr "
-            "WHERE tenant_id = :tid AND chatter_id = :cid AND season_id = :sid"
-        ),
-        {"tid": user.tenant_id, "cid": user.chatter_id, "sid": season_id},
+    # ── Шаг 2: загружаем инфо о сезоне (по season_id из chatter_mmr)
+    season_result = await db.execute(
+        text("SELECT * FROM mmr_seasons WHERE id = :sid"),
+        {"sid": season_id},
     )
-    mmr_row = mmr_result.mappings().first()
+    season = season_result.mappings().first()
 
-    current_mmr = int(mmr_row["current_mmr"]) if mmr_row else 0
-    peak_mmr = int(mmr_row["peak_mmr"]) if mmr_row else 0
-    current_league = mmr_row["current_league"] if mmr_row else None
-    calibrated = bool(mmr_row["calibration_complete"]) if mmr_row else False
-    days_active = int(mmr_row["days_active"]) if mmr_row else 0
+    logger.info("[MMR] season row: %s", dict(season) if season else None)
+
+    # mmr_row is guaranteed non-None here (we returned early if it was None)
+    current_mmr = int(mmr_row["current_mmr"] or 0)
+    peak_mmr = int(mmr_row["peak_mmr"] or 0)
+    current_league = mmr_row["current_league"]
+    calibrated = bool(mmr_row["calibration_complete"])
+    days_active = int(mmr_row["days_active"] or 0)
+
+    logger.info("[MMR] parsed: current_mmr=%s peak_mmr=%s league=%s calibrated=%s days_active=%s",
+                current_mmr, peak_mmr, current_league, calibrated, days_active)
 
     # Настройки MMR (для calibration_days и призов)
     cfg_result = await db.execute(
@@ -436,14 +446,18 @@ async def my_mmr(
 
     next_league, mmr_to_next = _next_league_info(current_mmr)
 
-    # Дней до конца сезона
+    # Дней до конца сезона (season может быть None если запись удалена)
     from datetime import date as _date
-    days_left = max(0, (season["end_date"] - _date.today()).days) if season["end_date"] else None
+    season_name = season["name"] if season else f"Сезон #{season_id}"
+    season_end_date = season["end_date"] if season else None
+    days_left = max(0, (season_end_date - _date.today()).days) if season_end_date else None
+
+    logger.info("[MMR] season_name=%s days_left=%s rank=%s/%s", season_name, days_left, rank, total_chatters)
 
     return {
         "has_season": True,
-        "season_name": season["name"],
-        "season_end_date": str(season["end_date"]) if season["end_date"] else None,
+        "season_name": season_name,
+        "season_end_date": str(season_end_date) if season_end_date else None,
         "season_days_left": days_left,
         "current_mmr": current_mmr,
         "peak_mmr": peak_mmr,
