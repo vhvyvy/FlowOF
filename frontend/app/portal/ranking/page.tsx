@@ -33,14 +33,37 @@ interface MmrMain {
   prize_info: { '1st': number; '2nd': number; '3rd': number }
 }
 
-interface MmrEvent {
-  event_date: string
-  event_type: string
-  category: string
-  points: number
-  description: string
+interface FinanceEvent {
   model_name: string | null
   shift_name: string | null
+  plan: number | null
+  revenue: number | null
+  performance_pct: number | null
+  points: number
+  category: string
+  description: string
+}
+
+interface KpiMetric {
+  name: string | null
+  value: number | null
+  avg: number | null
+  pct: number | null
+  points: number
+  direction: 'up' | 'down'
+  category: string
+}
+
+interface KpiSummary {
+  metrics: KpiMetric[]
+  kpi_total: number
+}
+
+interface DayGroup {
+  date: string
+  total_points: number
+  finance_events: FinanceEvent[]
+  kpi_summary: KpiSummary | null
 }
 
 interface HistoryPoint { date: string; mmr: number }
@@ -263,36 +286,107 @@ function MmrChart() {
 
 // ── Section: Events feed ──────────────────────────────────────────────────
 
-const CATEGORY_CONFIG: Record<string, { label: string; color: string }> = {
-  overperform:  { label: 'Перевыполнение', color: 'text-emerald-400' },
-  perform:      { label: 'Выполнение',     color: 'text-sky-400' },
-  underperform: { label: 'Недовыполнение', color: 'text-red-400' },
-  kpi_high:     { label: 'KPI высокий',    color: 'text-emerald-400' },
-  kpi_low:      { label: 'KPI низкий',     color: 'text-red-400' },
-  season_carry: { label: 'Перенос MMR',    color: 'text-violet-400' },
-}
-
 const TYPE_FILTERS = [
   { key: '', label: 'Все' },
   { key: 'finance', label: 'Финансы' },
   { key: 'kpi', label: 'KPI' },
 ] as const
 
+const RU_MONTHS = ['янв','фев','мар','апр','май','июн','июл','авг','сен','окт','ноя','дек']
+function fmtDate(iso: string) {
+  const d = new Date(iso)
+  return `${d.getDate()} ${RU_MONTHS[d.getMonth()]}`
+}
+
+function FinanceRow({ ev }: { ev: FinanceEvent }) {
+  const pos = ev.points > 0
+  return (
+    <div className="flex items-center gap-2 py-1.5">
+      <div className={cn('p-1 rounded shrink-0', pos ? 'bg-emerald-500/10' : 'bg-red-500/10')}>
+        {pos
+          ? <TrendingUp className="h-3 w-3 text-emerald-400" />
+          : <TrendingDown className="h-3 w-3 text-red-400" />}
+      </div>
+      <span className="text-xs text-slate-300 flex-1 min-w-0 truncate">
+        {[ev.model_name, ev.shift_name].filter(Boolean).join(' · ')}
+        {ev.plan != null && ev.revenue != null && (
+          <span className="text-slate-500">
+            {' '}· Plan ${ev.plan.toFixed(0)}, rev ${ev.revenue.toFixed(0)}
+            {ev.performance_pct != null && ` (${ev.performance_pct}%)`}
+          </span>
+        )}
+      </span>
+      <span className={cn('text-xs font-bold shrink-0 tabular-nums', pos ? 'text-emerald-400' : 'text-red-400')}>
+        {pos ? '+' : ''}{ev.points}
+      </span>
+    </div>
+  )
+}
+
+function KpiRow({ summary }: { summary: KpiSummary }) {
+  const pos = summary.kpi_total > 0
+  return (
+    <div className="flex items-start gap-2 py-1.5">
+      <div className={cn('p-1 rounded shrink-0 mt-0.5', pos ? 'bg-emerald-500/10' : 'bg-red-500/10')}>
+        {pos
+          ? <TrendingUp className="h-3 w-3 text-emerald-400" />
+          : <TrendingDown className="h-3 w-3 text-red-400" />}
+      </div>
+      <div className="flex-1 min-w-0">
+        <span className="text-xs text-slate-400 font-medium">KPI: </span>
+        {summary.metrics.map((m, i) => (
+          <span key={i} className="text-xs">
+            <span className="text-slate-500">{m.name} </span>
+            {m.direction === 'up'
+              ? <span className="text-emerald-400">↑+{m.points}</span>
+              : <span className="text-red-400">↓{m.points}</span>}
+            {i < summary.metrics.length - 1 && <span className="text-slate-600">, </span>}
+          </span>
+        ))}
+      </div>
+      <span className={cn('text-xs font-bold shrink-0 tabular-nums', pos ? 'text-emerald-400' : 'text-red-400')}>
+        {pos ? '+' : ''}{summary.kpi_total}
+      </span>
+    </div>
+  )
+}
+
+function DayCard({ day }: { day: DayGroup }) {
+  const pos = day.total_points > 0
+  const hasContent = day.finance_events.length > 0 || day.kpi_summary
+
+  return (
+    <div className="bg-slate-800/40 border border-slate-700/30 rounded-xl p-4">
+      <div className="flex items-center justify-between mb-2">
+        <span className="text-xs font-semibold text-slate-400">{fmtDate(day.date)}</span>
+        <span className={cn('text-sm font-bold tabular-nums', pos ? 'text-emerald-400' : 'text-red-400')}>
+          {pos ? '+' : ''}{day.total_points}
+        </span>
+      </div>
+      {hasContent && (
+        <div className="divide-y divide-slate-700/20">
+          {day.finance_events.map((ev, i) => <FinanceRow key={i} ev={ev} />)}
+          {day.kpi_summary && <KpiRow summary={day.kpi_summary} />}
+        </div>
+      )}
+    </div>
+  )
+}
+
 function EventsFeed() {
   const [typeFilter, setTypeFilter] = useState<'' | 'finance' | 'kpi'>('')
   const [offset, setOffset] = useState(0)
-  const PAGE = 30
+  const PAGE = 14
 
   const buildUrl = (off: number) => {
     const base = `/api/v1/me/mmr/events?limit=${PAGE}&offset=${off}`
     return typeFilter ? `${base}&event_type=${typeFilter}` : base
   }
 
-  // Load pages accumulative — store all events
-  const [allEvents, setAllEvents] = useState<MmrEvent[]>([])
+  const [allDays, setAllDays] = useState<DayGroup[]>([])
   const [hasMore, setHasMore] = useState(true)
 
-  const { data: eventsData, isLoading, isFetching } = useQuery<{ events: MmrEvent[]; offset: number; limit: number }>({
+  const { data: eventsData, isLoading, isFetching } = useQuery<{ days: DayGroup[]; offset: number; limit: number }>({
     queryKey: ['portal-mmr-events', typeFilter, offset],
     queryFn: () => api.get(buildUrl(offset)).then(r => r.data),
   })
@@ -300,18 +394,17 @@ function EventsFeed() {
   useEffect(() => {
     if (!eventsData) return
     if (offset === 0) {
-      setAllEvents(eventsData.events)
+      setAllDays(eventsData.days)
     } else {
-      setAllEvents(prev => [...prev, ...eventsData.events])
+      setAllDays(prev => [...prev, ...eventsData.days])
     }
-    setHasMore(eventsData.events.length === PAGE)
+    setHasMore(eventsData.days.length === PAGE)
   }, [eventsData, offset])
 
-  // Reset when filter changes
   const handleFilter = (f: '' | 'finance' | 'kpi') => {
     setTypeFilter(f)
     setOffset(0)
-    setAllEvents([])
+    setAllDays([])
     setHasMore(true)
   }
 
@@ -342,84 +435,16 @@ function EventsFeed() {
 
       {isLoading && offset === 0 ? (
         <div className="p-4 space-y-3">
-          {[1,2,3].map(i => <Skeleton key={i} className="h-12 w-full" />)}
+          {[1,2,3].map(i => <Skeleton key={i} className="h-24 w-full rounded-xl" />)}
         </div>
-      ) : allEvents.length === 0 ? (
+      ) : allDays.length === 0 ? (
         <p className="text-slate-500 text-sm p-5">Событий пока нет</p>
       ) : (
         <>
-          <div className="divide-y divide-slate-700/30">
-            {allEvents.map((ev, i) => {
-              const cfg = CATEGORY_CONFIG[ev.category] ?? { label: ev.category, color: 'text-slate-400' }
-              const positive = ev.points > 0
-              const typeBadge = ev.event_type === 'finance' ? 'Финансы'
-                : ev.event_type === 'kpi' ? 'KPI'
-                : ev.event_type
-              const dateStr = ev.event_date.slice(5).replace('-', '.')
-
-              return (
-                <div key={i} className="flex items-start gap-3 px-5 py-3 hover:bg-slate-700/20">
-                  {/* Trend icon */}
-                  <div className={cn(
-                    'mt-0.5 p-1.5 rounded-lg shrink-0',
-                    positive ? 'bg-emerald-500/10' : 'bg-red-500/10',
-                  )}>
-                    {positive
-                      ? <TrendingUp className="h-3.5 w-3.5 text-emerald-400" />
-                      : <TrendingDown className="h-3.5 w-3.5 text-red-400" />}
-                  </div>
-
-                  {/* Main content */}
-                  <div className="flex-1 min-w-0">
-                    {/* Row 1: date · type badge · category */}
-                    <div className="flex items-center gap-1.5 flex-wrap">
-                      <span className="text-xs text-slate-500 shrink-0">{dateStr}</span>
-                      <span className="text-xs text-slate-600">·</span>
-                      <span className={cn(
-                        'text-xs font-semibold px-1.5 py-0.5 rounded',
-                        ev.event_type === 'finance'
-                          ? 'bg-sky-500/10 text-sky-400'
-                          : 'bg-purple-500/10 text-purple-400',
-                      )}>
-                        {typeBadge}
-                      </span>
-                      <span className="text-xs text-slate-600">·</span>
-                      <span className={cn('text-xs font-medium', cfg.color)}>{cfg.label}</span>
-                    </div>
-
-                    {/* Row 2: model · shift (if present) */}
-                    {(ev.model_name || ev.shift_name) && (
-                      <div className="flex items-center gap-1 mt-0.5">
-                        {ev.model_name && (
-                          <span className="text-xs text-slate-400 font-medium">{ev.model_name}</span>
-                        )}
-                        {ev.model_name && ev.shift_name && (
-                          <span className="text-xs text-slate-600">·</span>
-                        )}
-                        {ev.shift_name && (
-                          <span className="text-xs text-slate-500">{ev.shift_name}</span>
-                        )}
-                      </div>
-                    )}
-
-                    {/* Row 3: description */}
-                    {ev.description && (
-                      <p className="text-xs text-slate-500 mt-0.5 truncate">{ev.description}</p>
-                    )}
-                  </div>
-
-                  {/* Points */}
-                  <div className="text-right shrink-0 ml-2">
-                    <p className={cn('text-sm font-bold', positive ? 'text-emerald-400' : 'text-red-400')}>
-                      {positive ? '+' : ''}{ev.points}
-                    </p>
-                  </div>
-                </div>
-              )
-            })}
+          <div className="p-4 space-y-3">
+            {allDays.map(day => <DayCard key={day.date} day={day} />)}
           </div>
 
-          {/* Load more */}
           {hasMore && (
             <div className="px-5 py-3 border-t border-slate-700/40">
               <button
@@ -427,7 +452,7 @@ function EventsFeed() {
                 disabled={isFetching}
                 className="w-full text-xs text-slate-400 hover:text-violet-300 transition-colors disabled:opacity-50"
               >
-                {isFetching ? 'Загружаем...' : 'Показать ещё'}
+                {isFetching ? 'Загружаем...' : 'Показать ещё 14 дней'}
               </button>
             </div>
           )}

@@ -493,46 +493,153 @@ async def my_mmr(
 async def my_mmr_events(
     user: User = Depends(require_chatter),
     db: AsyncSession = Depends(get_db),
-    event_type: str | None = Query(None, description="finance | kpi — фильтр по типу"),
+    event_type: str | None = Query(None, description="finance | kpi | all"),
     offset: int = Query(0, ge=0),
-    limit: int = Query(30, ge=1, le=100),
+    limit: int = Query(14, ge=1, le=60),
 ):
-    """MMR-события чаттера с JOIN на модели и смены, пагинацией и фильтром."""
+    """MMR-события чаттера, сгруппированные по дням. Каждый день — отдельный объект."""
     if not user.chatter_id:
         raise HTTPException(status_code=400, detail="Chatter not linked")
 
-    type_filter = "AND me.event_type = :etype" if event_type else ""
-    params: dict = {"tid": user.tenant_id, "cid": user.chatter_id,
-                    "lim": limit, "off": offset}
-    if event_type:
-        params["etype"] = event_type
+    # Normalise filter
+    filter_type = event_type if event_type in ("finance", "kpi") else None
 
-    result = await db.execute(
+    # 1. Find distinct dates that match the filter (pagination by date)
+    date_filter = "AND me.event_type = :etype" if filter_type else ""
+    date_params: dict = {"tid": user.tenant_id, "cid": user.chatter_id,
+                         "lim": limit, "off": offset}
+    if filter_type:
+        date_params["etype"] = filter_type
+
+    dates_result = await db.execute(
         text(
-            f"SELECT me.event_date, me.event_type, me.category, me.points, "
-            f"       me.description, me.model_id, me.shift_id, "
-            f"       m.name AS model_name, sc.name AS shift_name "
+            f"SELECT DISTINCT me.event_date "
             f"FROM mmr_events me "
-            f"LEFT JOIN models m ON me.model_id = m.id "
-            f"LEFT JOIN shifts_catalog sc ON me.shift_id = sc.id "
-            f"WHERE me.tenant_id = :tid AND me.chatter_id = :cid {type_filter} "
-            f"ORDER BY me.event_date DESC, me.id DESC "
+            f"WHERE me.tenant_id = :tid AND me.chatter_id = :cid {date_filter} "
+            f"ORDER BY me.event_date DESC "
             f"LIMIT :lim OFFSET :off"
         ),
-        params,
+        date_params,
     )
-    events = []
-    for r in result.mappings():
-        events.append({
-            "event_date": str(r["event_date"]),
-            "event_type": r["event_type"],
-            "category": r["category"],
-            "points": int(r["points"]),
-            "description": r["description"] or "",
-            "model_name": r["model_name"],
-            "shift_name": r["shift_name"],
+    dates = [r["event_date"] for r in dates_result.mappings()]
+    if not dates:
+        return {"days": [], "offset": offset, "limit": limit}
+
+    # 2. Fetch all events for those dates (no event_type filter — we need both for full day)
+    events_result = await db.execute(
+        text(
+            "SELECT me.event_date, me.event_type, me.category, me.points, "
+            "       me.description, "
+            "       m.name AS model_name, sc.name AS shift_name "
+            "FROM mmr_events me "
+            "LEFT JOIN models m ON me.model_id = m.id "
+            "LEFT JOIN shifts_catalog sc ON me.shift_id = sc.id "
+            "WHERE me.tenant_id = :tid AND me.chatter_id = :cid "
+            "  AND me.event_date = ANY(:dates) "
+            "ORDER BY me.event_date DESC, me.id ASC"
+        ),
+        {"tid": user.tenant_id, "cid": user.chatter_id, "dates": dates},
+    )
+    raw_events = list(events_result.mappings())
+
+    # 3. Group by date
+    from collections import defaultdict
+    day_events: dict = defaultdict(lambda: {"finance": [], "kpi": []})
+    for r in raw_events:
+        dt = str(r["event_date"])
+        etype = r["event_type"]
+        if etype not in ("finance", "kpi"):
+            etype = "finance"  # season_carry etc. → treat as finance
+        day_events[dt][etype].append(r)
+
+    # 4. Build response
+    def _parse_description(desc: str) -> dict:
+        """Try to extract plan/revenue/pct from description like 'Plan $117, revenue $148 (127%)'."""
+        import re
+        out: dict = {"plan": None, "revenue": None, "performance_pct": None}
+        if not desc:
+            return out
+        m = re.search(r"Plan \$?([\d.]+)", desc)
+        if m:
+            out["plan"] = float(m.group(1))
+        m = re.search(r"revenue \$?([\d.]+)", desc)
+        if m:
+            out["revenue"] = float(m.group(1))
+        m = re.search(r"\((\d+)%\)", desc)
+        if m:
+            out["performance_pct"] = int(m.group(1))
+        return out
+
+    def _parse_kpi_description(desc: str) -> dict:
+        """Extract metric name, value and avg from 'PPV OR: 18.10 (среднее 25.34, -44%)'."""
+        import re
+        out: dict = {"name": None, "value": None, "avg": None, "pct": None}
+        if not desc:
+            return out
+        # 'PPV OR: 18.10 (среднее 25.34, -44%)'
+        m = re.match(r"^(.+?):\s*([\d.]+)\s*\(среднее ([\d.]+),\s*([+-]?\d+)%\)", desc.strip())
+        if m:
+            out["name"] = m.group(1).strip()
+            out["value"] = float(m.group(2))
+            out["avg"] = float(m.group(3))
+            out["pct"] = int(m.group(4))
+        else:
+            out["name"] = desc[:40]
+        return out
+
+    days_out = []
+    for dt in sorted(day_events.keys(), reverse=True):
+        if str(dates[0]) < dt or str(dates[-1]) > dt:
+            continue  # skip dates outside our page
+        fin_rows = day_events[dt]["finance"]
+        kpi_rows = day_events[dt]["kpi"]
+
+        # Apply event_type filter to what we include (the dates were already filtered)
+        finance_events = []
+        if filter_type != "kpi":
+            for r in fin_rows:
+                parsed = _parse_description(r["description"] or "")
+                finance_events.append({
+                    "model_name": r["model_name"],
+                    "shift_name": r["shift_name"],
+                    "plan": parsed["plan"],
+                    "revenue": parsed["revenue"],
+                    "performance_pct": parsed["performance_pct"],
+                    "points": int(r["points"]),
+                    "category": r["category"],
+                    "description": r["description"] or "",
+                })
+
+        kpi_summary = None
+        if filter_type != "finance" and kpi_rows:
+            kpi_metrics = []
+            kpi_total = 0
+            for r in kpi_rows:
+                parsed = _parse_kpi_description(r["description"] or "")
+                pts = int(r["points"])
+                kpi_total += pts
+                kpi_metrics.append({
+                    "name": parsed["name"],
+                    "value": parsed["value"],
+                    "avg": parsed["avg"],
+                    "pct": parsed["pct"],
+                    "points": pts,
+                    "direction": "up" if pts > 0 else "down",
+                    "category": r["category"],
+                })
+            kpi_summary = {"metrics": kpi_metrics, "kpi_total": kpi_total}
+
+        total_fin = sum(int(r["points"]) for r in fin_rows) if filter_type != "kpi" else 0
+        total_kpi = (kpi_summary["kpi_total"] if kpi_summary else 0) if filter_type != "finance" else 0
+
+        days_out.append({
+            "date": dt,
+            "total_points": total_fin + total_kpi,
+            "finance_events": finance_events,
+            "kpi_summary": kpi_summary,
         })
-    return {"events": events, "offset": offset, "limit": limit}
+
+    return {"days": days_out, "offset": offset, "limit": limit}
 
 
 @router.get("/mmr/history")
