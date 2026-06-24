@@ -243,7 +243,7 @@ function MmrChart() {
           <Tooltip
             contentStyle={{ background: '#1e293b', border: '1px solid #334155', borderRadius: 8 }}
             labelStyle={{ color: '#94a3b8', fontSize: 12 }}
-            labelFormatter={(label: string) => label}
+            labelFormatter={(label) => String(label)}
             formatter={(v) => [`${Number(v)} MMR`, 'MMR']}
           />
           <Area
