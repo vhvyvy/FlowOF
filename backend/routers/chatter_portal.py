@@ -345,3 +345,277 @@ async def my_kpi(
         },
         "has_onlymonster_key": has_om_key,
     }
+
+
+# ── MMR — личный рейтинг ──────────────────────────────────────────────────────
+
+def _next_league_info(mmr: int) -> tuple[str | None, int | None]:
+    """Вернуть (следующая_лига, сколько_MMR_до_неё)."""
+    from services.mmr_service import LEAGUE_THRESHOLDS
+    for name, threshold in LEAGUE_THRESHOLDS:
+        if threshold > mmr:
+            return name, threshold - mmr
+    return None, None  # Grandmaster — максимум
+
+
+@router.get("/mmr")
+async def my_mmr(
+    user: User = Depends(require_chatter),
+    db: AsyncSession = Depends(get_db),
+):
+    """Главная страница рейтинга чаттера."""
+    if not user.chatter_id:
+        raise HTTPException(status_code=400, detail="Chatter not linked")
+
+    # Активный сезон
+    season_result = await db.execute(
+        text(
+            "SELECT * FROM mmr_seasons "
+            "WHERE tenant_id = :tid AND is_active IS NOT FALSE "
+            "ORDER BY id DESC LIMIT 1"
+        ),
+        {"tid": user.tenant_id},
+    )
+    season = season_result.mappings().first()
+    if not season:
+        return {
+            "has_season": False,
+            "current_mmr": 0, "peak_mmr": 0,
+            "current_league": None, "calibration_complete": False,
+        }
+
+    season_id = season["id"]
+
+    # MMR чаттера
+    mmr_result = await db.execute(
+        text(
+            "SELECT current_mmr, peak_mmr, current_league, "
+            "       calibration_complete, days_active "
+            "FROM chatter_mmr "
+            "WHERE tenant_id = :tid AND chatter_id = :cid AND season_id = :sid"
+        ),
+        {"tid": user.tenant_id, "cid": user.chatter_id, "sid": season_id},
+    )
+    mmr_row = mmr_result.mappings().first()
+
+    current_mmr = int(mmr_row["current_mmr"]) if mmr_row else 0
+    peak_mmr = int(mmr_row["peak_mmr"]) if mmr_row else 0
+    current_league = mmr_row["current_league"] if mmr_row else None
+    calibrated = bool(mmr_row["calibration_complete"]) if mmr_row else False
+    days_active = int(mmr_row["days_active"]) if mmr_row else 0
+
+    # Настройки MMR (для calibration_days и призов)
+    cfg_result = await db.execute(
+        text("SELECT calibration_days, prize_1st, prize_2nd, prize_3rd FROM mmr_settings WHERE tenant_id = :tid"),
+        {"tid": user.tenant_id},
+    )
+    cfg = cfg_result.mappings().first()
+    calibration_days = int(cfg["calibration_days"]) if cfg else 14
+    prize_info = {
+        "1st": float(cfg["prize_1st"] or 200) if cfg else 200,
+        "2nd": float(cfg["prize_2nd"] or 150) if cfg else 150,
+        "3rd": float(cfg["prize_3rd"] or 100) if cfg else 100,
+    }
+
+    # Ранг чаттера в агентстве (по текущему сезону)
+    rank_result = await db.execute(
+        text(
+            "SELECT COUNT(*) FROM chatter_mmr "
+            "WHERE tenant_id = :tid AND season_id = :sid "
+            "  AND current_mmr > :mmr"
+        ),
+        {"tid": user.tenant_id, "sid": season_id, "mmr": current_mmr},
+    )
+    rank = int(rank_result.scalar() or 0) + 1
+
+    total_result = await db.execute(
+        text("SELECT COUNT(*) FROM chatter_mmr WHERE tenant_id = :tid AND season_id = :sid"),
+        {"tid": user.tenant_id, "sid": season_id},
+    )
+    total_chatters = int(total_result.scalar() or 0)
+
+    next_league, mmr_to_next = _next_league_info(current_mmr)
+
+    # Дней до конца сезона
+    from datetime import date as _date
+    days_left = max(0, (season["end_date"] - _date.today()).days) if season["end_date"] else None
+
+    return {
+        "has_season": True,
+        "season_name": season["name"],
+        "season_end_date": str(season["end_date"]) if season["end_date"] else None,
+        "season_days_left": days_left,
+        "current_mmr": current_mmr,
+        "peak_mmr": peak_mmr,
+        "current_league": current_league,
+        "calibration_complete": calibrated,
+        "calibration_days": calibration_days,
+        "calibration_days_left": max(0, calibration_days - days_active) if not calibrated else 0,
+        "days_active": days_active,
+        "rank": rank,
+        "total_chatters": total_chatters,
+        "next_league": next_league,
+        "mmr_to_next": mmr_to_next,
+        "prize_info": prize_info,
+    }
+
+
+@router.get("/mmr/events")
+async def my_mmr_events(
+    user: User = Depends(require_chatter),
+    db: AsyncSession = Depends(get_db),
+):
+    """Последние 30 MMR-событий чаттера."""
+    if not user.chatter_id:
+        raise HTTPException(status_code=400, detail="Chatter not linked")
+
+    result = await db.execute(
+        text(
+            "SELECT event_date, event_type, category, points, description "
+            "FROM mmr_events "
+            "WHERE tenant_id = :tid AND chatter_id = :cid "
+            "ORDER BY event_date DESC, id DESC LIMIT 30"
+        ),
+        {"tid": user.tenant_id, "cid": user.chatter_id},
+    )
+    events = []
+    for r in result.mappings():
+        events.append({
+            "event_date": str(r["event_date"]),
+            "event_type": r["event_type"],
+            "category": r["category"],
+            "points": int(r["points"]),
+            "description": r["description"] or "",
+        })
+    return {"events": events}
+
+
+@router.get("/mmr/history")
+async def my_mmr_history(
+    user: User = Depends(require_chatter),
+    db: AsyncSession = Depends(get_db),
+):
+    """График накопительного MMR по дням за текущий сезон."""
+    if not user.chatter_id:
+        raise HTTPException(status_code=400, detail="Chatter not linked")
+
+    season_result = await db.execute(
+        text(
+            "SELECT id FROM mmr_seasons "
+            "WHERE tenant_id = :tid AND is_active IS NOT FALSE "
+            "ORDER BY id DESC LIMIT 1"
+        ),
+        {"tid": user.tenant_id},
+    )
+    season_row = season_result.mappings().first()
+    if not season_row:
+        return {"history": []}
+
+    result = await db.execute(
+        text(
+            "SELECT event_date, SUM(points) AS daily_points "
+            "FROM mmr_events "
+            "WHERE tenant_id = :tid AND chatter_id = :cid AND season_id = :sid "
+            "GROUP BY event_date ORDER BY event_date ASC"
+        ),
+        {"tid": user.tenant_id, "cid": user.chatter_id, "sid": season_row["id"]},
+    )
+    history = []
+    cumulative = 0
+    for r in result.mappings():
+        cumulative = max(0, cumulative + int(r["daily_points"]))
+        history.append({"date": str(r["event_date"]), "mmr": cumulative})
+    return {"history": history}
+
+
+@router.get("/mmr/leaderboard")
+async def my_mmr_leaderboard(
+    user: User = Depends(require_chatter),
+    db: AsyncSession = Depends(get_db),
+):
+    """Лидерборд агентства глазами чаттера. Без финансов других чаттеров."""
+    if not user.chatter_id:
+        raise HTTPException(status_code=400, detail="Chatter not linked")
+
+    season_result = await db.execute(
+        text(
+            "SELECT id FROM mmr_seasons "
+            "WHERE tenant_id = :tid AND is_active IS NOT FALSE "
+            "ORDER BY id DESC LIMIT 1"
+        ),
+        {"tid": user.tenant_id},
+    )
+    season_row = season_result.mappings().first()
+    if not season_row:
+        return {"rows": [], "my_rank": None}
+
+    result = await db.execute(
+        text(
+            "SELECT cm.chatter_id, c.name AS chatter_name, "
+            "       cm.current_mmr, cm.current_league, cm.days_active, "
+            "       cm.calibration_complete, "
+            "       ROW_NUMBER() OVER (ORDER BY cm.current_mmr DESC) AS rank "
+            "FROM chatter_mmr cm "
+            "JOIN chatters c ON cm.chatter_id = c.id "
+            "WHERE cm.tenant_id = :tid AND cm.season_id = :sid "
+            "ORDER BY cm.current_mmr DESC"
+        ),
+        {"tid": user.tenant_id, "sid": season_row["id"]},
+    )
+    all_rows = list(result.mappings())
+
+    my_rank = None
+    rows_out = []
+    for r in all_rows:
+        rank = int(r["rank"])
+        is_me = r["chatter_id"] == user.chatter_id
+        if is_me:
+            my_rank = rank
+        rows_out.append({
+            "rank": rank,
+            "chatter_id": r["chatter_id"],
+            "chatter_name": r["chatter_name"],
+            "current_mmr": int(r["current_mmr"]),
+            "current_league": r["current_league"],
+            "days_active": int(r["days_active"]),
+            "calibration_complete": bool(r["calibration_complete"]),
+            "is_me": is_me,
+        })
+
+    return {"rows": rows_out, "my_rank": my_rank}
+
+
+@router.get("/mmr/seasons-history")
+async def my_seasons_history(
+    user: User = Depends(require_chatter),
+    db: AsyncSession = Depends(get_db),
+):
+    """История прошлых сезонов чаттера из season_results."""
+    if not user.chatter_id:
+        raise HTTPException(status_code=400, detail="Chatter not linked")
+
+    result = await db.execute(
+        text(
+            "SELECT sr.rank, sr.final_mmr, sr.final_league, "
+            "       sr.prize_amount, sr.prize_paid, "
+            "       s.name AS season_name, s.start_date, s.end_date "
+            "FROM season_results sr "
+            "JOIN mmr_seasons s ON sr.season_id = s.id "
+            "WHERE sr.tenant_id = :tid AND sr.chatter_id = :cid "
+            "ORDER BY s.end_date DESC"
+        ),
+        {"tid": user.tenant_id, "cid": user.chatter_id},
+    )
+    rows = []
+    for r in result.mappings():
+        rows.append({
+            "season_name": r["season_name"],
+            "start_date": str(r["start_date"]) if r["start_date"] else None,
+            "end_date": str(r["end_date"]) if r["end_date"] else None,
+            "rank": r["rank"],
+            "final_mmr": r["final_mmr"],
+            "final_league": r["final_league"],
+            "prize_amount": float(r["prize_amount"] or 0),
+            "prize_paid": bool(r["prize_paid"]),
+        })
+    return {"history": rows}

@@ -5,7 +5,7 @@ import { usePathname, useRouter } from 'next/navigation'
 import { useEffect, useState } from 'react'
 import {
   LayoutDashboard, List, BarChart3, User, LogOut,
-  ChevronLeft, ChevronRight,
+  ChevronLeft, ChevronRight, Trophy,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { logout, isAuthenticated, getUserRole } from '@/lib/auth'
@@ -15,6 +15,7 @@ import { getPrevMonth, getNextMonth } from '@/lib/utils'
 const PORTAL_NAV = [
   { href: '/portal', label: 'Мой обзор', icon: LayoutDashboard, exact: true },
   { href: '/portal/transactions', label: 'Мои транзакции', icon: List },
+  { href: '/portal/ranking', label: 'Рейтинг', icon: Trophy },
   { href: '/portal/kpi', label: 'Мой KPI', icon: BarChart3 },
   { href: '/portal/profile', label: 'Профиль', icon: User },
 ]
