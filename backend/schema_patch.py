@@ -306,6 +306,94 @@ _PATCHES: list[tuple[str, bool]] = [
         False,
     ),
     ("CREATE INDEX IF NOT EXISTS idx_invites_token ON chatter_invites(token)", False),
+    # ── MMR-система рейтинга чаттеров ─────────────────────────────────────────
+    (
+        """CREATE TABLE IF NOT EXISTS mmr_settings (
+            tenant_id INTEGER PRIMARY KEY REFERENCES tenants(id) ON DELETE CASCADE,
+            fin_overperform_threshold NUMERIC DEFAULT 1.10,
+            fin_underperform_threshold NUMERIC DEFAULT 0.90,
+            fin_overperform_points INTEGER DEFAULT 25,
+            fin_perform_points INTEGER DEFAULT 15,
+            fin_underperform_points INTEGER DEFAULT -15,
+            fin_empty_shift_points INTEGER DEFAULT -15,
+            kpi_threshold_high NUMERIC DEFAULT 1.15,
+            kpi_threshold_low NUMERIC DEFAULT 0.85,
+            kpi_high_points INTEGER DEFAULT 5,
+            kpi_low_points INTEGER DEFAULT -5,
+            kpi_enabled BOOLEAN DEFAULT TRUE,
+            season_carry_over NUMERIC DEFAULT 0.5,
+            prize_1st NUMERIC DEFAULT 200,
+            prize_2nd NUMERIC DEFAULT 150,
+            prize_3rd NUMERIC DEFAULT 100,
+            calibration_days INTEGER DEFAULT 14,
+            updated_at TIMESTAMP DEFAULT NOW()
+        )""",
+        False,
+    ),
+    (
+        """CREATE TABLE IF NOT EXISTS mmr_seasons (
+            id SERIAL PRIMARY KEY,
+            tenant_id INTEGER REFERENCES tenants(id) ON DELETE CASCADE,
+            name TEXT NOT NULL,
+            start_date DATE NOT NULL,
+            end_date DATE NOT NULL,
+            is_active BOOLEAN DEFAULT TRUE,
+            closed_at TIMESTAMP,
+            created_at TIMESTAMP DEFAULT NOW()
+        )""",
+        False,
+    ),
+    ("CREATE INDEX IF NOT EXISTS idx_seasons_tenant_active ON mmr_seasons(tenant_id, is_active)", False),
+    (
+        """CREATE TABLE IF NOT EXISTS chatter_mmr (
+            id SERIAL PRIMARY KEY,
+            tenant_id INTEGER REFERENCES tenants(id) ON DELETE CASCADE,
+            chatter_id INTEGER REFERENCES chatters(id) ON DELETE CASCADE,
+            season_id INTEGER REFERENCES mmr_seasons(id) ON DELETE CASCADE,
+            current_mmr INTEGER DEFAULT 0,
+            peak_mmr INTEGER DEFAULT 0,
+            current_league TEXT,
+            calibration_complete BOOLEAN DEFAULT FALSE,
+            days_active INTEGER DEFAULT 0,
+            UNIQUE(tenant_id, chatter_id, season_id)
+        )""",
+        False,
+    ),
+    (
+        """CREATE TABLE IF NOT EXISTS mmr_events (
+            id SERIAL PRIMARY KEY,
+            tenant_id INTEGER REFERENCES tenants(id) ON DELETE CASCADE,
+            chatter_id INTEGER REFERENCES chatters(id) ON DELETE CASCADE,
+            season_id INTEGER REFERENCES mmr_seasons(id),
+            event_date DATE NOT NULL,
+            event_type TEXT NOT NULL,
+            category TEXT NOT NULL,
+            points INTEGER NOT NULL,
+            description TEXT,
+            shift_id INTEGER REFERENCES shifts_catalog(id),
+            model_id INTEGER REFERENCES models(id),
+            created_at TIMESTAMP DEFAULT NOW()
+        )""",
+        False,
+    ),
+    ("CREATE INDEX IF NOT EXISTS idx_mmr_events_chatter ON mmr_events(chatter_id, event_date)", False),
+    ("CREATE INDEX IF NOT EXISTS idx_mmr_events_season ON mmr_events(season_id, points)", False),
+    (
+        """CREATE TABLE IF NOT EXISTS season_results (
+            id SERIAL PRIMARY KEY,
+            tenant_id INTEGER REFERENCES tenants(id),
+            season_id INTEGER REFERENCES mmr_seasons(id),
+            chatter_id INTEGER REFERENCES chatters(id),
+            final_mmr INTEGER,
+            final_league TEXT,
+            rank INTEGER,
+            prize_amount NUMERIC DEFAULT 0,
+            prize_paid BOOLEAN DEFAULT FALSE,
+            prize_paid_at TIMESTAMP,
+            created_at TIMESTAMP DEFAULT NOW()
+        )""",
+        False,
+    ),
 ]
 
 

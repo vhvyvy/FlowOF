@@ -2723,3 +2723,886 @@ https://flowof.io/join?token=abc123...
 4. app/portal/transactions/ — таблица транзакций
 5. app/portal/kpi/ — KPI чаттера
 6. middleware.ts — защита маршрутов по роли
+# FlowOF — MMR-система рейтинга чаттеров
+# Добавь в конец .cursorrules
+
+---
+
+## Задача
+
+Геймифицированная рейтинговая система для чаттеров внутри агентства.
+Чаттеры получают/теряют MMR за дневные результаты, поднимаются по лигам,
+соревнуются за топ-места сезона. Owner видит лидерборд, чаттер видит свой
+рейтинг и динамику.
+
+---
+
+## Концепция
+
+### MMR (Match Making Rating)
+Числовой рейтинг чаттера. Начисляется/снимается ежедневно по двум
+направлениям: финансовая часть (выручка vs план) и KPI часть (метрики
+Onlymonster vs личный средний чаттера).
+
+### Сезоны
+Сезон = квартал. Зима (дек-фев), весна (мар-май), лето (июн-авг),
+осень (сен-ноя). В конце сезона:
+- Фиксация топ-3 по итоговому MMR
+- Выплата призов: 1 место $200, 2 место $150, 3 место $100
+- MMR переносится на 50% в новый сезон
+
+### Лиги
+Bronze → Silver → Gold → Platinum → Diamond → Master → Grandmaster
+
+У каждой лиги (кроме Grandmaster) три подранга: III → II → I (где I выше).
+
+Пороги MMR (стартовые, потом можно тюнить):
+- Bronze III: 0
+- Bronze II: 100
+- Bronze I: 200
+- Silver III: 300
+- Silver II: 450
+- Silver I: 600
+- Gold III: 800
+- Gold II: 1000
+- Gold I: 1250
+- Platinum III: 1500
+- Platinum II: 1800
+- Platinum I: 2100
+- Diamond III: 2500
+- Diamond II: 3000
+- Diamond I: 3500
+- Master: 4500
+- Grandmaster: 6000
+
+### Калибровка
+Первые 14 дней работы чаттера MMR копится, но лига не присваивается.
+В кабинете показывается "Калибровка: 7/14 дней". После 14 дней система
+смотрит накопленный MMR и присваивает соответствующую лигу.
+
+---
+
+## Дневной план чаттера
+
+Расчёт дневного плана на конкретной смене:
+
+```
+дневной_план = (план_модели_на_месяц / количество_смен_в_дне) / дней_в_месяце
+```
+
+Пример: модель Anna имеет план $10,000 на месяц. В агентстве три смены
+(Ночь/Утро/Вечер). В месяце 30 дней. Дневной план на одну смену = 10000/3/30 = $111.
+
+Если чаттер работал в одну ночь на двух моделях — у него два дневных плана,
+оцениваются раздельно.
+
+---
+
+## Логика начисления MMR
+
+### Финансовая часть (за каждую смену-анкету в день)
+
+```
+выручка_за_день_на_анкете → сравнение с дневным_планом_на_анкете
+
+выполнение >= 110%  →  +25 MMR
+выполнение 90-110%  →  +15 MMR
+выполнение  < 90%   →  -15 MMR
+смена была, 0 транзакций  →  -15 MMR
+смены не было  →  0 (выходной, не считается)
+```
+
+### KPI часть (раз в день суммарно)
+
+После того как Onlymonster отдал дневные метрики чаттера, сравниваем:
+- PPV Open Rate
+- RPC
+- Conversion Score
+
+Для каждой метрики сравнение с личным средним чаттера за всё время
+(или с агентским средним если у чаттера < 14 дней истории).
+
+```
+для каждой из 3 метрик:
+  значение > среднее × 1.15  →  +5 MMR
+  значение в пределах ±15% от среднего  →  0
+  значение < среднее × 0.85  →  -5 MMR
+```
+
+Максимум за день по KPI: +15 MMR (если все три выше среднего).
+Максимум за день по финансам: зависит от числа смен (обычно +25 если
+была одна смена с перевыполнением).
+
+### Все параметры — настраиваемые в админке
+
+Пороги выполнения плана (90%, 110%), значения бонусов/штрафов (+25, +15,
+-15, +5), коэффициенты KPI (1.15, 0.85) — всё хранится в таблице настроек
+агентства и редактируется owner. На старте — дефолтные значения выше.
+
+---
+
+## Структура БД
+
+### Таблица настроек MMR (одна запись на tenant)
+
+```sql
+CREATE TABLE IF NOT EXISTS mmr_settings (
+  tenant_id INTEGER PRIMARY KEY REFERENCES tenants(id) ON DELETE CASCADE,
+
+  -- финансовая часть
+  fin_overperform_threshold NUMERIC DEFAULT 1.10,
+  fin_underperform_threshold NUMERIC DEFAULT 0.90,
+  fin_overperform_points INTEGER DEFAULT 25,
+  fin_perform_points INTEGER DEFAULT 15,
+  fin_underperform_points INTEGER DEFAULT -15,
+  fin_empty_shift_points INTEGER DEFAULT -15,
+
+  -- KPI часть
+  kpi_threshold_high NUMERIC DEFAULT 1.15,
+  kpi_threshold_low NUMERIC DEFAULT 0.85,
+  kpi_high_points INTEGER DEFAULT 5,
+  kpi_low_points INTEGER DEFAULT -5,
+  kpi_enabled BOOLEAN DEFAULT TRUE,    -- если Onlymonster не подключён, выкл
+
+  -- сезоны
+  season_carry_over NUMERIC DEFAULT 0.5,   -- 50% переноса MMR
+
+  -- призы
+  prize_1st NUMERIC DEFAULT 200,
+  prize_2nd NUMERIC DEFAULT 150,
+  prize_3rd NUMERIC DEFAULT 100,
+
+  -- калибровка
+  calibration_days INTEGER DEFAULT 14,
+
+  updated_at TIMESTAMP DEFAULT NOW()
+);
+```
+
+### Сезоны
+
+```sql
+CREATE TABLE IF NOT EXISTS mmr_seasons (
+  id SERIAL PRIMARY KEY,
+  tenant_id INTEGER REFERENCES tenants(id) ON DELETE CASCADE,
+  name TEXT NOT NULL,                  -- 'Лето 2026'
+  start_date DATE NOT NULL,
+  end_date DATE NOT NULL,
+  is_active BOOLEAN DEFAULT TRUE,
+  closed_at TIMESTAMP,                 -- когда сезон закрылся
+  created_at TIMESTAMP DEFAULT NOW()
+);
+
+CREATE INDEX idx_seasons_tenant_active ON mmr_seasons(tenant_id, is_active);
+```
+
+### Текущее состояние MMR чаттера в сезоне
+
+```sql
+CREATE TABLE IF NOT EXISTS chatter_mmr (
+  id SERIAL PRIMARY KEY,
+  tenant_id INTEGER REFERENCES tenants(id) ON DELETE CASCADE,
+  chatter_id INTEGER REFERENCES chatters(id) ON DELETE CASCADE,
+  season_id INTEGER REFERENCES mmr_seasons(id) ON DELETE CASCADE,
+
+  current_mmr INTEGER DEFAULT 0,
+  peak_mmr INTEGER DEFAULT 0,          -- максимум за сезон
+  current_league TEXT,                 -- 'gold_ii', 'diamond_iii', null=калибровка
+  calibration_complete BOOLEAN DEFAULT FALSE,
+  days_active INTEGER DEFAULT 0,       -- сколько активных дней в сезоне
+
+  UNIQUE(tenant_id, chatter_id, season_id)
+);
+```
+
+### История MMR-событий
+
+```sql
+CREATE TABLE IF NOT EXISTS mmr_events (
+  id SERIAL PRIMARY KEY,
+  tenant_id INTEGER REFERENCES tenants(id) ON DELETE CASCADE,
+  chatter_id INTEGER REFERENCES chatters(id) ON DELETE CASCADE,
+  season_id INTEGER REFERENCES mmr_seasons(id),
+
+  event_date DATE NOT NULL,
+  event_type TEXT NOT NULL,            -- 'finance' | 'kpi'
+  category TEXT NOT NULL,              -- 'overperform' | 'perform' | 'underperform' | 'kpi_high' | 'kpi_low'
+  points INTEGER NOT NULL,             -- +25 / +15 / -15 / +5 / -5
+  description TEXT,                    -- 'План $111, выручка $145 (130%)'
+  shift_id INTEGER REFERENCES shifts_catalog(id),
+  model_id INTEGER REFERENCES models(id),
+
+  created_at TIMESTAMP DEFAULT NOW()
+);
+
+CREATE INDEX idx_mmr_events_chatter ON mmr_events(chatter_id, event_date);
+CREATE INDEX idx_mmr_events_season ON mmr_events(season_id, points);
+```
+
+### Результаты прошлых сезонов
+
+```sql
+CREATE TABLE IF NOT EXISTS season_results (
+  id SERIAL PRIMARY KEY,
+  tenant_id INTEGER REFERENCES tenants(id),
+  season_id INTEGER REFERENCES mmr_seasons(id),
+  chatter_id INTEGER REFERENCES chatters(id),
+  final_mmr INTEGER,
+  final_league TEXT,
+  rank INTEGER,                        -- место в агентстве
+  prize_amount NUMERIC DEFAULT 0,
+  prize_paid BOOLEAN DEFAULT FALSE,    -- owner отметил что выплатил
+  prize_paid_at TIMESTAMP,
+  created_at TIMESTAMP DEFAULT NOW()
+);
+```
+
+---
+
+## Backend — сервис расчёта MMR
+
+```python
+# services/mmr_service.py
+
+from datetime import date, datetime, timedelta
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy import select
+import logging
+
+logger = logging.getLogger(__name__)
+
+LEAGUE_THRESHOLDS = [
+    ("bronze_iii", 0),
+    ("bronze_ii", 100),
+    ("bronze_i", 200),
+    ("silver_iii", 300),
+    ("silver_ii", 450),
+    ("silver_i", 600),
+    ("gold_iii", 800),
+    ("gold_ii", 1000),
+    ("gold_i", 1250),
+    ("platinum_iii", 1500),
+    ("platinum_ii", 1800),
+    ("platinum_i", 2100),
+    ("diamond_iii", 2500),
+    ("diamond_ii", 3000),
+    ("diamond_i", 3500),
+    ("master", 4500),
+    ("grandmaster", 6000),
+]
+
+def mmr_to_league(mmr: int) -> str:
+    """Из числа MMR определить лигу."""
+    league = LEAGUE_THRESHOLDS[0][0]
+    for name, threshold in LEAGUE_THRESHOLDS:
+        if mmr >= threshold:
+            league = name
+        else:
+            break
+    return league
+
+
+class MMRService:
+    """
+    Расчёт MMR-событий за день для всех чаттеров tenant.
+    Запускается ежедневно через APScheduler.
+    """
+
+    def __init__(self, db: AsyncSession):
+        self.db = db
+
+    async def process_day(self, tenant_id: int, target_date: date):
+        """Главный метод — обработать один день для tenant."""
+        # 1. Получить настройки MMR
+        settings = await self._get_settings(tenant_id)
+
+        # 2. Получить активный сезон (создать если нет)
+        season = await self._get_or_create_active_season(tenant_id, target_date)
+
+        # 3. Финансовая часть — за каждый день, каждый чаттер, каждая смена
+        await self._process_finance(tenant_id, season, settings, target_date)
+
+        # 4. KPI часть — если включена и есть данные
+        if settings.kpi_enabled:
+            await self._process_kpi(tenant_id, season, settings, target_date)
+
+        # 5. Пересчитать current_mmr и лигу для всех чаттеров
+        await self._recalculate_mmr_state(tenant_id, season)
+
+        await self.db.commit()
+        logger.info(f"MMR обработан: tenant={tenant_id}, date={target_date}")
+
+    async def _process_finance(self, tenant_id, season, settings, target_date):
+        """Для каждой смены каждого чаттера — сравнить выручку с планом."""
+        # Получить все транзакции чаттеров за день, сгруппированные по chatter_id + shift_id + model_id
+        result = await self.db.execute(
+            """
+            SELECT t.chatter_id, t.shift_id, t.model_id, SUM(t.amount) AS revenue
+            FROM transactions t
+            WHERE t.tenant_id = :tid
+              AND DATE(t.date) = :date
+              AND t.chatter_id IS NOT NULL
+            GROUP BY t.chatter_id, t.shift_id, t.model_id
+            """,
+            {"tid": tenant_id, "date": target_date}
+        )
+        day_groups = list(result.mappings())
+
+        # Получить число смен в агентстве
+        shifts_count_result = await self.db.execute(
+            "SELECT COUNT(*) FROM shifts_catalog WHERE tenant_id = :tid AND active = TRUE",
+            {"tid": tenant_id}
+        )
+        shifts_count = shifts_count_result.scalar() or 1
+
+        # Дней в месяце target_date
+        days_in_month = self._days_in_month(target_date)
+
+        for row in day_groups:
+            # Дневной план для этой модели/смены
+            plan_result = await self.db.execute(
+                "SELECT plan_amount FROM plans WHERE tenant_id = :tid AND model_id = :mid AND month = :m AND year = :y",
+                {"tid": tenant_id, "mid": row["model_id"], "m": target_date.month, "y": target_date.year}
+            )
+            plan_row = plan_result.mappings().first()
+            if not plan_row or not plan_row["plan_amount"]:
+                continue
+
+            monthly_plan = float(plan_row["plan_amount"])
+            daily_plan = monthly_plan / shifts_count / days_in_month
+            revenue = float(row["revenue"])
+            performance = revenue / daily_plan if daily_plan > 0 else 0
+
+            # Определить категорию
+            if performance >= settings.fin_overperform_threshold:
+                category = "overperform"
+                points = settings.fin_overperform_points
+            elif performance >= settings.fin_underperform_threshold:
+                category = "perform"
+                points = settings.fin_perform_points
+            else:
+                category = "underperform"
+                points = settings.fin_underperform_points
+
+            description = f"План ${daily_plan:.0f}, выручка ${revenue:.0f} ({performance*100:.0f}%)"
+
+            await self._create_event(
+                tenant_id=tenant_id,
+                chatter_id=row["chatter_id"],
+                season_id=season.id,
+                event_date=target_date,
+                event_type="finance",
+                category=category,
+                points=points,
+                description=description,
+                shift_id=row["shift_id"],
+                model_id=row["model_id"]
+            )
+
+        # Отдельно — пустые смены (чаттер был назначен но 0 транзакций)
+        # Здесь нужна логика учёта смен чаттера. Если в продукте уже есть
+        # таблица назначений чаттера на смену — использовать её.
+        # Если нет — пропустить этот шаг (минусы за пустые смены пока не считаем).
+
+    async def _process_kpi(self, tenant_id, season, settings, target_date):
+        """KPI-метрики из Onlymonster — сравнение с личным средним чаттера."""
+        # Получить дневные метрики из Onlymonster service
+        # (предполагается что сервис уже умеет отдавать метрики на дату)
+        from services.onlymonster import OnlymonsterService
+
+        tenant_result = await self.db.execute(
+            "SELECT onlymonster_key, onlymonster_account_ids FROM tenants WHERE id = :tid",
+            {"tid": tenant_id}
+        )
+        tenant = tenant_result.mappings().first()
+        if not tenant or not tenant["onlymonster_key"]:
+            return
+
+        om = OnlymonsterService(tenant["onlymonster_key"], tenant["onlymonster_account_ids"])
+        daily_metrics = await om.get_daily_metrics(target_date)
+        # daily_metrics: [{chatter_name, ppv_open_rate, rpc, conversion}, ...]
+
+        for metric in daily_metrics:
+            # Найти chatter_id по имени
+            chatter_result = await self.db.execute(
+                "SELECT id FROM chatters WHERE tenant_id = :tid AND name = :name",
+                {"tid": tenant_id, "name": metric["chatter_name"]}
+            )
+            chatter_row = chatter_result.mappings().first()
+            if not chatter_row:
+                continue
+            chatter_id = chatter_row["id"]
+
+            # Личный средний или агентский (если калибровка не завершена)
+            mmr_row = await self.db.execute(
+                "SELECT calibration_complete FROM chatter_mmr WHERE tenant_id = :tid AND chatter_id = :cid AND season_id = :sid",
+                {"tid": tenant_id, "cid": chatter_id, "sid": season.id}
+            )
+            mmr_state = mmr_row.mappings().first()
+            use_personal = mmr_state and mmr_state["calibration_complete"]
+
+            # Сравнить три метрики
+            for key in ["ppv_open_rate", "rpc", "conversion"]:
+                value = metric.get(key)
+                if value is None:
+                    continue
+
+                avg = await self._get_avg_metric(
+                    tenant_id, chatter_id, key, personal=use_personal
+                )
+                if not avg:
+                    continue
+
+                if value > avg * settings.kpi_threshold_high:
+                    category = "kpi_high"
+                    points = settings.kpi_high_points
+                    description = f"{key.upper()}: {value:.2f} (среднее {avg:.2f}, +{(value/avg-1)*100:.0f}%)"
+                elif value < avg * settings.kpi_threshold_low:
+                    category = "kpi_low"
+                    points = settings.kpi_low_points
+                    description = f"{key.upper()}: {value:.2f} (среднее {avg:.2f}, -{(1-value/avg)*100:.0f}%)"
+                else:
+                    continue  # в норме, событий не создаём
+
+                await self._create_event(
+                    tenant_id=tenant_id,
+                    chatter_id=chatter_id,
+                    season_id=season.id,
+                    event_date=target_date,
+                    event_type="kpi",
+                    category=category,
+                    points=points,
+                    description=description
+                )
+
+    async def _recalculate_mmr_state(self, tenant_id, season):
+        """Пересчитать current_mmr, лигу, дни активности для всех чаттеров."""
+        # Получить всех чаттеров с событиями в этом сезоне
+        result = await self.db.execute(
+            """
+            SELECT chatter_id,
+                   SUM(points) AS total_mmr,
+                   COUNT(DISTINCT event_date) AS active_days
+            FROM mmr_events
+            WHERE tenant_id = :tid AND season_id = :sid
+            GROUP BY chatter_id
+            """,
+            {"tid": tenant_id, "sid": season.id}
+        )
+
+        settings = await self._get_settings(tenant_id)
+
+        for row in result.mappings():
+            total = max(0, row["total_mmr"])  # MMR не может быть отрицательным
+            active_days = row["active_days"]
+            calibrated = active_days >= settings.calibration_days
+            league = mmr_to_league(total) if calibrated else None
+
+            # UPSERT в chatter_mmr
+            await self.db.execute(
+                """
+                INSERT INTO chatter_mmr (tenant_id, chatter_id, season_id, current_mmr, peak_mmr, current_league, calibration_complete, days_active)
+                VALUES (:tid, :cid, :sid, :mmr, :mmr, :league, :calib, :days)
+                ON CONFLICT (tenant_id, chatter_id, season_id) DO UPDATE
+                SET current_mmr = :mmr,
+                    peak_mmr = GREATEST(chatter_mmr.peak_mmr, :mmr),
+                    current_league = :league,
+                    calibration_complete = :calib,
+                    days_active = :days
+                """,
+                {
+                    "tid": tenant_id, "cid": row["chatter_id"], "sid": season.id,
+                    "mmr": total, "league": league, "calib": calibrated, "days": active_days
+                }
+            )
+
+    async def _create_event(self, **kwargs):
+        """Записать MMR-событие."""
+        await self.db.execute(
+            """
+            INSERT INTO mmr_events
+            (tenant_id, chatter_id, season_id, event_date, event_type, category, points, description, shift_id, model_id)
+            VALUES (:tenant_id, :chatter_id, :season_id, :event_date, :event_type, :category, :points, :description, :shift_id, :model_id)
+            """,
+            {**kwargs, "shift_id": kwargs.get("shift_id"), "model_id": kwargs.get("model_id")}
+        )
+
+    async def _get_settings(self, tenant_id):
+        result = await self.db.execute(
+            "SELECT * FROM mmr_settings WHERE tenant_id = :tid",
+            {"tid": tenant_id}
+        )
+        settings = result.mappings().first()
+        if not settings:
+            # создать с дефолтами
+            await self.db.execute(
+                "INSERT INTO mmr_settings (tenant_id) VALUES (:tid)",
+                {"tid": tenant_id}
+            )
+            await self.db.commit()
+            result = await self.db.execute(
+                "SELECT * FROM mmr_settings WHERE tenant_id = :tid",
+                {"tid": tenant_id}
+            )
+            settings = result.mappings().first()
+        # вернуть как объект с атрибутами
+        class S:
+            pass
+        s = S()
+        for k, v in settings.items():
+            setattr(s, k, v)
+        return s
+
+    async def _get_or_create_active_season(self, tenant_id, target_date):
+        """Найти активный сезон или создать на квартал target_date."""
+        result = await self.db.execute(
+            "SELECT * FROM mmr_seasons WHERE tenant_id = :tid AND is_active = TRUE AND :date BETWEEN start_date AND end_date",
+            {"tid": tenant_id, "date": target_date}
+        )
+        season = result.mappings().first()
+        if season:
+            class Obj: pass
+            o = Obj()
+            for k, v in season.items():
+                setattr(o, k, v)
+            return o
+
+        # Создать сезон на текущий квартал
+        quarter_start, quarter_end, name = self._quarter_bounds(target_date)
+        result = await self.db.execute(
+            """
+            INSERT INTO mmr_seasons (tenant_id, name, start_date, end_date)
+            VALUES (:tid, :name, :start, :end)
+            RETURNING *
+            """,
+            {"tid": tenant_id, "name": name, "start": quarter_start, "end": quarter_end}
+        )
+        await self.db.commit()
+        season = result.mappings().first()
+        class Obj: pass
+        o = Obj()
+        for k, v in season.items():
+            setattr(o, k, v)
+        return o
+
+    def _quarter_bounds(self, d: date):
+        """Границы квартала для даты."""
+        q = (d.month - 1) // 3 + 1
+        start_month = (q - 1) * 3 + 1
+        end_month = start_month + 2
+        from calendar import monthrange
+        start = date(d.year, start_month, 1)
+        end = date(d.year, end_month, monthrange(d.year, end_month)[1])
+
+        names = {1: "Зима", 2: "Весна", 3: "Лето", 4: "Осень"}
+        return start, end, f"{names[q]} {d.year}"
+
+    def _days_in_month(self, d: date) -> int:
+        from calendar import monthrange
+        return monthrange(d.year, d.month)[1]
+
+    async def _get_avg_metric(self, tenant_id, chatter_id, key, personal=True):
+        """Средний KPI чаттера (personal) или агентства (если калибровка не завершена)."""
+        # Здесь упрощённо. В реальности — сервис должен считать средние из истории
+        # метрик Onlymonster. Пока возвращаем заглушку или достаём из таблицы метрик.
+        return None  # TODO: реализовать через таблицу метрик KPI
+```
+
+### Закрытие сезона
+
+```python
+# services/season_service.py
+
+class SeasonService:
+    """Закрытие сезона: фиксация результатов, перенос MMR в новый."""
+
+    async def close_season(self, season_id: int, db: AsyncSession):
+        # 1. Получить всех чаттеров с MMR в сезоне, отсортированных
+        result = await db.execute(
+            """
+            SELECT cm.chatter_id, cm.current_mmr, cm.current_league, cm.tenant_id
+            FROM chatter_mmr cm
+            WHERE cm.season_id = :sid AND cm.calibration_complete = TRUE
+            ORDER BY cm.current_mmr DESC
+            """,
+            {"sid": season_id}
+        )
+        chatters = list(result.mappings())
+
+        if not chatters:
+            return
+
+        tenant_id = chatters[0]["tenant_id"]
+        settings_result = await db.execute(
+            "SELECT prize_1st, prize_2nd, prize_3rd, season_carry_over FROM mmr_settings WHERE tenant_id = :tid",
+            {"tid": tenant_id}
+        )
+        settings = settings_result.mappings().first()
+
+        # 2. Записать результаты + призы для топ-3
+        for rank, ch in enumerate(chatters, start=1):
+            prize = 0
+            if rank == 1: prize = float(settings["prize_1st"])
+            elif rank == 2: prize = float(settings["prize_2nd"])
+            elif rank == 3: prize = float(settings["prize_3rd"])
+
+            await db.execute(
+                """
+                INSERT INTO season_results
+                (tenant_id, season_id, chatter_id, final_mmr, final_league, rank, prize_amount)
+                VALUES (:tid, :sid, :cid, :mmr, :league, :rank, :prize)
+                """,
+                {
+                    "tid": tenant_id, "sid": season_id, "cid": ch["chatter_id"],
+                    "mmr": ch["current_mmr"], "league": ch["current_league"],
+                    "rank": rank, "prize": prize
+                }
+            )
+
+        # 3. Закрыть сезон
+        await db.execute(
+            "UPDATE mmr_seasons SET is_active = FALSE, closed_at = NOW() WHERE id = :sid",
+            {"sid": season_id}
+        )
+
+        # 4. Создать новый сезон и перенести 50% MMR
+        carry = float(settings["season_carry_over"])
+        # Новый сезон создастся автоматически в _get_or_create_active_season
+        # Перенос MMR: для каждого чаттера создать стартовое событие на сумму current_mmr * carry
+        # Это будет сделано при первом запуске process_day в новом сезоне
+
+        await db.commit()
+```
+
+---
+
+## Backend — роутеры
+
+### routers/mmr.py — для owner
+
+```python
+router = APIRouter(prefix="/api/v1/mmr", tags=["mmr"])
+
+@router.get("/leaderboard")
+async def leaderboard(
+    season_id: int | None = None,
+    owner: User = Depends(require_owner),
+    db: AsyncSession = Depends(get_db)
+):
+    """Лидерборд агентства за сезон (по умолчанию — активный)."""
+    # JOIN chatter_mmr + chatters → отсортировано по current_mmr DESC
+
+@router.get("/events")
+async def events(
+    chatter_id: int | None = None,
+    days: int = 30,
+    owner: User = Depends(require_owner),
+    db: AsyncSession = Depends(get_db)
+):
+    """История MMR-событий — для дебага и просмотра."""
+
+@router.get("/settings")
+async def get_settings(owner: User = Depends(require_owner), db: AsyncSession = Depends(get_db)):
+    """Текущие настройки MMR."""
+
+@router.put("/settings")
+async def update_settings(data: MMRSettingsUpdate, owner: User = Depends(require_owner), db: AsyncSession = Depends(get_db)):
+    """Обновить настройки MMR."""
+
+@router.get("/seasons")
+async def list_seasons(owner: User = Depends(require_owner), db: AsyncSession = Depends(get_db)):
+    """Список сезонов агентства — активный и закрытые."""
+
+@router.get("/seasons/{season_id}/results")
+async def season_results(season_id: int, owner: User = Depends(require_owner), db: AsyncSession = Depends(get_db)):
+    """Результаты закрытого сезона с призами."""
+
+@router.post("/seasons/{season_id}/mark-prize-paid/{chatter_id}")
+async def mark_prize_paid(season_id: int, chatter_id: int, owner: User = Depends(require_owner), db: AsyncSession = Depends(get_db)):
+    """Owner отмечает что выплатил приз чаттеру."""
+
+@router.post("/recalculate")
+async def recalculate_day(date: date, owner: User = Depends(require_owner), db: AsyncSession = Depends(get_db)):
+    """Ручной пересчёт MMR за конкретный день. Для починки если что-то пошло не так."""
+    service = MMRService(db)
+    await service.process_day(owner.tenant_id, date)
+    return {"success": True}
+```
+
+### routers/chatter_portal.py — расширение для чаттера
+
+```python
+@router.get("/mmr")
+async def my_mmr(
+    user: User = Depends(require_chatter),
+    db: AsyncSession = Depends(get_db)
+):
+    """Текущий MMR чаттера, лига, место в агентстве, динамика."""
+    # current_mmr из chatter_mmr
+    # league + следующая лига + сколько MMR до неё
+    # rank среди агентства
+    # последние 10 событий
+    # график MMR по дням за сезон
+
+@router.get("/mmr/leaderboard")
+async def my_leaderboard(
+    user: User = Depends(require_chatter),
+    db: AsyncSession = Depends(get_db)
+):
+    """Лидерборд агентства — чаттер видит топ и свою позицию.
+    Имена других чаттеров видны, но НЕ их финансы/зарплаты."""
+
+@router.get("/mmr/season-history")
+async def my_season_history(
+    user: User = Depends(require_chatter),
+    db: AsyncSession = Depends(get_db)
+):
+    """История прошлых сезонов чаттера — лига, место, приз."""
+```
+
+---
+
+## Frontend
+
+### Owner — новая вкладка /dashboard/ranking
+
+Подвкладки:
+- Лидерборд — таблица всех чаттеров по MMR, лиги бейджами
+- Сезоны — текущий + история, кнопка "Закрыть сезон" в админке (для админа FlowOF)
+- Настройки — формы редактирования параметров MMR
+- Призы — кто что выиграл, кнопки "Отметить выплачено"
+
+Компонент LeagueBadge — везде где упоминается чаттер, показывает его лигу:
+
+```typescript
+function LeagueBadge({ league }: { league: string | null }) {
+  if (!league) return <span className="text-gray-500 text-xs">Калибровка</span>
+  const config: Record<string, { color: string; label: string }> = {
+    'bronze_iii': { color: '#a16207', label: 'Bronze III' },
+    'bronze_ii': { color: '#a16207', label: 'Bronze II' },
+    'bronze_i': { color: '#a16207', label: 'Bronze I' },
+    'silver_iii': { color: '#94a3b8', label: 'Silver III' },
+    'silver_ii': { color: '#94a3b8', label: 'Silver II' },
+    'silver_i': { color: '#94a3b8', label: 'Silver I' },
+    'gold_iii': { color: '#eab308', label: 'Gold III' },
+    'gold_ii': { color: '#eab308', label: 'Gold II' },
+    'gold_i': { color: '#eab308', label: 'Gold I' },
+    'platinum_iii': { color: '#06b6d4', label: 'Platinum III' },
+    'platinum_ii': { color: '#06b6d4', label: 'Platinum II' },
+    'platinum_i': { color: '#06b6d4', label: 'Platinum I' },
+    'diamond_iii': { color: '#a855f7', label: 'Diamond III' },
+    'diamond_ii': { color: '#a855f7', label: 'Diamond II' },
+    'diamond_i': { color: '#a855f7', label: 'Diamond I' },
+    'master': { color: '#ec4899', label: 'Master' },
+    'grandmaster': { color: '#ef4444', label: 'Grandmaster' },
+  }
+  const c = config[league] ?? config.bronze_iii
+  return (
+    <span className="text-xs px-2 py-0.5 rounded font-medium"
+          style={{ background: c.color + '20', color: c.color }}>
+      {c.label}
+    </span>
+  )
+}
+```
+
+### Чаттер — новая страница /portal/ranking
+
+Главный экран:
+- Большая карточка: моя лига, мой MMR, моё место в агентстве (например "5 из 12")
+- Прогресс до следующей лиги (полоса заполнения)
+- График MMR по дням за сезон (Recharts)
+- Лента событий: "12.06 +25 за перевыполнение плана", "13.06 -15 за низкий PPV OR"
+- Топ-10 агентства с моей позицией (если я не в топ-10 — внизу отдельной строкой)
+- Информация о призах сезона ("До конца сезона 23 дня. Призы: 1 место $200, 2 место $150, 3 место $100")
+
+История сезонов — отдельная подстраница со списком моих прошлых сезонов и результатов.
+
+---
+
+## Автоматизация
+
+### APScheduler — ежедневный пересчёт
+
+В main.py добавить задачу: каждый день в 03:00 UTC проходить по всем
+активным tenant и для каждого вызывать `MMRService.process_day(tenant_id, yesterday)`.
+
+```python
+@scheduler.scheduled_job("cron", hour=3, minute=0)
+async def daily_mmr_recalc():
+    yesterday = date.today() - timedelta(days=1)
+    async with AsyncSessionLocal() as db:
+        tenants = await db.execute("SELECT id FROM tenants WHERE active = TRUE")
+        for tenant_row in tenants:
+            try:
+                service = MMRService(db)
+                await service.process_day(tenant_row.id, yesterday)
+            except Exception as e:
+                logger.error(f"MMR daily failed for tenant {tenant_row.id}: {e}")
+```
+
+### Закрытие сезона
+
+В последний день квартала в 23:55 — автоматическое закрытие сезона:
+
+```python
+@scheduler.scheduled_job("cron", month="3,6,9,12", day="last", hour=23, minute=55)
+async def auto_close_season():
+    async with AsyncSessionLocal() as db:
+        active_seasons = await db.execute(
+            "SELECT id FROM mmr_seasons WHERE is_active = TRUE AND end_date = CURRENT_DATE"
+        )
+        for season in active_seasons:
+            try:
+                service = SeasonService()
+                await service.close_season(season.id, db)
+            except Exception as e:
+                logger.error(f"Season close failed: {e}")
+```
+
+---
+
+## Что НЕЛЬЗЯ забыть
+
+- ВСЕ запросы должны фильтроваться по tenant_id — мультитенантность критична
+- Чаттер видит только свой MMR детально + общий лидерборд (без чужих финансов)
+- Owner видит всё, может ручным эндпоинтом recalculate переcчитать день
+- MMR не может быть отрицательным (min 0)
+- При первом запуске на tenant — автосоздание mmr_settings с дефолтами
+- При новом сезоне — перенос 50% MMR прошлого сезона как стартовое событие
+- KPI часть отключается если у tenant нет ключа Onlymonster
+- Логировать ВСЕ MMR-события через mmr_events — для прозрачности и дебага
+- Призы фиксируются в season_results, owner отмечает факт выплаты вручную
+- Калибровка — первые 14 активных дней лига не показывается чаттеру
+
+---
+
+## Порядок реализации
+
+### Этап 1 — фундамент:
+1. Все таблицы (mmr_settings, mmr_seasons, chatter_mmr, mmr_events, season_results)
+2. Модели SQLAlchemy
+3. Сервис MMRService без KPI части (только финансы)
+4. Логика лиг, калибровки, сезонов
+5. Ручной эндпоинт /api/v1/mmr/recalculate для тестов
+6. Прогнать на тестовых данных одного tenant
+
+### Этап 2 — owner UI:
+1. routers/mmr.py — leaderboard, settings, seasons
+2. /dashboard/ranking — лидерборд + настройки
+3. Компонент LeagueBadge везде где упоминается чаттер
+
+### Этап 3 — чаттер UI:
+1. /api/v1/me/mmr эндпоинты
+2. /portal/ranking — главный экран чаттера
+3. Лента событий и график MMR
+
+### Этап 4 — KPI часть:
+1. _process_kpi в MMRService
+2. Хранение истории KPI метрик для расчёта средних
+3. Включение/выключение в настройках
+
+### Этап 5 — автоматизация:
+1. APScheduler — ежедневный пересчёт
+2. Автозакрытие сезона
+3. Уведомления (потом)

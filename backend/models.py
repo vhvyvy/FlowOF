@@ -8,6 +8,100 @@ from sqlalchemy.dialects.postgresql import JSONB
 from database import Base
 
 
+# ── MMR-система ───────────────────────────────────────────────────────────────
+
+class MmrSettings(Base):
+    """Настройки MMR для агентства (одна запись на tenant)."""
+    __tablename__ = "mmr_settings"
+
+    tenant_id = Column(Integer, ForeignKey("tenants.id", ondelete="CASCADE"), primary_key=True)
+    fin_overperform_threshold = Column(Numeric(5, 2), default=1.10)
+    fin_underperform_threshold = Column(Numeric(5, 2), default=0.90)
+    fin_overperform_points = Column(Integer, default=25)
+    fin_perform_points = Column(Integer, default=15)
+    fin_underperform_points = Column(Integer, default=-15)
+    fin_empty_shift_points = Column(Integer, default=-15)
+    kpi_threshold_high = Column(Numeric(5, 2), default=1.15)
+    kpi_threshold_low = Column(Numeric(5, 2), default=0.85)
+    kpi_high_points = Column(Integer, default=5)
+    kpi_low_points = Column(Integer, default=-5)
+    kpi_enabled = Column(Boolean, default=True)
+    season_carry_over = Column(Numeric(4, 2), default=0.5)
+    prize_1st = Column(Numeric(10, 2), default=200)
+    prize_2nd = Column(Numeric(10, 2), default=150)
+    prize_3rd = Column(Numeric(10, 2), default=100)
+    calibration_days = Column(Integer, default=14)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
+class MmrSeason(Base):
+    """Сезон MMR-рейтинга (квартал)."""
+    __tablename__ = "mmr_seasons"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    tenant_id = Column(Integer, ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False, index=True)
+    name = Column(Text, nullable=False)
+    start_date = Column(Date, nullable=False)
+    end_date = Column(Date, nullable=False)
+    is_active = Column(Boolean, default=True)
+    closed_at = Column(DateTime, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+
+class ChatterMmr(Base):
+    """Текущее MMR-состояние чаттера в рамках сезона."""
+    __tablename__ = "chatter_mmr"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    tenant_id = Column(Integer, ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False)
+    chatter_id = Column(Integer, ForeignKey("chatters.id", ondelete="CASCADE"), nullable=False)
+    season_id = Column(Integer, ForeignKey("mmr_seasons.id", ondelete="CASCADE"), nullable=False)
+    current_mmr = Column(Integer, default=0)
+    peak_mmr = Column(Integer, default=0)
+    current_league = Column(Text, nullable=True)
+    calibration_complete = Column(Boolean, default=False)
+    days_active = Column(Integer, default=0)
+
+    __table_args__ = (
+        UniqueConstraint("tenant_id", "chatter_id", "season_id", name="uq_chatter_mmr"),
+    )
+
+
+class MmrEvent(Base):
+    """Запись о начислении/снятии MMR-очков."""
+    __tablename__ = "mmr_events"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    tenant_id = Column(Integer, ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False, index=True)
+    chatter_id = Column(Integer, ForeignKey("chatters.id", ondelete="CASCADE"), nullable=False)
+    season_id = Column(Integer, ForeignKey("mmr_seasons.id"), nullable=True)
+    event_date = Column(Date, nullable=False)
+    event_type = Column(Text, nullable=False)   # 'finance' | 'kpi'
+    category = Column(Text, nullable=False)      # 'overperform' | 'perform' | etc.
+    points = Column(Integer, nullable=False)
+    description = Column(Text, nullable=True)
+    shift_id = Column(Integer, ForeignKey("shifts_catalog.id"), nullable=True)
+    model_id = Column(Integer, ForeignKey("models.id"), nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+
+class SeasonResult(Base):
+    """Итог чаттера по закрытому сезону."""
+    __tablename__ = "season_results"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    tenant_id = Column(Integer, ForeignKey("tenants.id"), nullable=True)
+    season_id = Column(Integer, ForeignKey("mmr_seasons.id"), nullable=True)
+    chatter_id = Column(Integer, ForeignKey("chatters.id"), nullable=True)
+    final_mmr = Column(Integer, nullable=True)
+    final_league = Column(Text, nullable=True)
+    rank = Column(Integer, nullable=True)
+    prize_amount = Column(Numeric(10, 2), default=0)
+    prize_paid = Column(Boolean, default=False)
+    prize_paid_at = Column(DateTime, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+
 class ChatterInvite(Base):
     """Одноразовая инвайт-ссылка для регистрации чаттера в личном кабинете."""
     __tablename__ = "chatter_invites"
