@@ -8,7 +8,7 @@ Endpoints used:
 from __future__ import annotations
 
 import logging
-from datetime import datetime
+from datetime import date, datetime
 from urllib.parse import urlencode
 
 import httpx
@@ -111,3 +111,39 @@ async def fetch_chatter_metrics(
 
     logger.info("Onlymonster sync: %d records", len(records))
     return records
+
+
+async def get_daily_metrics(
+    api_url: str,
+    api_key: str,
+    target_date: date,
+) -> list[dict]:
+    """
+    Fetch Onlymonster metrics for a single calendar day.
+
+    Returns list of dicts:
+      {om_user_id: str, ppv_open_rate: float|None, rpc: float|None, conversion: float|None}
+
+    Mapping to chatter catalog IDs is the caller's responsibility.
+    """
+    from datetime import datetime as _dt
+    start = _dt(target_date.year, target_date.month, target_date.day, 0, 0, 0)
+    end   = _dt(target_date.year, target_date.month, target_date.day, 23, 59, 59)
+
+    try:
+        raw = await fetch_chatter_metrics(api_url, api_key, start, end)
+    except Exception as exc:
+        logger.warning("get_daily_metrics error for %s: %s", target_date, exc)
+        return []
+
+    result: list[dict] = []
+    for r in raw:
+        ppv = r.get("ppv_open_rate")
+        apv = r.get("apv")   # average purchase value → used as RPC proxy
+        result.append({
+            "om_user_id": str(r.get("user_id", "")),
+            "ppv_open_rate": float(ppv) if ppv is not None else None,
+            "rpc": float(apv) if apv is not None else None,
+            "conversion": None,  # OM API does not expose raw conversion rate
+        })
+    return result

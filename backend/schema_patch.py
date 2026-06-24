@@ -395,6 +395,22 @@ _PATCHES: list[tuple[str, bool]] = [
         )""",
         False,
     ),
+    # ── История KPI чаттеров (для MMR Этап 4) ────────────────────────────────
+    (
+        """CREATE TABLE IF NOT EXISTS chatter_kpi_history (
+            id SERIAL PRIMARY KEY,
+            tenant_id INTEGER REFERENCES tenants(id) ON DELETE CASCADE,
+            chatter_id INTEGER REFERENCES chatters(id) ON DELETE CASCADE,
+            date DATE NOT NULL,
+            ppv_open_rate NUMERIC,
+            rpc NUMERIC,
+            conversion NUMERIC,
+            created_at TIMESTAMP DEFAULT NOW(),
+            UNIQUE(tenant_id, chatter_id, date)
+        )""",
+        False,
+    ),
+    ("CREATE INDEX IF NOT EXISTS idx_kpi_history_chatter ON chatter_kpi_history(chatter_id, date)", False),
     # ── Исправить NULL в is_active для существующих сезонов ──────────────────
     ("UPDATE mmr_seasons SET is_active = TRUE WHERE is_active IS NULL", False),
     # ── Повторная попытка создать MMR-таблицы (идемпотентно, IF NOT EXISTS) ───

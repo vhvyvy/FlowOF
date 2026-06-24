@@ -90,6 +90,10 @@ class MMRService:
             step = "process_finance"
             events_created = await self._process_finance(tenant_id, season, settings, target_date)
 
+            step = "process_kpi"
+            kpi_events = await self._process_kpi(tenant_id, season, settings, target_date)
+            events_created += kpi_events
+
             step = "recalculate_mmr_state"
             await self._recalculate_mmr_state(tenant_id, season)
 
@@ -262,6 +266,234 @@ class MMRService:
 
         logger.info("MMR finance done: tenant=%s date=%s created=%s skipped_no_plan=%s", tenant_id, target_date, events_created, skipped_no_plan)
         return events_created
+
+    # ── KPI часть ─────────────────────────────────────────────────────────────
+
+    async def _process_kpi(
+        self,
+        tenant_id: int,
+        season: _Row,
+        settings: _Row,
+        target_date: date,
+    ) -> int:
+        """
+        Для каждого чаттера за target_date сравниваем KPI с личным средним
+        (или агентским если < calibration_days активных дней) и записываем MMR-событие.
+        """
+        if not settings.kpi_enabled:
+            logger.info("MMR KPI: kpi_enabled=False for tenant=%s, skipping", tenant_id)
+            return 0
+
+        # Получить onlymonster_key и api_url из БД (tenant)
+        tenant_result = await self.db.execute(
+            text("SELECT onlymonster_key FROM tenants WHERE id = :tid"),
+            {"tid": tenant_id},
+        )
+        tenant_row = tenant_result.mappings().first()
+        om_key = tenant_row["onlymonster_key"] if tenant_row else None
+        if not om_key:
+            logger.info("MMR KPI: no onlymonster_key for tenant=%s, skipping", tenant_id)
+            return 0
+
+        # Идемпотентность — удалить kpi-события за этот день
+        await self.db.execute(
+            text(
+                "DELETE FROM mmr_events "
+                "WHERE tenant_id = :tid AND season_id = :sid "
+                "AND event_date = :dt AND event_type = 'kpi'"
+            ),
+            {"tid": tenant_id, "sid": season.id, "dt": target_date},
+        )
+
+        # Fetch daily KPI from Onlymonster API
+        from services.onlymonster import get_daily_metrics
+        api_url = "https://omapi.onlymonster.ai"
+        daily = await get_daily_metrics(api_url, om_key, target_date)
+        if not daily:
+            logger.info("MMR KPI: no data from OM for tenant=%s date=%s", tenant_id, target_date)
+            return 0
+
+        # Build OM user_id → chatter_id mapping via chatter_onlymonster_mapping + chatters catalog
+        # Step 1: load OM id → display names
+        mapping_result = await self.db.execute(
+            text("SELECT onlymonster_id, display_names FROM chatter_onlymonster_mapping WHERE tenant_id = :tid"),
+            {"tid": tenant_id},
+        )
+        import json as _json
+        om_id_to_names: dict[str, list[str]] = {}
+        for mr in mapping_result.mappings():
+            oid = str(mr["onlymonster_id"])
+            raw = mr["display_names"] or ""
+            try:
+                names = _json.loads(raw) if raw.startswith("[") else [raw]
+            except Exception:
+                names = [raw]
+            om_id_to_names[oid] = [n for n in names if n]
+
+        # Step 2: load chatters catalog (id, name)
+        chatters_result = await self.db.execute(
+            text("SELECT id, name FROM chatters WHERE tenant_id = :tid AND active = TRUE"),
+            {"tid": tenant_id},
+        )
+        name_to_chatter_id: dict[str, int] = {
+            r["name"].strip().lower(): int(r["id"])
+            for r in chatters_result.mappings()
+        }
+
+        # Step 3: resolve OM records → chatter_id
+        resolved_kpi: list[dict] = []
+        for rec in daily:
+            om_id = rec["om_user_id"]
+            display_names = om_id_to_names.get(om_id, [])
+            chatter_id: int | None = None
+            for dname in display_names:
+                chatter_id = name_to_chatter_id.get(dname.strip().lower())
+                if chatter_id is not None:
+                    break
+            if chatter_id is None:
+                logger.debug("MMR KPI: no chatter match for OM user_id=%s tenant=%s", om_id, tenant_id)
+                continue
+            resolved_kpi.append({"chatter_id": chatter_id, **rec})
+
+        if not resolved_kpi:
+            logger.info("MMR KPI: 0 resolved chatters for tenant=%s date=%s", tenant_id, target_date)
+            return 0
+
+        # UPSERT daily KPI into chatter_kpi_history
+        for rec in resolved_kpi:
+            await self.db.execute(
+                text(
+                    "INSERT INTO chatter_kpi_history "
+                    "  (tenant_id, chatter_id, date, ppv_open_rate, rpc, conversion) "
+                    "VALUES (:tid, :cid, :dt, :ppv, :rpc, :conv) "
+                    "ON CONFLICT (tenant_id, chatter_id, date) DO UPDATE SET "
+                    "  ppv_open_rate = EXCLUDED.ppv_open_rate, "
+                    "  rpc           = EXCLUDED.rpc, "
+                    "  conversion    = EXCLUDED.conversion"
+                ),
+                {
+                    "tid": tenant_id,
+                    "cid": rec["chatter_id"],
+                    "dt": target_date,
+                    "ppv": rec.get("ppv_open_rate"),
+                    "rpc": rec.get("rpc"),
+                    "conv": rec.get("conversion"),
+                },
+            )
+
+        # Load calibration thresholds
+        kpi_high = float(settings.kpi_threshold_high or 1.15)
+        kpi_low  = float(settings.kpi_threshold_low  or 0.85)
+        pts_high = int(settings.kpi_high_points  or 5)
+        pts_low  = int(settings.kpi_low_points   or -5)
+        calib_days = int(settings.calibration_days or 14)
+
+        METRICS = [
+            ("ppv_open_rate", "PPV OR"),
+            ("rpc",           "RPC"),
+        ]
+
+        events_created = 0
+        for rec in resolved_kpi:
+            cid = rec["chatter_id"]
+
+            # Is chatter calibrated? (active_days from chatter_mmr)
+            days_result = await self.db.execute(
+                text(
+                    "SELECT days_active FROM chatter_mmr "
+                    "WHERE tenant_id = :tid AND chatter_id = :cid AND season_id = :sid"
+                ),
+                {"tid": tenant_id, "cid": cid, "sid": season.id},
+            )
+            days_row = days_result.mappings().first()
+            days_active = int(days_row["days_active"]) if days_row else 0
+            use_personal = days_active >= calib_days
+
+            for metric_col, metric_label in METRICS:
+                value = rec.get(metric_col)
+                if value is None:
+                    continue
+
+                avg = await self._get_avg_metric(
+                    tenant_id, cid, metric_col, personal=use_personal,
+                    exclude_date=target_date,
+                )
+                if avg is None or avg == 0:
+                    # No historical baseline — skip
+                    continue
+
+                ratio = value / avg
+                if ratio >= kpi_high:
+                    category = "kpi_high"
+                    points = pts_high
+                    trend = f"+{round((ratio - 1) * 100):.0f}%"
+                elif ratio <= kpi_low:
+                    category = "kpi_low"
+                    points = pts_low
+                    trend = f"{round((ratio - 1) * 100):.0f}%"
+                else:
+                    continue  # within normal range — no event
+
+                desc = (
+                    f"{metric_label}: {value:.2f} "
+                    f"(среднее {avg:.2f}, {trend})"
+                )
+                await self._create_event(
+                    tenant_id=tenant_id,
+                    chatter_id=cid,
+                    season_id=season.id,
+                    event_date=target_date,
+                    event_type="kpi",
+                    category=category,
+                    points=points,
+                    description=desc,
+                )
+                events_created += 1
+
+        logger.info("MMR KPI done: tenant=%s date=%s events=%s", tenant_id, target_date, events_created)
+        return events_created
+
+    # ── Средний KPI по истории ────────────────────────────────────────────────
+
+    _ALLOWED_METRICS = frozenset({"ppv_open_rate", "rpc", "conversion"})
+
+    async def _get_avg_metric(
+        self,
+        tenant_id: int,
+        chatter_id: int,
+        metric: str,
+        personal: bool,
+        exclude_date: date | None = None,
+    ) -> float | None:
+        """
+        Средний показатель из chatter_kpi_history.
+        personal=True  → только для chatter_id
+        personal=False → по всему агентству (tenant_id)
+        Возвращает None если нет данных.
+        """
+        if metric not in self._ALLOWED_METRICS:
+            raise ValueError(f"Unknown metric: {metric}")
+
+        date_filter = "AND date != :excl" if exclude_date else ""
+        params: dict = {"tid": tenant_id}
+        if exclude_date:
+            params["excl"] = exclude_date
+        if personal:
+            params["cid"] = chatter_id
+            cid_filter = "AND chatter_id = :cid"
+        else:
+            cid_filter = ""
+
+        result = await self.db.execute(
+            text(
+                f"SELECT AVG({metric}) FROM chatter_kpi_history "
+                f"WHERE tenant_id = :tid {cid_filter} "
+                f"  AND {metric} IS NOT NULL {date_filter}"
+            ),
+            params,
+        )
+        val = result.scalar()
+        return float(val) if val is not None else None
 
     # ── Пересчёт состояния ────────────────────────────────────────────────────
 
