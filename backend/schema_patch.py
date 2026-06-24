@@ -253,6 +253,42 @@ _PATCHES: list[tuple[str, bool]] = [
            WHERE source IS NULL AND notion_id IS NOT NULL""",
         False,
     ),
+    # ── Этап 1 личного кабинета: таблица users ────────────────────────────────
+    (
+        """CREATE TABLE IF NOT EXISTS users (
+            id SERIAL PRIMARY KEY,
+            tenant_id INTEGER NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+            email TEXT UNIQUE NOT NULL,
+            hashed_password TEXT NOT NULL DEFAULT '',
+            role TEXT NOT NULL DEFAULT 'owner',
+            full_name TEXT,
+            chatter_id INTEGER REFERENCES chatters(id),
+            is_admin BOOLEAN NOT NULL DEFAULT FALSE,
+            active BOOLEAN NOT NULL DEFAULT TRUE,
+            created_at TIMESTAMP DEFAULT NOW(),
+            last_login_at TIMESTAMP
+        )""",
+        False,
+    ),
+    ("CREATE INDEX IF NOT EXISTS idx_users_tenant ON users(tenant_id)", False),
+    ("CREATE INDEX IF NOT EXISTS idx_users_email ON users(email)", False),
+    # Миграция: для каждого tenant создать user role='owner' (если ещё нет)
+    (
+        """INSERT INTO users (tenant_id, email, hashed_password, role, full_name, is_admin)
+           SELECT t.id,
+                  t.email,
+                  COALESCE(t.password_hash, ''),
+                  'owner',
+                  COALESCE(t.agency_name, t.name, ''),
+                  COALESCE(t.is_admin, FALSE)
+           FROM tenants t
+           WHERE NOT EXISTS (
+               SELECT 1 FROM users u
+               WHERE u.tenant_id = t.id AND u.role = 'owner'
+           )
+             AND t.email IS NOT NULL""",
+        False,
+    ),
 ]
 
 

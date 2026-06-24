@@ -8,12 +8,14 @@ export interface LoginRequest {
 export interface TokenResponse {
   access_token: string
   token_type: string
+  role?: string
 }
 
 export interface RegisterResponse {
   access_token: string
   token_type: string
   onboarding_completed: boolean
+  role?: string
 }
 
 export interface OnboardingStatus {

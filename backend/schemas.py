@@ -15,6 +15,7 @@ class LoginRequest(BaseModel):
 class TokenResponse(BaseModel):
     access_token: str
     token_type: str = "bearer"
+    role: Optional[str] = None
 
 
 class RegisterRequest(BaseModel):
@@ -27,6 +28,7 @@ class RegisterResponse(BaseModel):
     access_token: str
     token_type: str = "bearer"
     onboarding_completed: bool = False
+    role: Optional[str] = None
 
 
 # ── Tenant ────────────────────────────────────────────────────────────────────

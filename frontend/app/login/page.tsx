@@ -20,12 +20,17 @@ export default function LoginPage() {
     setError(null)
     setLoading(true)
     try {
-      await login({ email, password })
-      try {
-        const status = await fetchOnboardingStatus()
-        router.replace(status.onboarding_completed ? '/dashboard' : '/onboarding')
-      } catch {
-        router.replace('/dashboard')
+      const response = await login({ email, password })
+      if (response.role === 'chatter') {
+        router.replace('/portal')
+      } else {
+        // owner или нет роли (обратная совместимость)
+        try {
+          const status = await fetchOnboardingStatus()
+          router.replace(status.onboarding_completed ? '/dashboard' : '/onboarding')
+        } catch {
+          router.replace('/dashboard')
+        }
       }
     } catch (err: unknown) {
       const msg =

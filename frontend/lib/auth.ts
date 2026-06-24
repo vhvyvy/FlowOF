@@ -11,8 +11,27 @@ export async function login(data: LoginRequest): Promise<TokenResponse> {
   const res = await api.post<TokenResponse>('/auth/login', data)
   if (typeof window !== 'undefined') {
     localStorage.setItem('token', res.data.access_token)
+    if (res.data.role) {
+      localStorage.setItem('user_role', res.data.role)
+    }
   }
   return res.data
+}
+
+export function getUserRole(): string | null {
+  if (typeof window === 'undefined') return null
+  const token = localStorage.getItem('token')
+  if (!token) return null
+  // Попробуем сначала из localStorage (быстро)
+  const cached = localStorage.getItem('user_role')
+  if (cached) return cached
+  // Иначе декодируем JWT
+  try {
+    const payload = JSON.parse(atob(token.split('.')[1]))
+    return payload.role ?? null
+  } catch {
+    return null
+  }
 }
 
 export async function register(data: {
@@ -23,6 +42,7 @@ export async function register(data: {
   const res = await api.post<RegisterResponse>('/auth/register', data)
   if (typeof window !== 'undefined') {
     localStorage.setItem('token', res.data.access_token)
+    localStorage.setItem('user_role', res.data.role ?? 'owner')
   }
   return res.data
 }
@@ -35,6 +55,7 @@ export async function fetchOnboardingStatus(): Promise<OnboardingStatus> {
 export function logout(): void {
   if (typeof window !== 'undefined') {
     localStorage.removeItem('token')
+    localStorage.removeItem('user_role')
     window.location.href = '/login'
   }
 }

@@ -8,6 +8,23 @@ from sqlalchemy.dialects.postgresql import JSONB
 from database import Base
 
 
+class User(Base):
+    """Пользователь системы — owner агентства или chatter."""
+    __tablename__ = "users"
+
+    id = Column(Integer, primary_key=True, index=True)
+    tenant_id = Column(Integer, ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False, index=True)
+    email = Column(Text, unique=True, nullable=False, index=True)
+    hashed_password = Column(Text, nullable=False)
+    role = Column(Text, nullable=False, default="owner")  # 'owner' | 'chatter'
+    full_name = Column(Text, nullable=True)
+    chatter_id = Column(Integer, ForeignKey("chatters.id"), nullable=True)
+    is_admin = Column(Boolean, default=False, nullable=False)
+    active = Column(Boolean, default=True, nullable=False)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    last_login_at = Column(DateTime, nullable=True)
+
+
 class Tenant(Base):
     __tablename__ = "tenants"
 

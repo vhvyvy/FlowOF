@@ -25,12 +25,20 @@ def verify_password(plain: str, hashed: str) -> bool:
     return hashlib.sha256(plain.encode()).hexdigest() == hashed
 
 
-def create_access_token(tenant_id: int, email: str) -> str:
-    payload = {
+def create_access_token(
+    tenant_id: int,
+    email: str,
+    user_id: int | None = None,
+    role: str = "owner",
+) -> str:
+    payload: dict = {
         "tenant_id": tenant_id,
         "email": email,
+        "role": role,
         "exp": datetime.utcnow() + timedelta(days=ACCESS_TOKEN_EXPIRE_DAYS),
     }
+    if user_id is not None:
+        payload["user_id"] = user_id
     return jwt.encode(payload, SECRET_KEY, algorithm=ALGORITHM)
 
 
