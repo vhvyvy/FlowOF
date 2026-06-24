@@ -115,6 +115,10 @@ class MMRService:
         """
         Для каждой группы (chatter × shift × model) за день:
         сравниваем выручку с дневным планом и записываем MMR-событие.
+
+        Работает с обоими типами транзакций:
+        - chatter_id (FK) проставлен → прямой lookup
+        - chatter_id NULL, но есть текстовый chatter → матчинг через JOIN на chatters
         """
         # Удалить уже существующие finance-события за этот день (идемпотентность)
         await self.db.execute(
@@ -128,29 +132,57 @@ class MMRService:
             {"tid": tenant_id, "sid": season.id, "dt": target_date},
         )
 
-        # Транзакции чаттеров за день, сгруппированные по chatter × shift × model
+        # Транзакции за день с разрешением chatter_id через FK или текстовый JOIN.
+        # COALESCE(t.chatter_id, c.id) покрывает оба случая:
+        #   1) chatter_id заполнен (backfill прошёл)
+        #   2) chatter_id NULL, но t.chatter (текст) матчится с chatters.name
         txn_result = await self.db.execute(
             text(
-                """SELECT t.chatter_id,
-                          t.shift_catalog_id AS shift_id,
-                          t.model_id,
-                          COALESCE(mo.name, t.model, '') AS model_name,
-                          SUM(t.amount) AS revenue
+                """SELECT
+                       COALESCE(t.chatter_id, c_text.id)                       AS chatter_id,
+                       t.shift_catalog_id                                        AS shift_id,
+                       t.model_id,
+                       COALESCE(mo.name, t.model, '')                           AS model_name,
+                       SUM(t.amount)                                             AS revenue
                    FROM transactions t
-                   LEFT JOIN models mo ON t.model_id = mo.id
+                   -- resolved chatter via FK
+                   LEFT JOIN chatters c_fk
+                          ON c_fk.id = t.chatter_id
+                         AND c_fk.tenant_id = :tid
+                   -- fallback: resolve chatter via text name
+                   LEFT JOIN chatters c_text
+                          ON c_text.tenant_id = :tid
+                         AND t.chatter_id IS NULL
+                         AND LOWER(TRIM(c_text.name)) = LOWER(TRIM(t.chatter))
+                   -- model name from catalog
+                   LEFT JOIN models mo
+                          ON mo.id = t.model_id
                    WHERE t.tenant_id = :tid
-                     AND t.date = :dt
-                     AND t.chatter_id IS NOT NULL
-                   GROUP BY t.chatter_id, t.shift_catalog_id, t.model_id, mo.name, t.model"""
+                     AND t.date = CAST(:dt AS date)
+                     AND COALESCE(t.chatter_id, c_text.id) IS NOT NULL
+                   GROUP BY
+                       COALESCE(t.chatter_id, c_text.id),
+                       t.shift_catalog_id,
+                       t.model_id,
+                       COALESCE(mo.name, t.model, '')"""
             ),
-            {"tid": tenant_id, "dt": target_date},
+            {"tid": tenant_id, "dt": str(target_date)},
         )
         day_groups = list(txn_result.mappings())
 
+        logger.debug(
+            "_process_finance: tenant=%s date=%s day_groups=%s",
+            tenant_id, target_date, len(day_groups),
+        )
+
         if not day_groups:
+            logger.info(
+                "MMR finance: 0 транзакций с chatter для tenant=%s date=%s",
+                tenant_id, target_date,
+            )
             return 0
 
-        # Количество активных смен в агентстве
+        # Количество активных смен в агентстве (минимум 1)
         shifts_count_result = await self.db.execute(
             text("SELECT COUNT(*) FROM shifts_catalog WHERE tenant_id = :tid AND active = TRUE"),
             {"tid": tenant_id},
@@ -159,19 +191,29 @@ class MMRService:
 
         days_in_month = self._days_in_month(target_date)
         events_created = 0
+        skipped_no_plan = 0
 
         for row in day_groups:
-            model_name: str = row["model_name"] or ""
+            # Имя модели: из FK на models → иначе текстовое поле t.model
+            model_name: str = (row["model_name"] or "").strip()
+            if not model_name:
+                logger.debug("MMR: пропуск — нет имени модели для chatter=%s", row["chatter_id"])
+                continue
+
             revenue = float(row["revenue"] or 0)
 
-            # Ищем план по имени модели (plans хранит текстовое поле model)
+            # Ищем план по имени модели.
+            # plans.model — текстовый столбец с именем анкеты.
+            # model_name получен через: COALESCE(models.name, t.model)
+            # то есть: если есть FK model_id → берём имя из catalog; иначе текст из транзакции.
             plan_result = await self.db.execute(
                 text(
                     """SELECT plan_amount FROM plans
                        WHERE tenant_id = :tid
-                         AND month = :m
-                         AND year = :y
-                         AND LOWER(TRIM(model)) = LOWER(TRIM(:mname))"""
+                         AND month     = :m
+                         AND year      = :y
+                         AND LOWER(TRIM(model)) = LOWER(TRIM(:mname))
+                       LIMIT 1"""
                 ),
                 {
                     "tid": tenant_id,
@@ -183,7 +225,11 @@ class MMRService:
             plan_row = plan_result.mappings().first()
 
             if not plan_row or not plan_row["plan_amount"]:
-                # Нет плана — пропускаем (не наказываем, план не назначен)
+                skipped_no_plan += 1
+                logger.debug(
+                    "MMR: нет плана для модели '%s' tenant=%s %s/%s",
+                    model_name, tenant_id, target_date.month, target_date.year,
+                )
                 continue
 
             monthly_plan = float(plan_row["plan_amount"])
@@ -221,6 +267,10 @@ class MMRService:
             )
             events_created += 1
 
+        logger.info(
+            "MMR finance: tenant=%s date=%s created=%s skipped_no_plan=%s",
+            tenant_id, target_date, events_created, skipped_no_plan,
+        )
         return events_created
 
     # ── Пересчёт состояния ────────────────────────────────────────────────────
