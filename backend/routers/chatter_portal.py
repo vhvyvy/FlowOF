@@ -420,11 +420,24 @@ async def my_mmr(
         {"tid": user.tenant_id},
     )
     cfg = cfg_result.mappings().first()
-    calibration_days = int(cfg["calibration_days"]) if cfg else 14
+
+    def _cfg_int(key: str, default: int) -> int:
+        if cfg is None:
+            return default
+        v = cfg.get(key)
+        return int(v) if v is not None else default
+
+    def _cfg_float(key: str, default: float) -> float:
+        if cfg is None:
+            return default
+        v = cfg.get(key)
+        return float(v) if v is not None else default
+
+    calibration_days = _cfg_int("calibration_days", 14)
     prize_info = {
-        "1st": float(cfg["prize_1st"] or 200) if cfg else 200,
-        "2nd": float(cfg["prize_2nd"] or 150) if cfg else 150,
-        "3rd": float(cfg["prize_3rd"] or 100) if cfg else 100,
+        "1st": _cfg_float("prize_1st", 200.0),
+        "2nd": _cfg_float("prize_2nd", 150.0),
+        "3rd": _cfg_float("prize_3rd", 100.0),
     }
 
     # Ранг чаттера в агентстве (по текущему сезону)
