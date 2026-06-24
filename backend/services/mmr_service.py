@@ -12,6 +12,7 @@ from datetime import date, datetime
 from typing import Any
 
 from sqlalchemy import func, select, and_, text
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 logger = logging.getLogger("flowof.mmr")
@@ -356,49 +357,57 @@ class MMRService:
     async def _get_or_create_active_season(self, tenant_id: int, target_date: date) -> _Row:
         """
         Найти активный сезон охватывающий target_date или создать новый квартал.
-        Если по какой-то причине существует несколько подходящих сезонов —
-        берём самый ранний по id (ORDER BY id ASC LIMIT 1), не падаем.
+
+        Правила:
+        - Ищем БЕЗ фильтра is_active — старые строки могут иметь is_active = NULL.
+        - Несколько совпадений → берём самый ранний (ORDER BY id ASC LIMIT 1).
+        - INSERT оборачиваем в try/except IntegrityError — при гонке вернём уже
+          существующую запись.
+        """
+        row = await self._find_season(tenant_id, target_date)
+        if row is not None:
+            return row
+
+        # Сезон не найден — создаём на текущий квартал
+        quarter_start, quarter_end, name = self._quarter_bounds(target_date)
+        try:
+            await self.db.execute(
+                text(
+                    "INSERT INTO mmr_seasons (tenant_id, name, start_date, end_date, is_active) "
+                    "VALUES (:tid, :name, :start, :end, TRUE)"
+                ),
+                {"tid": tenant_id, "name": name, "start": quarter_start, "end": quarter_end},
+            )
+            await self.db.flush()
+        except IntegrityError:
+            # Гонка — кто-то уже вставил. Откатываем savepoint и делаем SELECT.
+            await self.db.rollback()
+            logger.warning("mmr_seasons INSERT race for tenant=%s, re-fetching", tenant_id)
+
+        row2 = await self._find_season(tenant_id, target_date)
+        if row2 is None:
+            raise RuntimeError(
+                f"Failed to find/create mmr_season for tenant={tenant_id} date={target_date}"
+            )
+        return row2
+
+    async def _find_season(self, tenant_id: int, target_date: date) -> _Row | None:
+        """
+        Найти сезон для даты.
+        Без фильтра is_active — учитываем NULL (старые строки).
         """
         result = await self.db.execute(
             text(
                 "SELECT * FROM mmr_seasons "
-                "WHERE tenant_id = :tid AND is_active = TRUE "
+                "WHERE tenant_id = :tid "
                 "  AND :dt BETWEEN start_date AND end_date "
+                "  AND is_active IS NOT FALSE "
                 "ORDER BY id ASC LIMIT 1"
             ),
             {"tid": tenant_id, "dt": target_date},
         )
         row = result.mappings().first()
-        if row is not None:
-            return _Row(dict(row))
-
-        # Сезон не найден — создаём на текущий квартал
-        quarter_start, quarter_end, name = self._quarter_bounds(target_date)
-        await self.db.execute(
-            text(
-                "INSERT INTO mmr_seasons (tenant_id, name, start_date, end_date) "
-                "VALUES (:tid, :name, :start, :end)"
-            ),
-            {"tid": tenant_id, "name": name, "start": quarter_start, "end": quarter_end},
-        )
-        await self.db.flush()
-
-        # Re-fetch — ORDER BY id ASC на случай гонки при параллельных запросах
-        result2 = await self.db.execute(
-            text(
-                "SELECT * FROM mmr_seasons "
-                "WHERE tenant_id = :tid AND is_active = TRUE "
-                "  AND :dt BETWEEN start_date AND end_date "
-                "ORDER BY id ASC LIMIT 1"
-            ),
-            {"tid": tenant_id, "dt": target_date},
-        )
-        row2 = result2.mappings().first()
-        if row2 is None:
-            raise RuntimeError(
-                f"Failed to create/find mmr_season for tenant={tenant_id} date={target_date}"
-            )
-        return _Row(dict(row2))
+        return _Row(dict(row)) if row is not None else None
 
     # ── Служебные методы ──────────────────────────────────────────────────────
 

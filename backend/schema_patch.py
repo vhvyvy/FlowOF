@@ -395,6 +395,8 @@ _PATCHES: list[tuple[str, bool]] = [
         )""",
         False,
     ),
+    # ── Исправить NULL в is_active для существующих сезонов ──────────────────
+    ("UPDATE mmr_seasons SET is_active = TRUE WHERE is_active IS NULL", False),
     # ── Повторная попытка создать MMR-таблицы (идемпотентно, IF NOT EXISTS) ───
     # chatter_mmr и season_results могли не создаться если предыдущие запуски
     # прерывались из-за InFailedSqlTransaction. Повтор в отдельной транзакции.
