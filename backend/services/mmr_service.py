@@ -461,21 +461,33 @@ class MMRService:
                 },
             )
 
-        # ── Compute MMR events ────────────────────────────────────────────────
-        kpi_high   = float(settings.kpi_threshold_high or 1.15)
-        kpi_low    = float(settings.kpi_threshold_low  or 0.85)
-        pts_high   = int(settings.kpi_high_points  or 5)
-        pts_low    = int(settings.kpi_low_points   or -5)
-        calib_days = int(settings.calibration_days or 14)
+        # ── One KPI event per chatter per day ────────────────────────────────
+        # Threshold is in percent deviation, e.g. 15 = 15%
+        kpi_high_pct = (float(settings.kpi_threshold_high or 1.15) - 1.0) * 100   # e.g. 15.0
+        kpi_low_pct  = (1.0 - float(settings.kpi_threshold_low  or 0.85)) * 100   # e.g. 15.0 (abs)
+        pts_high     = int(settings.kpi_high_points  or 5)
+        pts_low      = int(settings.kpi_low_points   or -5)
+        calib_days   = int(settings.calibration_days or 14)
 
         METRICS = [
             ("ppv_open_rate", "PPV OR"),
             ("rpc",           "RPC"),
+            ("conversion",    "Conv"),
         ]
 
         events_created = 0
         for rec in resolved_kpi:
             cid = rec["chatter_id"]
+
+            # Idempotency: delete existing KPI events for this chatter on this day
+            await self.db.execute(
+                text(
+                    "DELETE FROM mmr_events "
+                    "WHERE tenant_id = :tid AND chatter_id = :cid "
+                    "  AND event_date = :dt AND event_type = 'kpi'"
+                ),
+                {"tid": tenant_id, "cid": cid, "dt": target_date},
+            )
 
             # Calibration status
             days_result = await self.db.execute(
@@ -489,49 +501,60 @@ class MMRService:
             days_active = int(days_row["days_active"]) if days_row else 0
             use_personal = days_active >= calib_days
 
+            # Compute per-metric deviations, then average them
+            deviations: list[float] = []
+            metric_parts: list[str] = []
+
             for metric_col, metric_label in METRICS:
                 value = rec.get(metric_col)
                 if value is None:
-                    logger.debug("MMR KPI: chatter_id=%s metric=%s value=None, skip", cid, metric_col)
                     continue
 
                 avg = await self._get_avg_metric(
                     tenant_id, cid, metric_col, personal=use_personal,
                     exclude_date=target_date,
                 )
-                logger.info("MMR KPI: chatter_id=%s metric=%s value=%.2f avg=%s personal=%s",
-                            cid, metric_col, value, avg, use_personal)
-
                 if avg is None or avg == 0:
-                    logger.info("MMR KPI: no avg baseline for chatter_id=%s metric=%s, skip", cid, metric_col)
                     continue
 
-                ratio = value / avg
-                if ratio >= kpi_high:
-                    category, points = "kpi_high", pts_high
-                    trend = f"+{round((ratio - 1) * 100):.0f}%"
-                elif ratio <= kpi_low:
-                    category, points = "kpi_low", pts_low
-                    trend = f"{round((ratio - 1) * 100):.0f}%"
-                else:
-                    logger.debug("MMR KPI: chatter_id=%s metric=%s ratio=%.2f in normal range, no event",
-                                 cid, metric_col, ratio)
-                    continue
+                dev_pct = (value / avg - 1.0) * 100   # e.g. +20.0 or -12.5
+                deviations.append(dev_pct)
+                sign = "+" if dev_pct >= 0 else ""
+                metric_parts.append(f"{metric_label} {sign}{dev_pct:.0f}%")
 
-                desc = f"{metric_label}: {value:.2f} (среднее {avg:.2f}, {trend})"
-                logger.info("MMR KPI: creating event chatter_id=%s metric=%s category=%s points=%s",
-                            cid, metric_col, category, points)
-                await self._create_event(
-                    tenant_id=tenant_id,
-                    chatter_id=cid,
-                    season_id=season.id,
-                    event_date=target_date,
-                    event_type="kpi",
-                    category=category,
-                    points=points,
-                    description=desc,
-                )
-                events_created += 1
+            if not deviations:
+                logger.info("MMR KPI: chatter_id=%s — no metrics with baseline, skip", cid)
+                continue
+
+            avg_dev = sum(deviations) / len(deviations)
+            logger.info("MMR KPI: chatter_id=%s deviations=%s avg_dev=%.1f%%",
+                        cid, metric_parts, avg_dev)
+
+            if avg_dev >= kpi_high_pct:
+                category = "kpi_high"
+                points   = pts_high
+                desc     = f"KPI выше обычного на {avg_dev:.0f}%"
+            elif avg_dev <= -kpi_low_pct:
+                category = "kpi_low"
+                points   = pts_low
+                desc     = f"KPI ниже обычного на {abs(avg_dev):.0f}%"
+            else:
+                logger.debug("MMR KPI: chatter_id=%s avg_dev=%.1f%% — normal range, no event", cid, avg_dev)
+                continue
+
+            logger.info("MMR KPI: creating event chatter_id=%s category=%s points=%s desc=%r",
+                        cid, category, points, desc)
+            await self._create_event(
+                tenant_id=tenant_id,
+                chatter_id=cid,
+                season_id=season.id,
+                event_date=target_date,
+                event_type="kpi",
+                category=category,
+                points=points,
+                description=desc,
+            )
+            events_created += 1
 
         logger.info("MMR KPI done: tenant=%s date=%s events_created=%s", tenant_id, target_date, events_created)
         return events_created
