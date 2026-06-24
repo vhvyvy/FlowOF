@@ -155,7 +155,7 @@ export default function PortalOverviewPage() {
                 />
                 <YAxis
                   tick={{ fontSize: 11, fill: '#94a3b8' }}
-                  tickFormatter={(v: number) => `$${v >= 1000 ? (v / 1000).toFixed(1) + 'k' : v}`}
+                  tickFormatter={(v) => { const n = Number(v); return `$${n >= 1000 ? (n / 1000).toFixed(1) + 'k' : n}` }}
                   axisLine={false}
                   tickLine={false}
                   width={48}
@@ -164,7 +164,7 @@ export default function PortalOverviewPage() {
                   contentStyle={{ background: '#1e293b', border: '1px solid #334155', borderRadius: 8 }}
                   labelStyle={{ color: '#94a3b8', fontSize: 12 }}
                   itemStyle={{ color: '#e2e8f0', fontSize: 12 }}
-                  formatter={(v: number) => [`$${v.toLocaleString()}`, 'Выручка']}
+                  formatter={(v) => [`$${Number(v).toLocaleString()}`, 'Выручка']}
                 />
                 <Area
                   type="monotone"
