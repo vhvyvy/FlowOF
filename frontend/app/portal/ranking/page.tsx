@@ -1,6 +1,6 @@
 'use client'
 
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useRef } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import {
   AreaChart, Area, XAxis, YAxis, Tooltip, ResponsiveContainer,
@@ -374,41 +374,64 @@ function DayCard({ day }: { day: DayGroup }) {
 }
 
 function EventsFeed() {
-  const [typeFilter, setTypeFilter] = useState<'' | 'finance' | 'kpi'>('')
-  const [offset, setOffset] = useState(0)
   const PAGE = 14
-
-  const buildUrl = (off: number) => {
-    const base = `/api/v1/me/mmr/events?limit=${PAGE}&offset=${off}`
-    return typeFilter ? `${base}&event_type=${typeFilter}` : base
-  }
-
+  const [typeFilter, setTypeFilter] = useState<'' | 'finance' | 'kpi'>('')
+  // pages stores the list of offsets we have fetched and accumulated
+  const [pages, setPages] = useState<number[]>([0])
   const [allDays, setAllDays] = useState<DayGroup[]>([])
-  const [hasMore, setHasMore] = useState(true)
+  const [hasMore, setHasMore] = useState(false)
+  // Track which data we've already merged to prevent double-appends
+  const lastMergedRef = useRef<string | null>(null)
 
-  const { data: eventsData, isLoading, isFetching } = useQuery<{ days: DayGroup[]; offset: number; limit: number }>({
-    queryKey: ['portal-mmr-events', typeFilter, offset],
-    queryFn: () => api.get(buildUrl(offset)).then(r => r.data),
+  const currentOffset = pages[pages.length - 1]
+
+  const { data: eventsData, isLoading, isFetching } = useQuery<{
+    days: DayGroup[]
+    offset: number
+    limit: number
+  }>({
+    queryKey: ['portal-mmr-events', typeFilter, currentOffset],
+    queryFn: () => {
+      const base = `/api/v1/me/mmr/events?limit=${PAGE}&offset=${currentOffset}`
+      const url = typeFilter ? `${base}&event_type=${typeFilter}` : base
+      return api.get(url).then(r => r.data)
+    },
   })
 
   useEffect(() => {
     if (!eventsData) return
-    if (offset === 0) {
+    // Deduplicate: build a key for this response
+    const key = `${typeFilter}:${eventsData.offset}:${eventsData.days.length}`
+    if (lastMergedRef.current === key) return
+    lastMergedRef.current = key
+
+    if (eventsData.offset === 0) {
       setAllDays(eventsData.days)
     } else {
-      setAllDays(prev => [...prev, ...eventsData.days])
+      setAllDays(prev => {
+        // Avoid duplicates by date key
+        const existing = new Set(prev.map(d => d.date))
+        const fresh = eventsData.days.filter(d => !existing.has(d.date))
+        return [...prev, ...fresh]
+      })
     }
     setHasMore(eventsData.days.length === PAGE)
-  }, [eventsData, offset])
+  }, [eventsData, typeFilter])
 
   const handleFilter = (f: '' | 'finance' | 'kpi') => {
+    lastMergedRef.current = null
     setTypeFilter(f)
-    setOffset(0)
+    setPages([0])
     setAllDays([])
-    setHasMore(true)
+    setHasMore(false)
   }
 
-  const loadMore = () => setOffset(prev => prev + PAGE)
+  const loadMore = () => {
+    const nextOffset = allDays.length  // use actual accumulated length as next offset
+    setPages(prev => [...prev, nextOffset])
+  }
+
+  const showLoadMore = hasMore && allDays.length > 0
 
   return (
     <div className="bg-slate-800/60 border border-slate-700/50 rounded-xl overflow-hidden">
@@ -433,9 +456,9 @@ function EventsFeed() {
         </div>
       </div>
 
-      {isLoading && offset === 0 ? (
+      {isLoading && allDays.length === 0 ? (
         <div className="p-4 space-y-3">
-          {[1,2,3].map(i => <Skeleton key={i} className="h-24 w-full rounded-xl" />)}
+          {[1, 2, 3].map(i => <Skeleton key={i} className="h-24 w-full rounded-xl" />)}
         </div>
       ) : allDays.length === 0 ? (
         <p className="text-slate-500 text-sm p-5">Событий пока нет</p>
@@ -445,17 +468,19 @@ function EventsFeed() {
             {allDays.map(day => <DayCard key={day.date} day={day} />)}
           </div>
 
-          {hasMore && (
-            <div className="px-5 py-3 border-t border-slate-700/40">
+          <div className="px-5 py-3 border-t border-slate-700/40">
+            {showLoadMore ? (
               <button
                 onClick={loadMore}
                 disabled={isFetching}
-                className="w-full text-xs text-slate-400 hover:text-violet-300 transition-colors disabled:opacity-50"
+                className="w-full text-xs text-slate-400 hover:text-violet-300 transition-colors disabled:opacity-50 py-1"
               >
                 {isFetching ? 'Загружаем...' : 'Показать ещё 14 дней'}
               </button>
-            </div>
-          )}
+            ) : (
+              <p className="text-center text-xs text-slate-600">Все события загружены</p>
+            )}
+          </div>
         </>
       )}
     </div>
