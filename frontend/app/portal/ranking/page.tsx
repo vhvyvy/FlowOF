@@ -1,6 +1,6 @@
 'use client'
 
-import { useState } from 'react'
+import { useState, useEffect } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import {
   AreaChart, Area, XAxis, YAxis, Tooltip, ResponsiveContainer,
@@ -292,18 +292,20 @@ function EventsFeed() {
   const [allEvents, setAllEvents] = useState<MmrEvent[]>([])
   const [hasMore, setHasMore] = useState(true)
 
-  const { isLoading, isFetching } = useQuery<{ events: MmrEvent[]; offset: number; limit: number }>({
+  const { data: eventsData, isLoading, isFetching } = useQuery<{ events: MmrEvent[]; offset: number; limit: number }>({
     queryKey: ['portal-mmr-events', typeFilter, offset],
     queryFn: () => api.get(buildUrl(offset)).then(r => r.data),
-    onSuccess: (res) => {
-      if (offset === 0) {
-        setAllEvents(res.events)
-      } else {
-        setAllEvents(prev => [...prev, ...res.events])
-      }
-      setHasMore(res.events.length === PAGE)
-    },
   })
+
+  useEffect(() => {
+    if (!eventsData) return
+    if (offset === 0) {
+      setAllEvents(eventsData.events)
+    } else {
+      setAllEvents(prev => [...prev, ...eventsData.events])
+    }
+    setHasMore(eventsData.events.length === PAGE)
+  }, [eventsData, offset])
 
   // Reset when filter changes
   const handleFilter = (f: '' | 'finance' | 'kpi') => {
