@@ -411,8 +411,12 @@ _PATCHES: list[tuple[str, bool]] = [
         False,
     ),
     ("CREATE INDEX IF NOT EXISTS idx_kpi_history_chatter ON chatter_kpi_history(chatter_id, date)", False),
-    # ── Исправить NULL в is_active для существующих сезонов ──────────────────
+    # ── Исправить NULL в is_active / kpi_enabled для существующих строк ────────
     ("UPDATE mmr_seasons SET is_active = TRUE WHERE is_active IS NULL", False),
+    ("UPDATE mmr_settings SET kpi_enabled = TRUE WHERE kpi_enabled IS NULL", False),
+    # Укрепить DDL: NOT NULL DEFAULT TRUE на kpi_enabled
+    ("ALTER TABLE mmr_settings ALTER COLUMN kpi_enabled SET NOT NULL", False),
+    ("ALTER TABLE mmr_settings ALTER COLUMN kpi_enabled SET DEFAULT TRUE", False),
     # ── Повторная попытка создать MMR-таблицы (идемпотентно, IF NOT EXISTS) ───
     # chatter_mmr и season_results могли не создаться если предыдущие запуски
     # прерывались из-за InFailedSqlTransaction. Повтор в отдельной транзакции.

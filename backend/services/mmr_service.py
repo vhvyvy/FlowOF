@@ -288,7 +288,8 @@ class MMRService:
         logger.info("MMR KPI: started tenant=%s date=%s kpi_enabled=%s",
                     tenant_id, target_date, settings.kpi_enabled)
 
-        if not settings.kpi_enabled:
+        # Treat NULL as True (default) — only skip if explicitly False
+        if settings.kpi_enabled is False:
             logger.info("MMR KPI: kpi_enabled=False, skip")
             return 0
 

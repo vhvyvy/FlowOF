@@ -255,7 +255,14 @@ async def update_settings(
     db: AsyncSession = Depends(get_db),
 ):
     """Обновить настройки MMR агентства."""
-    updates = {k: v for k, v in data.model_dump().items() if v is not None}
+    # Include bool fields even when False; exclude only true None values
+    updates = {
+        k: v for k, v in data.model_dump().items()
+        if v is not None or isinstance(v, bool)
+    }
+    # Ensure kpi_enabled is always a concrete bool, never NULL
+    if "kpi_enabled" in updates:
+        updates["kpi_enabled"] = bool(updates["kpi_enabled"])
     if not updates:
         raise HTTPException(status_code=400, detail="Нет полей для обновления")
 
