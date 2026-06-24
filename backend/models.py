@@ -8,6 +8,22 @@ from sqlalchemy.dialects.postgresql import JSONB
 from database import Base
 
 
+class ChatterInvite(Base):
+    """Одноразовая инвайт-ссылка для регистрации чаттера в личном кабинете."""
+    __tablename__ = "chatter_invites"
+
+    id = Column(Integer, primary_key=True, index=True)
+    tenant_id = Column(Integer, ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False, index=True)
+    chatter_id = Column(Integer, ForeignKey("chatters.id", ondelete="CASCADE"), nullable=False)
+    token = Column(Text, unique=True, nullable=False, index=True)
+    email = Column(Text, nullable=True)
+    used = Column(Boolean, default=False, nullable=False)
+    used_at = Column(DateTime, nullable=True)
+    expires_at = Column(DateTime, nullable=False)
+    created_by_user_id = Column(Integer, ForeignKey("users.id"), nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+
 class User(Base):
     """Пользователь системы — owner агентства или chatter."""
     __tablename__ = "users"

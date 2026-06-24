@@ -2,6 +2,7 @@
 
 import { Header } from '@/components/layout/Header'
 import { CatalogSection } from '@/components/catalog/CatalogSection'
+import { ChatterCatalogSection } from '@/components/catalog/ChatterCatalogSection'
 import { BookOpen, Users, Clock, Tag } from 'lucide-react'
 
 export default function CatalogPage() {
@@ -35,11 +36,7 @@ export default function CatalogPage() {
             <Users className="h-4 w-4 text-violet-400" />
             <span className="text-sm font-medium text-slate-300">Чаттеры</span>
           </div>
-          <CatalogSection
-            title="Чаттеры"
-            endpoint="chatters"
-            placeholder="Имя чаттера"
-          />
+          <ChatterCatalogSection />
 
           <div className="flex items-center gap-2 text-slate-400 pt-2">
             <Clock className="h-4 w-4 text-amber-400" />

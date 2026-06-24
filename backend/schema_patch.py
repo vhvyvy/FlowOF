@@ -289,6 +289,23 @@ _PATCHES: list[tuple[str, bool]] = [
              AND t.email IS NOT NULL""",
         False,
     ),
+    # ── Этап 2 личного кабинета: инвайты (создаём ПОСЛЕ users) ───────────────
+    (
+        """CREATE TABLE IF NOT EXISTS chatter_invites (
+            id SERIAL PRIMARY KEY,
+            tenant_id INTEGER REFERENCES tenants(id) ON DELETE CASCADE,
+            chatter_id INTEGER REFERENCES chatters(id) ON DELETE CASCADE,
+            token TEXT UNIQUE NOT NULL,
+            email TEXT,
+            used BOOLEAN NOT NULL DEFAULT FALSE,
+            used_at TIMESTAMP,
+            expires_at TIMESTAMP NOT NULL,
+            created_by_user_id INTEGER REFERENCES users(id),
+            created_at TIMESTAMP DEFAULT NOW()
+        )""",
+        False,
+    ),
+    ("CREATE INDEX IF NOT EXISTS idx_invites_token ON chatter_invites(token)", False),
 ]
 
 

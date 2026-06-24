@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
-from sqlalchemy import select
+from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from database import get_db
@@ -87,12 +87,31 @@ async def list_chatters(
     tenant: Tenant = Depends(get_current_tenant),
     db: AsyncSession = Depends(get_db),
 ):
+    # JOIN с users чтобы вернуть статус аккаунта для каждого чаттера
     result = await db.execute(
-        select(CatalogChatter)
-        .where(CatalogChatter.tenant_id == tenant.id, CatalogChatter.active.is_(True))
-        .order_by(CatalogChatter.name)
+        text(
+            """SELECT c.id, c.name,
+                      u.id AS user_id,
+                      u.last_login_at,
+                      u.email AS user_email
+               FROM chatters c
+               LEFT JOIN users u ON u.chatter_id = c.id AND u.active = TRUE AND u.role = 'chatter'
+               WHERE c.tenant_id = :tid AND c.active = TRUE
+               ORDER BY c.name"""
+        ),
+        {"tid": tenant.id},
     )
-    return {"items": [_item(c) for c in result.scalars()]}
+    items = []
+    for row in result.mappings():
+        items.append({
+            "id": row["id"],
+            "name": row["name"],
+            "user_id": row["user_id"],
+            "user_email": row["user_email"],
+            "last_login_at": row["last_login_at"].isoformat() if row["last_login_at"] else None,
+            "has_account": row["user_id"] is not None,
+        })
+    return {"items": items}
 
 
 @router.post("/chatters", status_code=201)
