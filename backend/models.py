@@ -146,6 +146,7 @@ class User(Base):
     chatter_id = Column(Integer, ForeignKey("chatters.id"), nullable=True)
     is_admin = Column(Boolean, default=False, nullable=False)
     active = Column(Boolean, default=True, nullable=False)
+    avatar_base64 = Column(Text, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
     last_login_at = Column(DateTime, nullable=True)
 
@@ -391,3 +392,29 @@ class ChatterMapping(Base):
     __table_args__ = (
         UniqueConstraint("tenant_id", "onlymonster_id", name="uq_chatter_mapping_tenant_id"),
     )
+
+
+class ScriptFolder(Base):
+    """Папка скриптов чаттера."""
+    __tablename__ = "script_folders"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
+    name = Column(Text, nullable=False)
+    sort_order = Column(Integer, default=0)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+
+class Script(Base):
+    """Скрипт в библиотеке чаттера."""
+    __tablename__ = "scripts"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
+    folder_id = Column(Integer, ForeignKey("script_folders.id", ondelete="SET NULL"), nullable=True)
+    title = Column(Text, nullable=False)
+    content = Column(Text, nullable=False)
+    tags = Column(Text, nullable=True)
+    copy_count = Column(Integer, default=0)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)

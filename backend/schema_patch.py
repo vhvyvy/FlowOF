@@ -517,6 +517,35 @@ _PATCHES: list[tuple[str, bool]] = [
         )""",
         False,
     ),
+    # ── Аватарки пользователей ────────────────────────────────────────────────
+    ("ALTER TABLE users ADD COLUMN IF NOT EXISTS avatar_base64 TEXT", False),
+    # ── Библиотека скриптов чаттеров ──────────────────────────────────────────
+    (
+        """CREATE TABLE IF NOT EXISTS script_folders (
+            id SERIAL PRIMARY KEY,
+            user_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
+            name TEXT NOT NULL,
+            sort_order INTEGER DEFAULT 0,
+            created_at TIMESTAMP DEFAULT NOW()
+        )""",
+        False,
+    ),
+    ("CREATE INDEX IF NOT EXISTS idx_folders_user ON script_folders(user_id)", False),
+    (
+        """CREATE TABLE IF NOT EXISTS scripts (
+            id SERIAL PRIMARY KEY,
+            user_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
+            folder_id INTEGER REFERENCES script_folders(id) ON DELETE SET NULL,
+            title TEXT NOT NULL,
+            content TEXT NOT NULL,
+            tags TEXT,
+            copy_count INTEGER DEFAULT 0,
+            created_at TIMESTAMP DEFAULT NOW(),
+            updated_at TIMESTAMP DEFAULT NOW()
+        )""",
+        False,
+    ),
+    ("CREATE INDEX IF NOT EXISTS idx_scripts_user_folder ON scripts(user_id, folder_id)", False),
 ]
 
 

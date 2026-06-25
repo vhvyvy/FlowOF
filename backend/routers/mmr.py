@@ -164,9 +164,11 @@ async def leaderboard(
                  cm.current_league,
                  cm.days_active,
                  cm.calibration_complete,
+                 u.avatar_base64,
                  ROW_NUMBER() OVER (ORDER BY cm.current_mmr DESC) AS rank
                FROM chatter_mmr cm
                JOIN chatters c ON cm.chatter_id = c.id
+               LEFT JOIN users u ON u.chatter_id = c.id AND u.tenant_id = cm.tenant_id
                WHERE cm.tenant_id = :tid AND cm.season_id = :sid
                ORDER BY cm.current_mmr DESC"""
         ),

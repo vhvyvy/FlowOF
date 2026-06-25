@@ -76,6 +76,7 @@ interface LeaderboardRow {
   current_league: string | null
   days_active: number
   calibration_complete: boolean
+  avatar_base64: string | null
   is_me: boolean
 }
 
@@ -519,8 +520,17 @@ function Leaderboard() {
               >
                 <td className="px-4 py-2.5 w-10"><RankBadge rank={r.rank} /></td>
                 <td className="px-4 py-2.5 text-sm font-medium text-slate-200">
-                  {r.chatter_name}
-                  {r.is_me && <span className="ml-2 text-xs text-violet-400">(вы)</span>}
+                  <div className="flex items-center gap-2">
+                    {r.avatar_base64 ? (
+                      <img src={r.avatar_base64} alt="" className="w-6 h-6 rounded-full object-cover shrink-0" />
+                    ) : (
+                      <div className="w-6 h-6 rounded-full bg-slate-700 flex items-center justify-center shrink-0 text-[10px] text-slate-400 font-bold">
+                        {r.chatter_name.slice(0,1).toUpperCase()}
+                      </div>
+                    )}
+                    {r.chatter_name}
+                    {r.is_me && <span className="ml-1 text-xs text-violet-400">(вы)</span>}
+                  </div>
                 </td>
                 <td className="px-4 py-2.5"><LeagueBadge league={r.current_league} /></td>
                 <td className="px-4 py-2.5 text-right text-sm font-bold text-violet-300">{r.current_mmr}</td>
@@ -532,8 +542,17 @@ function Leaderboard() {
                 <tr className="bg-violet-500/10">
                   <td className="px-4 py-2.5 w-10"><RankBadge rank={me.rank} /></td>
                   <td className="px-4 py-2.5 text-sm font-medium text-slate-200">
-                    {me.chatter_name}
-                    <span className="ml-2 text-xs text-violet-400">(вы)</span>
+                    <div className="flex items-center gap-2">
+                      {me.avatar_base64 ? (
+                        <img src={me.avatar_base64} alt="" className="w-6 h-6 rounded-full object-cover shrink-0" />
+                      ) : (
+                        <div className="w-6 h-6 rounded-full bg-slate-700 flex items-center justify-center shrink-0 text-[10px] text-slate-400 font-bold">
+                          {me.chatter_name.slice(0,1).toUpperCase()}
+                        </div>
+                      )}
+                      {me.chatter_name}
+                      <span className="ml-1 text-xs text-violet-400">(вы)</span>
+                    </div>
                   </td>
                   <td className="px-4 py-2.5"><LeagueBadge league={me.current_league} /></td>
                   <td className="px-4 py-2.5 text-right text-sm font-bold text-violet-300">{me.current_mmr}</td>

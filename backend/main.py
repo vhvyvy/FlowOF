@@ -77,6 +77,7 @@ from routers import (  # noqa: E402
     export,
     invites,
     chatter_portal,
+    scripts,
     mmr,
     settings,
     structure,
@@ -104,6 +105,7 @@ app.include_router(adjustments.router)
 app.include_router(export.router)
 app.include_router(invites.router)
 app.include_router(chatter_portal.router)
+app.include_router(scripts.router)
 app.include_router(mmr.router)
 app.include_router(settings.router)
 app.include_router(structure.router)

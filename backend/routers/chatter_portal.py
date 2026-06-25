@@ -6,6 +6,7 @@ from calendar import monthrange
 from datetime import date
 
 from fastapi import APIRouter, Depends, HTTPException, Query
+from pydantic import BaseModel
 from sqlalchemy import select, func, and_, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -114,7 +115,7 @@ async def get_my_profile(
     """Профиль чаттера + название агентства."""
     result = await db.execute(
         text(
-            """SELECT u.email, u.full_name,
+            """SELECT u.email, u.full_name, u.avatar_base64,
                       c.name AS chatter_name,
                       t.agency_name, t.currency
                FROM users u
@@ -128,6 +129,28 @@ async def get_my_profile(
     if not row:
         raise HTTPException(status_code=404, detail="Профиль не найден")
     return dict(row)
+
+
+class AvatarPayload(BaseModel):
+    avatar_base64: str | None = None  # None = удалить
+
+
+@router.put("/avatar")
+async def update_avatar(
+    payload: AvatarPayload,
+    user: User = Depends(require_chatter),
+    db: AsyncSession = Depends(get_db),
+):
+    """Сохранить или удалить аватарку (base64 JPEG/PNG ≤ ~700KB строки)."""
+    data = payload.avatar_base64
+    if data is not None and len(data) > 720_000:
+        raise HTTPException(status_code=413, detail="Аватарка слишком большая (макс ~500 КБ)")
+    await db.execute(
+        text("UPDATE users SET avatar_base64 = :av WHERE id = :uid"),
+        {"av": data, "uid": user.id},
+    )
+    await db.commit()
+    return {"success": True}
 
 
 @router.get("/overview")
@@ -787,10 +810,11 @@ async def my_mmr_leaderboard(
         text(
             "SELECT cm.chatter_id, c.name AS chatter_name, "
             "       cm.current_mmr, cm.current_league, cm.days_active, "
-            "       cm.calibration_complete, "
+            "       cm.calibration_complete, u.avatar_base64, "
             "       ROW_NUMBER() OVER (ORDER BY cm.current_mmr DESC) AS rank "
             "FROM chatter_mmr cm "
             "JOIN chatters c ON cm.chatter_id = c.id "
+            "LEFT JOIN users u ON u.chatter_id = c.id AND u.tenant_id = cm.tenant_id "
             "WHERE cm.tenant_id = :tid AND cm.season_id = :sid "
             "ORDER BY cm.current_mmr DESC"
         ),
@@ -813,6 +837,7 @@ async def my_mmr_leaderboard(
             "current_league": r["current_league"],
             "days_active": int(r["days_active"]),
             "calibration_complete": bool(r["calibration_complete"]),
+            "avatar_base64": r.get("avatar_base64"),
             "is_me": is_me,
         })
 

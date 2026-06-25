@@ -19,6 +19,7 @@ interface LeaderboardRow {
   current_league: string | null
   days_active: number
   calibration_complete: boolean
+  avatar_base64: string | null
   rank: number
 }
 
@@ -153,7 +154,18 @@ function LeaderboardTab() {
               {rows.map(r => (
                 <tr key={r.chatter_id} className="hover:bg-slate-700/20 transition-colors">
                   <td className="px-4 py-3"><RankBadge rank={r.rank} /></td>
-                  <td className="px-4 py-3 text-sm font-medium text-slate-200">{r.name}</td>
+                  <td className="px-4 py-3 text-sm font-medium text-slate-200">
+                    <div className="flex items-center gap-2">
+                      {r.avatar_base64 ? (
+                        <img src={r.avatar_base64} alt="" className="w-6 h-6 rounded-full object-cover shrink-0" />
+                      ) : (
+                        <div className="w-6 h-6 rounded-full bg-slate-700 flex items-center justify-center shrink-0 text-[10px] text-slate-400 font-bold">
+                          {(r.name || '?').slice(0,1).toUpperCase()}
+                        </div>
+                      )}
+                      {r.name}
+                    </div>
+                  </td>
                   <td className="px-4 py-3"><LeagueBadge league={r.current_league} /></td>
                   <td className="px-4 py-3 text-right text-sm font-bold text-indigo-300">{r.current_mmr}</td>
                   <td className="px-4 py-3 text-right text-sm text-slate-400">{r.peak_mmr}</td>

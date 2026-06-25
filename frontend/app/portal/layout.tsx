@@ -5,17 +5,20 @@ import { usePathname, useRouter } from 'next/navigation'
 import { useEffect, useState } from 'react'
 import {
   LayoutDashboard, List, BarChart3, User, LogOut,
-  ChevronLeft, ChevronRight, Trophy,
+  ChevronLeft, ChevronRight, Trophy, FileText,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { logout, isAuthenticated, getUserRole } from '@/lib/auth'
 import { useMonthStore } from '@/lib/hooks/useMonth'
 import { getPrevMonth, getNextMonth } from '@/lib/utils'
+import { useQuery } from '@tanstack/react-query'
+import api from '@/lib/api'
 
 const PORTAL_NAV = [
   { href: '/portal', label: 'Мой обзор', icon: LayoutDashboard, exact: true },
   { href: '/portal/transactions', label: 'Мои транзакции', icon: List },
   { href: '/portal/ranking', label: 'Рейтинг', icon: Trophy },
+  { href: '/portal/scripts', label: 'Скрипты', icon: FileText },
   { href: '/portal/kpi', label: 'Мой KPI', icon: BarChart3 },
   { href: '/portal/profile', label: 'Профиль', icon: User },
 ]
@@ -25,10 +28,26 @@ const MONTHS_RU = [
   'Июль', 'Август', 'Сентябрь', 'Октябрь', 'Ноябрь', 'Декабрь',
 ]
 
+interface Profile {
+  full_name: string
+  chatter_name: string
+  avatar_base64: string | null
+}
+
 function PortalSidebar() {
   const pathname = usePathname()
   const [collapsed, setCollapsed] = useState(false)
   const { month, year, setMonth } = useMonthStore()
+
+  const { data: profile } = useQuery<Profile>({
+    queryKey: ['portal-profile'],
+    queryFn: () => api.get<Profile>('/api/v1/me/profile').then(r => r.data),
+    staleTime: 5 * 60 * 1000,
+  })
+
+  const displayName = profile?.full_name || profile?.chatter_name || ''
+  const initials    = (displayName || 'F').slice(0, 1).toUpperCase()
+  const avatar      = profile?.avatar_base64
 
   const now = new Date()
   const isCurrent = month === now.getMonth() + 1 && year === now.getFullYear()
@@ -50,24 +69,40 @@ function PortalSidebar() {
         collapsed ? 'w-16' : 'w-56'
       )}
     >
-      {/* Logo */}
+      {/* Logo / avatar */}
       <div className="flex items-center justify-between p-4 border-b border-slate-700/50">
         {!collapsed && (
-          <div className="flex items-center gap-2">
-            <div className="w-7 h-7 rounded-lg bg-violet-500 flex items-center justify-center">
-              <span className="text-white font-bold text-xs">F</span>
-            </div>
-            <span className="font-semibold text-slate-100 text-sm">Кабинет</span>
+          <div className="flex items-center gap-2 min-w-0">
+            {avatar ? (
+              <img
+                src={avatar}
+                alt="avatar"
+                className="w-7 h-7 rounded-full object-cover ring-1 ring-violet-500/40 shrink-0"
+              />
+            ) : (
+              <div className="w-7 h-7 rounded-lg bg-violet-500 flex items-center justify-center shrink-0">
+                <span className="text-white font-bold text-xs">{initials}</span>
+              </div>
+            )}
+            <span className="font-semibold text-slate-100 text-sm truncate">Кабинет</span>
           </div>
         )}
         {collapsed && (
-          <div className="w-7 h-7 rounded-lg bg-violet-500 flex items-center justify-center mx-auto">
-            <span className="text-white font-bold text-xs">F</span>
-          </div>
+          avatar ? (
+            <img
+              src={avatar}
+              alt="avatar"
+              className="w-7 h-7 rounded-full object-cover ring-1 ring-violet-500/40 mx-auto"
+            />
+          ) : (
+            <div className="w-7 h-7 rounded-lg bg-violet-500 flex items-center justify-center mx-auto">
+              <span className="text-white font-bold text-xs">{initials}</span>
+            </div>
+          )
         )}
         <button
           onClick={() => setCollapsed(!collapsed)}
-          className="text-slate-500 hover:text-slate-300 transition-colors ml-auto"
+          className="text-slate-500 hover:text-slate-300 transition-colors ml-auto shrink-0"
         >
           {collapsed ? <ChevronRight className="h-4 w-4" /> : <ChevronLeft className="h-4 w-4" />}
         </button>
