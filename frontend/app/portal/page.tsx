@@ -81,6 +81,33 @@ function PlanBar({ pct }: { pct: number }) {
   )
 }
 
+function SalaryCard({ overview }: { overview: Overview }) {
+  const advances  = overview.advances_total  ?? 0
+  const penalties = overview.penalties_total ?? 0
+  const salary    = overview.salary          ?? 0
+  const toPay     = overview.to_pay          ?? (salary - advances - penalties)
+  const hasAdj    = advances > 0 || penalties > 0
+
+  const parts: string[] = [`Начислено ${formatCurrency(salary)}`]
+  if (advances  > 0) parts.push(`Аванс −${formatCurrency(advances)}`)
+  if (penalties > 0) parts.push(`Штрафы −${formatCurrency(penalties)}`)
+
+  return (
+    <div className="bg-slate-800/60 border border-slate-700/50 rounded-xl p-5">
+      <div className="flex items-center justify-between mb-3">
+        <p className="text-xs font-medium text-slate-400 uppercase tracking-wide">ЗП чистыми</p>
+        <div className="p-1.5 bg-violet-500/10 rounded-lg text-violet-400">
+          <TrendingUp className="h-4 w-4" />
+        </div>
+      </div>
+      <p className="text-2xl font-bold text-slate-100">{formatCurrency(Math.max(0, toPay))}</p>
+      {hasAdj && (
+        <p className="text-xs text-slate-500 mt-1">{parts.join(' · ')}</p>
+      )}
+    </div>
+  )
+}
+
 function FinancesBlock({ overview }: { overview: Overview }) {
   const [open, setOpen] = useState(false)
   const advances  = overview.advances_total  ?? 0
@@ -89,32 +116,33 @@ function FinancesBlock({ overview }: { overview: Overview }) {
   const toPay     = overview.to_pay          ?? (salary - advances - penalties)
   const adjs      = overview.adjustments     ?? []
 
-  if (advances === 0 && penalties === 0 && adjs.length === 0) return null
+  // Hide if nothing interesting to show
+  if (advances === 0 && penalties === 0) return null
 
   return (
     <div className="bg-slate-800/60 border border-slate-700/50 rounded-xl overflow-hidden">
       <div className="px-5 py-4">
-        <p className="text-sm font-semibold text-slate-300 mb-4">Финансы за месяц</p>
+        <p className="text-sm font-semibold text-slate-300 mb-4">Откуда сумма</p>
 
         <div className="space-y-2">
           <div className="flex justify-between text-sm">
-            <span className="text-slate-400">Начислено</span>
+            <span className="text-slate-400">Начислено по тиру</span>
             <span className="text-slate-200">{formatCurrency(salary)}</span>
           </div>
+          {advances > 0 && (
+            <div className="flex justify-between text-sm">
+              <span className="text-sky-400">Получено авансом</span>
+              <span className="text-sky-400">−{formatCurrency(advances)}</span>
+            </div>
+          )}
           {penalties > 0 && (
             <div className="flex justify-between text-sm">
               <span className="text-red-400">Штрафы</span>
               <span className="text-red-400">−{formatCurrency(penalties)}</span>
             </div>
           )}
-          {advances > 0 && (
-            <div className="flex justify-between text-sm">
-              <span className="text-sky-400">Уже получено авансом</span>
-              <span className="text-sky-400">{formatCurrency(advances)}</span>
-            </div>
-          )}
           <div className="flex justify-between text-sm font-bold border-t border-slate-600/40 pt-2 mt-2">
-            <span className="text-slate-100">К доплате</span>
+            <span className="text-slate-100">= ЗП чистыми</span>
             <span className={toPay >= 0 ? 'text-emerald-400' : 'text-red-400'}>
               {formatCurrency(Math.max(0, toPay))}
             </span>
@@ -205,12 +233,7 @@ export default function PortalOverviewPage() {
                 icon={<DollarSign className="h-4 w-4" />}
                 sub={`${overview.transactions} транзакций`}
               />
-              <MetricCard
-                label="Моя зарплата"
-                value={formatCurrency(overview.salary)}
-                icon={<TrendingUp className="h-4 w-4" />}
-                sub="По тиру агентства"
-              />
+              <SalaryCard overview={overview} />
               <PlanBar pct={overview.plan_pct} />
             </>
           ) : null}
@@ -296,10 +319,8 @@ export default function PortalOverviewPage() {
           </div>
         )}
 
-        {/* Финансы за месяц (авансы / штрафы) */}
-        {!isLoading && overview && (overview.advances_total || overview.penalties_total || (overview.adjustments?.length ?? 0) > 0) && (
-          <FinancesBlock overview={overview} />
-        )}
+        {/* Откуда сумма (авансы / штрафы) */}
+        {!isLoading && overview && <FinancesBlock overview={overview} />}
 
         {!isLoading && overview && overview.transactions === 0 && (
           <div className="bg-slate-800/30 border border-slate-700/30 rounded-xl p-8 text-center">
