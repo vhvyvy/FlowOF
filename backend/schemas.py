@@ -221,6 +221,9 @@ class ChatterRow(BaseModel):
     chatter_cut: float
     status: str  # "top" | "ok" | "risk" | "miss"
     models: list[ChatterModelBreakdown] = []
+    chatter_id: Optional[int] = None        # id из справочника chatters (если сопоставлен)
+    advances_total: float = 0.0             # сумма авансов за месяц
+    penalties_total: float = 0.0            # сумма штрафов за месяц
 
 
 class ChattersResponse(BaseModel):

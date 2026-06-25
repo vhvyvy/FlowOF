@@ -12,9 +12,10 @@ interface MetricCardProps {
   forecastLabel?: string
   icon?: React.ReactNode
   className?: string
+  sub?: string             // small grey subtitle line
 }
 
-export function MetricCard({ label, value, delta, deltaLabel, forecast, forecastLabel, icon, className }: MetricCardProps) {
+export function MetricCard({ label, value, delta, deltaLabel, forecast, forecastLabel, icon, className, sub }: MetricCardProps) {
   const isPositive = delta !== undefined && delta >= 0
 
   return (
@@ -27,6 +28,7 @@ export function MetricCard({ label, value, delta, deltaLabel, forecast, forecast
       </CardHeader>
       <CardContent>
         <p className="text-2xl font-bold text-slate-100">{value}</p>
+        {sub != null && <p className="mt-1 text-xs text-slate-500">{sub}</p>}
         {forecast != null ? (
           <p className="mt-1.5 flex items-center gap-1 text-xs text-indigo-400">
             <TrendingUp className="h-3 w-3" />

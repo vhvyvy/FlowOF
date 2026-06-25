@@ -167,6 +167,9 @@ export interface ChatterRow {
   chatter_cut: number
   status: ChatterStatus
   models: ChatterModelBreakdown[]
+  chatter_id?: number | null
+  advances_total?: number
+  penalties_total?: number
 }
 
 export interface ChattersResponse {

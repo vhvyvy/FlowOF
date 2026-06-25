@@ -230,6 +230,39 @@ async def my_overview(
             r["date"] = str(r["date"])
         r["amount"] = float(r["amount"] or 0)
 
+    # Авансы и штрафы за месяц
+    adj_result = await db.execute(
+        text(
+            """SELECT a.id, a.type, a.amount, a.description, a.date
+               FROM chatter_adjustments a
+               WHERE a.tenant_id = :tid AND a.chatter_id = :cid
+                 AND EXTRACT(MONTH FROM a.date) = :month
+                 AND EXTRACT(YEAR  FROM a.date) = :year
+               ORDER BY a.date DESC, a.id DESC
+               LIMIT 10"""
+        ),
+        {"tid": user.tenant_id, "cid": user.chatter_id, "month": month, "year": year},
+    )
+    adjustments_list = []
+    advances_total = 0.0
+    penalties_total = 0.0
+    for r in adj_result.mappings():
+        amt = float(r["amount"] or 0)
+        entry = {
+            "id": r["id"],
+            "type": r["type"],
+            "amount": amt,
+            "description": r["description"],
+            "date": str(r["date"]),
+        }
+        adjustments_list.append(entry)
+        if r["type"] == "advance":
+            advances_total += amt
+        elif r["type"] == "penalty":
+            penalties_total += amt
+
+    to_pay = round(salary - penalties_total - advances_total, 2)
+
     return {
         "revenue": revenue,
         "transactions": transactions,
@@ -238,6 +271,10 @@ async def my_overview(
         "plan_pct": plan_pct,
         "daily_revenue": daily,
         "recent_transactions": recent,
+        "advances_total": round(advances_total, 2),
+        "penalties_total": round(penalties_total, 2),
+        "to_pay": to_pay,
+        "adjustments": adjustments_list,
     }
 
 

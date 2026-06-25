@@ -238,6 +238,35 @@ async def get_chatters(
         assigned_revenue = float(_rev_row.assigned or 0)
         unassigned_revenue = round(total_revenue - assigned_revenue, 2)
 
+        # ── Adjustments (авансы / штрафы) за месяц ───────────────────────────
+        from sqlalchemy import text as _text
+        adj_result = await db.execute(
+            _text(
+                """SELECT ca.chatter_id, ca.type, COALESCE(SUM(ca.amount), 0) AS total
+                   FROM chatter_adjustments ca
+                   WHERE ca.tenant_id = :tid
+                     AND EXTRACT(MONTH FROM ca.date) = :month
+                     AND EXTRACT(YEAR  FROM ca.date) = :year
+                   GROUP BY ca.chatter_id, ca.type"""
+            ),
+            {"tid": tenant.id, "month": month, "year": year},
+        )
+        adj_by_chatter: dict[int, dict[str, float]] = {}
+        for r in adj_result.mappings():
+            cid = int(r["chatter_id"])
+            if cid not in adj_by_chatter:
+                adj_by_chatter[cid] = {"advance": 0.0, "penalty": 0.0}
+            adj_by_chatter[cid][r["type"]] = float(r["total"] or 0)
+
+        # Lookup table: normalized chatter name → catalog id
+        cat_result = await db.execute(
+            _text("SELECT id, LOWER(TRIM(name)) AS nname FROM chatters WHERE tenant_id = :tid"),
+            {"tid": tenant.id},
+        )
+        catalog_name_to_id: dict[str, int] = {
+            r["nname"]: int(r["id"]) for r in cat_result.mappings()
+        }
+
         # Build response rows sorted by revenue desc
         rows: list[ChatterRow] = []
         for name, d in sorted(chatter_data.items(), key=lambda x: -x[1]["revenue"]):
@@ -265,6 +294,9 @@ async def get_chatters(
                 key=lambda m: -m.revenue,
             )
 
+            cat_id = catalog_name_to_id.get(name.strip().lower())
+            adj = adj_by_chatter.get(cat_id, {}) if cat_id else {}
+
             rows.append(
                 ChatterRow(
                     name=name,
@@ -277,6 +309,9 @@ async def get_chatters(
                     chatter_cut=round(cut, 2),
                     status=status,
                     models=model_breakdown,
+                    chatter_id=cat_id,
+                    advances_total=round(adj.get("advance", 0.0), 2),
+                    penalties_total=round(adj.get("penalty", 0.0), 2),
                 )
             )
 

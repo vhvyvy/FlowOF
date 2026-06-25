@@ -411,6 +411,22 @@ _PATCHES: list[tuple[str, bool]] = [
         False,
     ),
     ("CREATE INDEX IF NOT EXISTS idx_kpi_history_chatter ON chatter_kpi_history(chatter_id, date)", False),
+    # ── Авансы и штрафы чаттерам ─────────────────────────────────────────────
+    (
+        """CREATE TABLE IF NOT EXISTS chatter_adjustments (
+            id SERIAL PRIMARY KEY,
+            tenant_id INTEGER REFERENCES tenants(id) ON DELETE CASCADE,
+            chatter_id INTEGER REFERENCES chatters(id) ON DELETE CASCADE,
+            type TEXT NOT NULL,
+            amount NUMERIC NOT NULL,
+            description TEXT,
+            date DATE NOT NULL DEFAULT CURRENT_DATE,
+            created_by_user_id INTEGER REFERENCES users(id),
+            created_at TIMESTAMP DEFAULT NOW()
+        )""",
+        False,
+    ),
+    ("CREATE INDEX IF NOT EXISTS idx_adjustments_chatter_month ON chatter_adjustments(chatter_id, date)", False),
     # ── Исправить NULL в is_active / kpi_enabled для существующих строк ────────
     ("UPDATE mmr_seasons SET is_active = TRUE WHERE is_active IS NULL", False),
     ("UPDATE mmr_settings SET kpi_enabled = TRUE WHERE kpi_enabled IS NULL", False),

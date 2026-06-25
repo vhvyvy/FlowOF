@@ -1,6 +1,7 @@
 'use client'
 
 import { useEffect, useRef, useState } from 'react'
+import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { Header } from '@/components/layout/Header'
 import { MetricCard, MetricCardSkeleton } from '@/components/metrics/MetricCard'
 import { Badge } from '@/components/ui/badge'
@@ -10,8 +11,9 @@ import { useMonthStore } from '@/lib/hooks/useMonth'
 import { useTeamStore } from '@/lib/hooks/useTeam'
 import { formatCurrency } from '@/lib/utils'
 import type { ChatterStatus, ChatterModelBreakdown } from '@/types'
-import { DollarSign, Users, Target, TrendingUp, X, AlertCircle, Download } from 'lucide-react'
+import { DollarSign, Users, Target, TrendingUp, X, AlertCircle, Download, Plus, Trash2, Wallet, ChevronDown, ChevronUp } from 'lucide-react'
 import { resolveApiBaseURL } from '@/lib/api'
+import api from '@/lib/api'
 
 const STATUS_BADGE: Record<ChatterStatus, { label: string; variant: 'success' | 'default' | 'warning' | 'danger' }> = {
   top:  { label: 'Топ',    variant: 'success' },
@@ -36,16 +38,204 @@ function planCompletionColor(completion: number) {
   return 'text-red-400'
 }
 
-// ── Popover with model breakdown ──────────────────────────────────────────────
+// ── Adjustment types ──────────────────────────────────────────────────────────
+
+interface Adjustment {
+  id: number
+  type: 'advance' | 'penalty'
+  amount: number
+  description: string | null
+  date: string
+}
+
+// ── AdjustmentsSection ────────────────────────────────────────────────────────
+
+function AdjustmentsSection({
+  chatterId,
+  type,
+  month,
+  year,
+}: {
+  chatterId: number
+  type: 'advance' | 'penalty'
+  month: number
+  year: number
+}) {
+  const qc = useQueryClient()
+  const [open, setOpen] = useState(false)
+  const [showForm, setShowForm] = useState(false)
+  const [formAmount, setFormAmount] = useState('')
+  const [formDesc, setFormDesc] = useState('')
+  const [formDate, setFormDate] = useState(() => {
+    const d = new Date()
+    return `${year}-${String(month).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`
+  })
+
+  const { data, isLoading } = useQuery<{ items: Adjustment[] }>({
+    queryKey: ['adjustments', chatterId, type, month, year],
+    queryFn: () =>
+      api.get(`/api/v1/adjustments?chatter_id=${chatterId}&month=${month}&year=${year}`)
+        .then(r => r.data),
+    enabled: open,
+  })
+
+  const items = (data?.items ?? []).filter(a => a.type === type)
+  const total = items.reduce((s, a) => s + a.amount, 0)
+
+  const createMut = useMutation({
+    mutationFn: (payload: { chatter_id: number; type: string; amount: number; description: string | null; date: string }) =>
+      api.post('/api/v1/adjustments', payload).then(r => r.data),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['adjustments', chatterId, type, month, year] })
+      qc.invalidateQueries({ queryKey: ['chatters'] })
+      setShowForm(false)
+      setFormAmount('')
+      setFormDesc('')
+    },
+  })
+
+  const deleteMut = useMutation({
+    mutationFn: (id: number) => api.delete(`/api/v1/adjustments/${id}`).then(r => r.data),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['adjustments', chatterId, type, month, year] })
+      qc.invalidateQueries({ queryKey: ['chatters'] })
+    },
+  })
+
+  const isAdvance = type === 'advance'
+  const label = isAdvance ? 'Авансы' : 'Штрафы'
+  const accentColor = isAdvance ? 'text-sky-400' : 'text-red-400'
+  const borderColor = isAdvance ? 'border-sky-500/20' : 'border-red-500/20'
+  const bgColor = isAdvance ? 'bg-sky-500/5' : 'bg-red-500/5'
+
+  function handleAdd() {
+    const amt = parseFloat(formAmount)
+    if (isNaN(amt) || amt <= 0) return
+    createMut.mutate({
+      chatter_id: chatterId,
+      type,
+      amount: amt,
+      description: formDesc || null,
+      date: formDate,
+    })
+  }
+
+  return (
+    <div className={`rounded-lg border ${borderColor} ${bgColor} overflow-hidden`}>
+      {/* Header row */}
+      <button
+        onClick={() => setOpen(v => !v)}
+        className="w-full flex items-center justify-between px-3 py-2 text-left"
+      >
+        <span className={`text-xs font-semibold ${accentColor}`}>{label} за месяц</span>
+        <div className="flex items-center gap-2">
+          {total > 0 && (
+            <span className={`text-xs font-bold ${accentColor}`}>
+              {isAdvance ? '' : '−'}{formatCurrency(total)}
+            </span>
+          )}
+          {open ? <ChevronUp className="h-3 w-3 text-slate-400" /> : <ChevronDown className="h-3 w-3 text-slate-400" />}
+        </div>
+      </button>
+
+      {open && (
+        <div className="px-3 pb-3 space-y-1.5">
+          {isLoading && <p className="text-xs text-slate-500 py-1">Загрузка...</p>}
+
+          {!isLoading && items.length === 0 && (
+            <p className="text-xs text-slate-600 py-1">Нет записей</p>
+          )}
+
+          {items.map(a => (
+            <div key={a.id} className="flex items-center gap-2 group">
+              <div className="flex-1 min-w-0">
+                <span className={`text-xs font-semibold ${accentColor}`}>
+                  {isAdvance ? '' : '−'}{formatCurrency(a.amount)}
+                </span>
+                <span className="text-xs text-slate-500 ml-1.5">{a.date.slice(5)}</span>
+                {a.description && (
+                  <span className="text-xs text-slate-400 ml-1.5 truncate">{a.description}</span>
+                )}
+              </div>
+              <button
+                onClick={() => deleteMut.mutate(a.id)}
+                disabled={deleteMut.isPending}
+                className="opacity-0 group-hover:opacity-100 p-0.5 text-slate-500 hover:text-red-400 transition-all"
+              >
+                <Trash2 className="h-3 w-3" />
+              </button>
+            </div>
+          ))}
+
+          {/* Add form */}
+          {showForm ? (
+            <div className="mt-2 space-y-1.5 border-t border-slate-700/40 pt-2">
+              <div className="flex gap-1.5">
+                <input
+                  type="number"
+                  placeholder="Сумма $"
+                  value={formAmount}
+                  onChange={e => setFormAmount(e.target.value)}
+                  className="flex-1 text-xs bg-slate-700/60 border border-slate-600/40 rounded px-2 py-1 text-slate-200 placeholder-slate-500 focus:outline-none focus:border-slate-500"
+                />
+                <input
+                  type="date"
+                  value={formDate}
+                  onChange={e => setFormDate(e.target.value)}
+                  className="text-xs bg-slate-700/60 border border-slate-600/40 rounded px-2 py-1 text-slate-200 focus:outline-none focus:border-slate-500"
+                />
+              </div>
+              <input
+                type="text"
+                placeholder="Описание (необязательно)"
+                value={formDesc}
+                onChange={e => setFormDesc(e.target.value)}
+                className="w-full text-xs bg-slate-700/60 border border-slate-600/40 rounded px-2 py-1 text-slate-200 placeholder-slate-500 focus:outline-none focus:border-slate-500"
+              />
+              <div className="flex gap-1.5">
+                <button
+                  onClick={handleAdd}
+                  disabled={createMut.isPending || !formAmount}
+                  className="flex-1 text-xs py-1 bg-emerald-500/20 hover:bg-emerald-500/30 border border-emerald-500/30 text-emerald-400 rounded transition-colors disabled:opacity-50"
+                >
+                  {createMut.isPending ? 'Сохраняю...' : 'Сохранить'}
+                </button>
+                <button
+                  onClick={() => setShowForm(false)}
+                  className="text-xs py-1 px-2 bg-slate-700/40 hover:bg-slate-700/60 border border-slate-600/30 text-slate-400 rounded transition-colors"
+                >
+                  Отмена
+                </button>
+              </div>
+            </div>
+          ) : (
+            <button
+              onClick={() => setShowForm(true)}
+              className={`mt-1 flex items-center gap-1 text-xs ${accentColor} opacity-70 hover:opacity-100 transition-opacity`}
+            >
+              <Plus className="h-3 w-3" />
+              + {isAdvance ? 'Аванс' : 'Штраф'}
+            </button>
+          )}
+        </div>
+      )}
+    </div>
+  )
+}
+
+// ── Popover with model breakdown + adjustments ────────────────────────────────
 
 interface ModelPopoverProps {
   chatterName: string
+  chatterId: number | null | undefined
   models: ChatterModelBreakdown[]
+  month: number
+  year: number
   onClose: () => void
   anchorRef: React.RefObject<HTMLElement>
 }
 
-function ModelPopover({ chatterName, models, onClose, anchorRef }: ModelPopoverProps) {
+function ModelPopover({ chatterName, chatterId, models, month, year, onClose, anchorRef }: ModelPopoverProps) {
   const popRef = useRef<HTMLDivElement>(null)
   const [pos, setPos] = useState({ top: 0, left: 0 })
 
@@ -55,9 +245,12 @@ function ModelPopover({ chatterName, models, onClose, anchorRef }: ModelPopoverP
       const pop  = popRef.current.getBoundingClientRect()
       let left = rect.left + rect.width / 2 - pop.width / 2
       let top  = rect.bottom + 8 + window.scrollY
-      // keep within viewport
       if (left + pop.width > window.innerWidth - 16) left = window.innerWidth - pop.width - 16
       if (left < 16) left = 16
+      // keep on screen vertically
+      if (top + pop.height > window.innerHeight + window.scrollY - 16) {
+        top = rect.top + window.scrollY - pop.height - 8
+      }
       setPos({ top, left })
     }
   }, [anchorRef])
@@ -77,10 +270,10 @@ function ModelPopover({ chatterName, models, onClose, anchorRef }: ModelPopoverP
     <div
       ref={popRef}
       style={{ position: 'fixed', top: pos.top, left: pos.left, zIndex: 9999 }}
-      className="w-80 bg-slate-800 border border-slate-600/60 rounded-xl shadow-2xl shadow-black/50"
+      className="w-84 bg-slate-800 border border-slate-600/60 rounded-xl shadow-2xl shadow-black/50 max-h-[80vh] overflow-y-auto"
     >
       {/* Header */}
-      <div className="flex items-center justify-between px-4 py-3 border-b border-slate-700/60">
+      <div className="flex items-center justify-between px-4 py-3 border-b border-slate-700/60 sticky top-0 bg-slate-800 z-10">
         <div>
           <p className="text-xs text-slate-400 uppercase tracking-wide font-semibold">Анкеты</p>
           <p className="text-sm font-semibold text-slate-100 mt-0.5">{chatterName}</p>
@@ -91,14 +284,13 @@ function ModelPopover({ chatterName, models, onClose, anchorRef }: ModelPopoverP
       </div>
 
       {/* Model rows */}
-      <div className="divide-y divide-slate-700/40 max-h-80 overflow-y-auto">
+      <div className="divide-y divide-slate-700/40">
         {models.map((m) => {
           const ts = tierStyle(m.tier_pct)
           const hasPlan = m.plan_amount > 0
           const hasRetention = m.retention > 0
           return (
             <div key={m.model} className="px-4 py-3">
-              {/* Model name + plan info */}
               <div className="flex items-start justify-between gap-2 mb-2">
                 <div className="flex-1 min-w-0">
                   <p className="text-xs font-semibold text-slate-200 truncate">{m.model}</p>
@@ -113,7 +305,6 @@ function ModelPopover({ chatterName, models, onClose, anchorRef }: ModelPopoverP
                   {m.tier_pct}%
                 </span>
               </div>
-              {/* Financials */}
               <div className="bg-slate-700/30 rounded-lg px-3 py-2 space-y-1">
                 <div className="flex justify-between text-xs">
                   <span className="text-slate-400">Выручка</span>
@@ -140,12 +331,26 @@ function ModelPopover({ chatterName, models, onClose, anchorRef }: ModelPopoverP
       </div>
 
       {/* Footer total */}
-      <div className="px-4 py-2.5 border-t border-slate-700/60 flex items-center justify-between bg-slate-700/20 rounded-b-xl">
-        <span className="text-xs text-slate-400">Итого к выплате</span>
+      <div className="px-4 py-2.5 border-t border-slate-700/60 flex items-center justify-between bg-slate-700/20">
+        <span className="text-xs text-slate-400">Итого начислено</span>
         <span className="text-sm font-semibold text-emerald-400">
           {formatCurrency(models.reduce((s, m) => s + m.net_cut, 0))}
         </span>
       </div>
+
+      {/* Adjustments sections — only if chatter has catalog id */}
+      {chatterId ? (
+        <div className="px-4 py-3 space-y-2 border-t border-slate-700/60">
+          <AdjustmentsSection chatterId={chatterId} type="advance"  month={month} year={year} />
+          <AdjustmentsSection chatterId={chatterId} type="penalty" month={month} year={year} />
+        </div>
+      ) : (
+        <div className="px-4 py-3 border-t border-slate-700/60">
+          <p className="text-xs text-slate-600 italic">
+            Авансы/штрафы недоступны: чаттер не сопоставлен со справочником
+          </p>
+        </div>
+      )}
     </div>
   )
 }
@@ -182,11 +387,15 @@ export default function ChattersPage() {
       setExporting(false)
     }
   }
+
   const btnRefs = useRef<Record<string, HTMLButtonElement | null>>({})
   const anchorRef = useRef<HTMLElement | null>(null)
 
   const completion        = data?.plan_completion ?? 0
   const totalPayout       = data?.chatters.reduce((s, c) => s + c.chatter_cut, 0) ?? 0
+  const totalAdvances     = data?.chatters.reduce((s, c) => s + (c.advances_total ?? 0), 0) ?? 0
+  const totalPenalties    = data?.chatters.reduce((s, c) => s + (c.penalties_total ?? 0), 0) ?? 0
+  const totalToPay        = totalPayout - totalAdvances - totalPenalties
   const unassignedRevenue = data?.unassigned_revenue ?? 0
   const tier              = tierStyle(completion >= 100 ? 25 : completion >= 90 ? 24 : completion >= 80 ? 23 : completion >= 70 ? 22 : completion >= 60 ? 21 : 20)
 
@@ -215,15 +424,23 @@ export default function ChattersPage() {
         )}
 
         {/* Metrics */}
-        <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+        <div className="grid grid-cols-2 md:grid-cols-5 gap-4">
           {isLoading ? (
-            Array.from({ length: 4 }).map((_, i) => <MetricCardSkeleton key={i} />)
+            Array.from({ length: 5 }).map((_, i) => <MetricCardSkeleton key={i} />)
           ) : data ? (
             <>
-              <MetricCard label="Общая выручка"    value={formatCurrency(data.total_revenue)} icon={<DollarSign className="h-4 w-4" />} />
-              <MetricCard label="Чаттеров"          value={data.chatters.length.toString()}    icon={<Users className="h-4 w-4" />} />
-              <MetricCard label="Выполнение плана"  value={`${completion}%`}                   icon={<Target className="h-4 w-4" />} />
-              <MetricCard label="Итого выплаты"     value={formatCurrency(totalPayout)}         icon={<TrendingUp className="h-4 w-4" />} />
+              <MetricCard label="Общая выручка"    value={formatCurrency(data.total_revenue)}  icon={<DollarSign className="h-4 w-4" />} />
+              <MetricCard label="Чаттеров"          value={data.chatters.length.toString()}     icon={<Users className="h-4 w-4" />} />
+              <MetricCard label="Выполнение плана"  value={`${completion}%`}                    icon={<Target className="h-4 w-4" />} />
+              <MetricCard label="Итого выплаты"     value={formatCurrency(totalPayout)}          icon={<TrendingUp className="h-4 w-4" />} />
+              <MetricCard
+                label="К доплате"
+                value={formatCurrency(Math.max(0, totalToPay))}
+                icon={<Wallet className="h-4 w-4" />}
+                sub={totalAdvances > 0 || totalPenalties > 0
+                  ? `−${formatCurrency(totalAdvances)} авансы · −${formatCurrency(totalPenalties)} штрафы`
+                  : undefined}
+              />
             </>
           ) : null}
         </div>
@@ -303,6 +520,9 @@ export default function ChattersPage() {
                     const status = STATUS_BADGE[chatter.status]
                     const ts = tierStyle(chatter.chatter_pct)
                     const isOpen = openPopover === rowKey
+                    const hasAdv = (chatter.advances_total ?? 0) > 0
+                    const hasPen = (chatter.penalties_total ?? 0) > 0
+                    const toPay = chatter.chatter_cut - (chatter.penalties_total ?? 0) - (chatter.advances_total ?? 0)
                     return (
                       <tr key={rowKey} className="hover:bg-slate-700/20 transition-colors">
                         <td className="px-5 py-3 text-sm font-medium text-slate-200">{chatter.name}</td>
@@ -324,9 +544,22 @@ export default function ChattersPage() {
                             {chatter.chatter_pct}%
                           </button>
                         </td>
-                        <td className="px-5 py-3 text-sm font-semibold text-right">
+                        <td className="px-5 py-3 text-sm text-right">
                           {chatter.chatter_cut > 0 ? (
-                            <span className={ts.color}>{formatCurrency(chatter.chatter_cut)}</span>
+                            <div className="flex flex-col items-end gap-0.5">
+                              <span className={ts.color + ' font-semibold'}>{formatCurrency(chatter.chatter_cut)}</span>
+                              {hasPen && (
+                                <span className="text-xs text-red-400">−{formatCurrency(chatter.penalties_total!)} штрафы</span>
+                              )}
+                              {hasAdv && (
+                                <span className="text-xs text-sky-400">{formatCurrency(chatter.advances_total!)} выдано</span>
+                              )}
+                              {(hasAdv || hasPen) && (
+                                <span className="text-xs font-semibold text-slate-200 border-t border-slate-600/40 pt-0.5 mt-0.5">
+                                  к доплате {formatCurrency(Math.max(0, toPay))}
+                                </span>
+                              )}
+                            </div>
                           ) : (
                             <span className="text-slate-600">—</span>
                           )}
@@ -352,7 +585,10 @@ export default function ChattersPage() {
       {activeChatter && openPopover && (
         <ModelPopover
           chatterName={activeChatter.name}
+          chatterId={activeChatter.chatter_id}
           models={activeChatter.models ?? []}
+          month={month}
+          year={year}
           onClose={() => setOpenPopover(null)}
           anchorRef={{ current: btnRefs.current[openPopover] } as React.RefObject<HTMLElement>}
         />

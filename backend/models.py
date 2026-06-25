@@ -102,6 +102,21 @@ class SeasonResult(Base):
     created_at = Column(DateTime, default=datetime.utcnow)
 
 
+class ChatterAdjustment(Base):
+    """Аванс или штраф для чаттера."""
+    __tablename__ = "chatter_adjustments"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    tenant_id = Column(Integer, ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False, index=True)
+    chatter_id = Column(Integer, ForeignKey("chatters.id", ondelete="CASCADE"), nullable=False)
+    type = Column(Text, nullable=False)       # 'advance' | 'penalty'
+    amount = Column(Numeric(12, 2), nullable=False)
+    description = Column(Text, nullable=True)
+    date = Column(Date, nullable=False)
+    created_by_user_id = Column(Integer, ForeignKey("users.id"), nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+
 class ChatterInvite(Base):
     """Одноразовая инвайт-ссылка для регистрации чаттера в личном кабинете."""
     __tablename__ = "chatter_invites"

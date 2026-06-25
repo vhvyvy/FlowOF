@@ -5,7 +5,8 @@ import Link from 'next/link'
 import {
   AreaChart, Area, XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid,
 } from 'recharts'
-import { DollarSign, TrendingUp, Target, ArrowRight } from 'lucide-react'
+import { DollarSign, TrendingUp, Target, ArrowRight, ChevronDown, ChevronUp } from 'lucide-react'
+import { useState } from 'react'
 import { useMonthStore } from '@/lib/hooks/useMonth'
 import { Skeleton } from '@/components/ui/skeleton'
 import api from '@/lib/api'
@@ -24,6 +25,14 @@ interface Profile {
   currency: string
 }
 
+interface Adjustment {
+  id: number
+  type: 'advance' | 'penalty'
+  amount: number
+  description: string | null
+  date: string
+}
+
 interface Overview {
   revenue: number
   transactions: number
@@ -32,6 +41,10 @@ interface Overview {
   plan_pct: number
   daily_revenue: { date: string; amount: number }[]
   recent_transactions: { date: string; amount: number; model_name: string; shift_name: string }[]
+  advances_total?: number
+  penalties_total?: number
+  to_pay?: number
+  adjustments?: Adjustment[]
 }
 
 function MetricCard({
@@ -63,6 +76,76 @@ function PlanBar({ pct }: { pct: number }) {
       <p className="text-2xl font-bold text-slate-100">{pct.toFixed(1)}%</p>
       <div className="mt-3 h-2 bg-slate-700 rounded-full overflow-hidden">
         <div className={`h-full rounded-full transition-all ${color}`} style={{ width: `${clamped}%` }} />
+      </div>
+    </div>
+  )
+}
+
+function FinancesBlock({ overview }: { overview: Overview }) {
+  const [open, setOpen] = useState(false)
+  const advances  = overview.advances_total  ?? 0
+  const penalties = overview.penalties_total ?? 0
+  const salary    = overview.salary          ?? 0
+  const toPay     = overview.to_pay          ?? (salary - advances - penalties)
+  const adjs      = overview.adjustments     ?? []
+
+  if (advances === 0 && penalties === 0 && adjs.length === 0) return null
+
+  return (
+    <div className="bg-slate-800/60 border border-slate-700/50 rounded-xl overflow-hidden">
+      <div className="px-5 py-4">
+        <p className="text-sm font-semibold text-slate-300 mb-4">Финансы за месяц</p>
+
+        <div className="space-y-2">
+          <div className="flex justify-between text-sm">
+            <span className="text-slate-400">Начислено</span>
+            <span className="text-slate-200">{formatCurrency(salary)}</span>
+          </div>
+          {penalties > 0 && (
+            <div className="flex justify-between text-sm">
+              <span className="text-red-400">Штрафы</span>
+              <span className="text-red-400">−{formatCurrency(penalties)}</span>
+            </div>
+          )}
+          {advances > 0 && (
+            <div className="flex justify-between text-sm">
+              <span className="text-sky-400">Уже получено авансом</span>
+              <span className="text-sky-400">{formatCurrency(advances)}</span>
+            </div>
+          )}
+          <div className="flex justify-between text-sm font-bold border-t border-slate-600/40 pt-2 mt-2">
+            <span className="text-slate-100">К доплате</span>
+            <span className={toPay >= 0 ? 'text-emerald-400' : 'text-red-400'}>
+              {formatCurrency(Math.max(0, toPay))}
+            </span>
+          </div>
+        </div>
+
+        {adjs.length > 0 && (
+          <button
+            onClick={() => setOpen(v => !v)}
+            className="mt-3 flex items-center gap-1 text-xs text-slate-500 hover:text-slate-300 transition-colors"
+          >
+            {open ? <ChevronUp className="h-3 w-3" /> : <ChevronDown className="h-3 w-3" />}
+            Подробности
+          </button>
+        )}
+
+        {open && adjs.length > 0 && (
+          <div className="mt-2 space-y-1.5 border-t border-slate-700/40 pt-2">
+            {adjs.map((a) => (
+              <div key={a.id} className="flex items-center gap-2">
+                <span className={`text-xs font-semibold ${a.type === 'advance' ? 'text-sky-400' : 'text-red-400'}`}>
+                  {a.type === 'advance' ? 'Аванс' : 'Штраф'} {a.type === 'penalty' ? '−' : ''}{formatCurrency(a.amount)}
+                </span>
+                <span className="text-xs text-slate-500">{a.date.slice(5)}</span>
+                {a.description && (
+                  <span className="text-xs text-slate-400 truncate">{a.description}</span>
+                )}
+              </div>
+            ))}
+          </div>
+        )}
       </div>
     </div>
   )
@@ -211,6 +294,11 @@ export default function PortalOverviewPage() {
               ))}
             </div>
           </div>
+        )}
+
+        {/* Финансы за месяц (авансы / штрафы) */}
+        {!isLoading && overview && (overview.advances_total || overview.penalties_total || (overview.adjustments?.length ?? 0) > 0) && (
+          <FinancesBlock overview={overview} />
         )}
 
         {!isLoading && overview && overview.transactions === 0 && (
