@@ -33,12 +33,21 @@ interface Adjustment {
   date: string
 }
 
+interface ProfileEntry {
+  name: string
+  plan_amount: number
+  revenue_on_it: number
+  performance_pct: number | null
+}
+
 interface Overview {
   revenue: number
   transactions: number
   salary: number
   plan_amount: number
   plan_pct: number
+  main_profile: ProfileEntry | null
+  other_profiles: ProfileEntry[]
   daily_revenue: { date: string; amount: number }[]
   recent_transactions: { date: string; amount: number; model_name: string; shift_name: string }[]
   advances_total?: number
@@ -62,21 +71,59 @@ function MetricCard({
   )
 }
 
-function PlanBar({ pct }: { pct: number }) {
-  const clamped = Math.min(pct, 100)
-  const color = pct >= 100 ? 'bg-emerald-500' : pct >= 70 ? 'bg-sky-500' : pct >= 50 ? 'bg-yellow-500' : 'bg-red-500'
+function pctColor(pct: number | null) {
+  if (pct === null) return 'text-slate-400'
+  if (pct >= 100) return 'text-emerald-400'
+  if (pct >= 80)  return 'text-yellow-400'
+  return 'text-red-400'
+}
+
+function pctBarColor(pct: number | null) {
+  if (pct === null) return 'bg-slate-600'
+  if (pct >= 100) return 'bg-emerald-500'
+  if (pct >= 80)  return 'bg-yellow-500'
+  if (pct >= 50)  return 'bg-sky-500'
+  return 'bg-red-500'
+}
+
+function ProfileCard({ profile }: { profile: ProfileEntry | null | undefined }) {
+  const hasPlan = profile && profile.plan_amount > 0
+  const pct     = profile?.performance_pct ?? null
+  const clamped = Math.min(pct ?? 0, 100)
+
   return (
     <div className="bg-slate-800/60 border border-slate-700/50 rounded-xl p-5">
       <div className="flex items-center justify-between mb-3">
-        <p className="text-xs font-medium text-slate-400 uppercase tracking-wide">Выполнение плана</p>
+        <p className="text-xs font-medium text-slate-400 uppercase tracking-wide">Основная анкета</p>
         <div className="p-1.5 bg-violet-500/10 rounded-lg text-violet-400">
           <Target className="h-4 w-4" />
         </div>
       </div>
-      <p className="text-2xl font-bold text-slate-100">{pct.toFixed(1)}%</p>
-      <div className="mt-3 h-2 bg-slate-700 rounded-full overflow-hidden">
-        <div className={`h-full rounded-full transition-all ${color}`} style={{ width: `${clamped}%` }} />
-      </div>
+
+      {profile ? (
+        <>
+          <p className="text-base font-semibold text-slate-100 truncate mb-1">{profile.name || '—'}</p>
+          <p className={`text-2xl font-bold ${pctColor(pct)}`}>
+            {pct !== null ? `${pct.toFixed(1)}%` : '—'}
+          </p>
+          <div className="mt-2 h-2 bg-slate-700 rounded-full overflow-hidden">
+            <div
+              className={`h-full rounded-full transition-all ${pctBarColor(pct)}`}
+              style={{ width: `${clamped}%` }}
+            />
+          </div>
+          {hasPlan && (
+            <p className="text-xs text-slate-500 mt-2">
+              {formatCurrency(profile.revenue_on_it)} из {formatCurrency(profile.plan_amount)} плана
+            </p>
+          )}
+          {!hasPlan && (
+            <p className="text-xs text-slate-500 mt-2">Нет плана на эту анкету</p>
+          )}
+        </>
+      ) : (
+        <p className="text-sm text-slate-500">Нет данных за месяц</p>
+      )}
     </div>
   )
 }
@@ -234,10 +281,39 @@ export default function PortalOverviewPage() {
                 sub={`${overview.transactions} транзакций`}
               />
               <SalaryCard overview={overview} />
-              <PlanBar pct={overview.plan_pct} />
+              <ProfileCard profile={overview.main_profile} />
             </>
           ) : null}
         </div>
+
+        {/* Другие анкеты */}
+        {!isLoading && overview && overview.other_profiles && overview.other_profiles.length > 0 && (
+          <div className="bg-slate-800/60 border border-slate-700/50 rounded-xl overflow-hidden">
+            <div className="px-5 py-3 border-b border-slate-700/40">
+              <p className="text-sm font-semibold text-slate-300">Другие мои анкеты</p>
+            </div>
+            <div className="divide-y divide-slate-700/30">
+              {overview.other_profiles.map((p, i) => {
+                const hasPlan = p.plan_amount > 0
+                const pct = p.performance_pct
+                return (
+                  <div key={i} className="flex items-center justify-between px-5 py-3 gap-4">
+                    <div className="flex-1 min-w-0">
+                      <p className="text-sm font-medium text-slate-200 truncate">{p.name}</p>
+                      <p className="text-xs text-slate-500 mt-0.5">
+                        {formatCurrency(p.revenue_on_it)}
+                        {hasPlan ? ` / ${formatCurrency(p.plan_amount)} плана` : ' · нет плана'}
+                      </p>
+                    </div>
+                    <span className={`text-sm font-bold shrink-0 ${pctColor(pct)}`}>
+                      {pct !== null ? `${pct.toFixed(1)}%` : '—'}
+                    </span>
+                  </div>
+                )
+              })}
+            </div>
+          </div>
+        )}
 
         {/* График выручки по дням */}
         {!isLoading && overview && overview.daily_revenue.length > 0 && (

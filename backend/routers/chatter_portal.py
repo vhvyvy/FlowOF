@@ -162,32 +162,54 @@ async def my_overview(
     # Зарплата с тирами
     salary = await _calc_salary(db, user.tenant_id, user.chatter_id, year, month)
 
-    # Выполнение плана — планов нет в привязке к chatter_id в plans; ищем по имени чаттера
-    # Считаем план по моделям, где работал этот чаттер
-    chatter_models_result = await db.execute(
-        select(Transaction.model)
-        .where(and_(
-            Transaction.tenant_id == user.tenant_id,
-            Transaction.chatter_id == user.chatter_id,
-            Transaction.date >= start,
-            Transaction.date <= end,
-        ))
-        .group_by(Transaction.model)
+    # ── Анкеты чаттера: выручка + план по каждой модели ──────────────────────
+    profile_result = await db.execute(
+        text(
+            """SELECT
+                   COALESCE(m.name, t.model, '') AS model_name,
+                   COUNT(t.id)                   AS shift_count,
+                   SUM(t.amount)                 AS revenue
+               FROM transactions t
+               LEFT JOIN models m ON m.id = t.model_id
+               WHERE t.tenant_id = :tid
+                 AND t.chatter_id = :cid
+                 AND t.date >= :start AND t.date <= :end
+               GROUP BY COALESCE(m.name, t.model, '')
+               ORDER BY COUNT(t.id) DESC, SUM(t.amount) DESC"""
+        ),
+        {"tid": user.tenant_id, "cid": user.chatter_id, "start": start, "end": end},
     )
-    my_models = {_norm_model_name(r.model) for r in chatter_models_result.all()}
+    profile_rows = list(profile_result.mappings())
 
-    plan_result = await db.execute(
+    # Plans for this month (all models)
+    plans_result = await db.execute(
         select(Plan.model, Plan.plan_amount).where(
             and_(Plan.tenant_id == user.tenant_id, Plan.year == year, Plan.month == month)
         )
     )
-    total_plan = sum(
-        float(r.plan_amount or 0)
-        for r in plan_result.all()
-        if _norm_model_name(r.model) in my_models
-    )
+    plan_map: dict[str, float] = {
+        _norm_model_name(r.model): float(r.plan_amount or 0)
+        for r in plans_result.all()
+        if r.plan_amount
+    }
 
-    plan_pct = round(revenue / total_plan * 100, 1) if total_plan > 0 else 0.0
+    def _profile_entry(row) -> dict:
+        mname = row["model_name"] or ""
+        rev   = float(row["revenue"] or 0)
+        plan  = plan_map.get(_norm_model_name(mname), 0.0)
+        pct   = round(rev / plan * 100, 1) if plan > 0 else None
+        return {"name": mname, "plan_amount": plan, "revenue_on_it": round(rev, 2), "performance_pct": pct}
+
+    main_profile: dict | None = None
+    other_profiles: list[dict] = []
+    if profile_rows:
+        main_profile = _profile_entry(profile_rows[0])
+        other_profiles = [_profile_entry(r) for r in profile_rows[1:]]
+        other_profiles.sort(key=lambda x: -x["revenue_on_it"])
+
+    # Legacy plan_pct for salary calc compatibility
+    total_plan = sum(e["plan_amount"] for e in ([main_profile] + other_profiles if main_profile else []))
+    plan_pct   = round(revenue / total_plan * 100, 1) if total_plan > 0 else 0.0
 
     # Выручка по дням
     daily_result = await db.execute(
@@ -269,6 +291,8 @@ async def my_overview(
         "salary": salary,
         "plan_amount": total_plan,
         "plan_pct": plan_pct,
+        "main_profile": main_profile,
+        "other_profiles": other_profiles,
         "daily_revenue": daily,
         "recent_transactions": recent,
         "advances_total": round(advances_total, 2),
