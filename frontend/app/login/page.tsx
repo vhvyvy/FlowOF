@@ -1,7 +1,7 @@
 'use client'
 
-import { useState } from 'react'
-import { useRouter } from 'next/navigation'
+import { Suspense, useState } from 'react'
+import { useRouter, useSearchParams } from 'next/navigation'
 import Link from 'next/link'
 import { login, fetchOnboardingStatus } from '@/lib/auth'
 import { Button } from '@/components/ui/button'
@@ -9,7 +9,16 @@ import { Input } from '@/components/ui/input'
 import { Loader2 } from 'lucide-react'
 
 export default function LoginPage() {
+  return (
+    <Suspense>
+      <LoginForm />
+    </Suspense>
+  )
+}
+
+function LoginForm() {
   const router = useRouter()
+  const searchParams = useSearchParams()
   const [email, setEmail] = useState('')
   const [password, setPassword] = useState('')
   const [loading, setLoading] = useState(false)
@@ -21,15 +30,23 @@ export default function LoginPage() {
     setLoading(true)
     try {
       const response = await login({ email, password })
-      if (response.role === 'chatter') {
+      const role = response.role ?? 'owner'
+
+      if (role === 'chatter') {
+        // Chatter always goes to portal — never to dashboard
         router.replace('/portal')
       } else {
-        // owner или нет роли (обратная совместимость)
-        try {
-          const status = await fetchOnboardingStatus()
-          router.replace(status.onboarding_completed ? '/dashboard' : '/onboarding')
-        } catch {
-          router.replace('/dashboard')
+        // Owner: honour ?next= only if it points to /dashboard (not /portal)
+        const next = searchParams.get('next')
+        if (next && next.startsWith('/dashboard')) {
+          router.replace(next)
+        } else {
+          try {
+            const status = await fetchOnboardingStatus()
+            router.replace(status.onboarding_completed ? '/dashboard' : '/onboarding')
+          } catch {
+            router.replace('/dashboard')
+          }
         }
       }
     } catch (err: unknown) {
