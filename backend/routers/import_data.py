@@ -9,7 +9,7 @@ from datetime import date, datetime
 from typing import Any
 
 import pandas as pd
-from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile, status
+from fastapi import APIRouter, BackgroundTasks, Depends, File, Form, HTTPException, UploadFile, status
 from pydantic import BaseModel, Field
 from sqlalchemy import delete, update
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -38,6 +38,35 @@ from services.upload_store import get_upload_path, pop_upload, save_upload
 logger = logging.getLogger("flowof.import")
 
 router = APIRouter(prefix="/api/v1/import", tags=["import"])
+
+
+def _schedule_mmr_for_rows(bg: BackgroundTasks, tenant_id: int, rows: list) -> None:
+    """Schedule one MMR range-recalc per unique (year, month) found in the imported rows."""
+    months: set[tuple[int, int]] = set()
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        d = row.get("date") or row.get("Дата") or ""
+        if not d:
+            continue
+        try:
+            from datetime import date as _date
+            if isinstance(d, _date):
+                months.add((d.year, d.month))
+            else:
+                parts = str(d).split("-")
+                if len(parts) >= 2:
+                    months.add((int(parts[0]), int(parts[1])))
+        except Exception:
+            pass
+
+    for year, month in months:
+        bg.add_task(_mmr_range_bg, tenant_id, year, month)
+
+
+async def _mmr_range_bg(tenant_id: int, year: int, month: int) -> None:
+    from services.mmr_trigger import trigger_mmr_recalc_range
+    await trigger_mmr_recalc_range(tenant_id, year, month, reason="import")
 
 
 class ImportUploadResponse(BaseModel):
@@ -402,6 +431,7 @@ async def preview_google_sheets(
 @router.post("/google-sheets/confirm", response_model=GoogleSheetConfirmResponse)
 async def confirm_google_sheets_import(
     body: GoogleSheetConfirmRequest,
+    bg: BackgroundTasks,
     tenant: Tenant = Depends(get_current_tenant),
     db: AsyncSession = Depends(get_db),
 ):
@@ -557,6 +587,8 @@ async def confirm_google_sheets_import(
             detail="Ошибка записи в базу",
         ) from e
 
+    # Trigger MMR recalc for all months covered by the import
+    _schedule_mmr_for_rows(bg, tenant.id, body.rows if body.rows else [])
     return GoogleSheetConfirmResponse(
         success=True,
         rows_imported=imported,
@@ -920,6 +952,7 @@ def _reapply_period(rows: list[dict], month: int, year: int) -> list[dict]:
 @router.post("/file/confirm", response_model=FileConfirmResponse)
 async def confirm_file_import(
     body: FileConfirmRequest,
+    bg: BackgroundTasks,
     tenant: Tenant = Depends(get_current_tenant),
     db: AsyncSession = Depends(get_db),
 ):
@@ -1001,6 +1034,7 @@ async def confirm_file_import(
         logger.exception("file/confirm DB write failed tenant=%s", tenant.id)
         raise HTTPException(status_code=500, detail="Ошибка записи в базу") from e
 
+    _schedule_mmr_for_rows(bg, tenant.id, body.rows if body.rows else [])
     return FileConfirmResponse(rows_imported=imported, rows_skipped=skipped)
 
 

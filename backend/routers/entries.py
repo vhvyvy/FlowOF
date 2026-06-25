@@ -4,7 +4,7 @@ from __future__ import annotations
 from datetime import date as DateType
 from typing import Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query
 from pydantic import BaseModel
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -14,6 +14,12 @@ from dependencies import get_current_tenant
 from models import Expense, Tenant, Transaction
 
 router = APIRouter(prefix="/api/v1/entries", tags=["entries"])
+
+
+async def _mmr_bg(tenant_id: int, target_date: DateType, reason: str) -> None:
+    """BackgroundTask wrapper — runs mmr_trigger in a separate async context."""
+    from services.mmr_trigger import trigger_mmr_recalc
+    await trigger_mmr_recalc(tenant_id, target_date, reason=reason)
 
 # ─── Schemas ─────────────────────────────────────────────────────────────────
 
@@ -38,6 +44,7 @@ class TransactionUpdate(BaseModel):
 @router.post("/transactions", status_code=201)
 async def create_transaction(
     data: TransactionCreate,
+    bg: BackgroundTasks,
     tenant: Tenant = Depends(get_current_tenant),
     db: AsyncSession = Depends(get_db),
 ):
@@ -53,6 +60,7 @@ async def create_transaction(
     db.add(tx)
     await db.commit()
     await db.refresh(tx)
+    bg.add_task(_mmr_bg, tenant.id, data.date, "transaction_added")
     return {"id": tx.id, "success": True}
 
 
@@ -107,33 +115,42 @@ async def list_transactions(
 async def update_transaction(
     tx_id: int,
     data: TransactionUpdate,
+    bg: BackgroundTasks,
     tenant: Tenant = Depends(get_current_tenant),
     db: AsyncSession = Depends(get_db),
 ):
     tx = await db.get(Transaction, tx_id)
     if not tx or tx.tenant_id != tenant.id:
         raise HTTPException(status_code=404, detail="Не найдено")
+    old_date = tx.date
     tx.date = data.date
     tx.model_id = data.model_id
     tx.chatter_id = data.chatter_id
     tx.shift_catalog_id = data.shift_catalog_id
     tx.amount = data.amount
-    tx.source = "manual"  # правка отвязывает от автосинка
+    tx.source = "manual"
     await db.commit()
+    bg.add_task(_mmr_bg, tenant.id, data.date, "transaction_updated")
+    if old_date != data.date:
+        # Date changed — also recalc old date
+        bg.add_task(_mmr_bg, tenant.id, old_date, "transaction_date_changed")
     return {"success": True}
 
 
 @router.delete("/transactions/{tx_id}")
 async def delete_transaction(
     tx_id: int,
+    bg: BackgroundTasks,
     tenant: Tenant = Depends(get_current_tenant),
     db: AsyncSession = Depends(get_db),
 ):
     tx = await db.get(Transaction, tx_id)
     if not tx or tx.tenant_id != tenant.id:
         raise HTTPException(status_code=404, detail="Не найдено")
+    tx_date = tx.date
     await db.delete(tx)
     await db.commit()
+    bg.add_task(_mmr_bg, tenant.id, tx_date, "transaction_deleted")
     return {"success": True}
 
 
@@ -158,6 +175,7 @@ class ExpenseUpdate(BaseModel):
 @router.post("/expenses", status_code=201)
 async def create_expense(
     data: ExpenseCreate,
+    bg: BackgroundTasks,
     tenant: Tenant = Depends(get_current_tenant),
     db: AsyncSession = Depends(get_db),
 ):
@@ -173,6 +191,7 @@ async def create_expense(
     db.add(exp)
     await db.commit()
     await db.refresh(exp)
+    bg.add_task(_mmr_bg, tenant.id, data.date, "expense_added")
     return {"id": exp.id, "success": True}
 
 
@@ -225,31 +244,39 @@ async def list_expenses(
 async def update_expense(
     exp_id: int,
     data: ExpenseUpdate,
+    bg: BackgroundTasks,
     tenant: Tenant = Depends(get_current_tenant),
     db: AsyncSession = Depends(get_db),
 ):
     exp = await db.get(Expense, exp_id)
     if not exp or exp.tenant_id != tenant.id:
         raise HTTPException(status_code=404, detail="Не найдено")
+    old_date = exp.date
     exp.date = data.date
     exp.category_id = data.category_id
     exp.amount = data.amount
     exp.model_id = data.model_id
     exp.description = data.description
-    exp.source = "manual"  # правка отвязывает от автосинка
+    exp.source = "manual"
     await db.commit()
+    bg.add_task(_mmr_bg, tenant.id, data.date, "expense_updated")
+    if old_date != data.date:
+        bg.add_task(_mmr_bg, tenant.id, old_date, "expense_date_changed")
     return {"success": True}
 
 
 @router.delete("/expenses/{exp_id}")
 async def delete_expense(
     exp_id: int,
+    bg: BackgroundTasks,
     tenant: Tenant = Depends(get_current_tenant),
     db: AsyncSession = Depends(get_db),
 ):
     exp = await db.get(Expense, exp_id)
     if not exp or exp.tenant_id != tenant.id:
         raise HTTPException(status_code=404, detail="Не найдено")
+    exp_date = exp.date
     await db.delete(exp)
     await db.commit()
+    bg.add_task(_mmr_bg, tenant.id, exp_date, "expense_deleted")
     return {"success": True}

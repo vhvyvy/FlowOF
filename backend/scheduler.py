@@ -30,7 +30,7 @@ def setup_scheduler() -> Any:
 
     sched = AsyncIOScheduler()
 
-    async def _job() -> None:
+    async def _notion_job() -> None:
         async with AsyncSessionLocal() as db:
             r = await db.execute(select(Tenant).where(Tenant.active.is_(True)))
             tenants = list(r.scalars().all())
@@ -45,10 +45,36 @@ def setup_scheduler() -> Any:
                 except Exception as e:
                     logger.warning("scheduled notion sync tenant=%s: %s", t.id, e)
 
-    sched.add_job(_job, "interval", hours=24, id="notion_sync_all", replace_existing=True)
+    async def _mmr_daily_job() -> None:
+        """Daily MMR recalc for all active tenants — today + yesterday."""
+        from datetime import date, timedelta
+        from services.mmr_trigger import trigger_mmr_recalc
+
+        today     = date.today()
+        yesterday = today - timedelta(days=1)
+
+        async with AsyncSessionLocal() as db:
+            r = await db.execute(select(Tenant).where(Tenant.active.is_(True)))
+            tenants = list(r.scalars().all())
+
+        for t in tenants:
+            for target_date in (yesterday, today):
+                try:
+                    await trigger_mmr_recalc(t.id, target_date, reason="scheduler")
+                except Exception as exc:
+                    logger.warning("MMR scheduler error tenant=%s date=%s: %s", t.id, target_date, exc)
+
+    sched.add_job(_notion_job, "interval", hours=24, id="notion_sync_all", replace_existing=True)
+    sched.add_job(
+        _mmr_daily_job,
+        "cron",
+        hour=3, minute=0,   # 03:00 UTC daily
+        id="mmr_daily",
+        replace_existing=True,
+    )
     sched.start()
     _scheduler = sched
-    logger.info("APScheduler started: Notion sync every 24h")
+    logger.info("APScheduler started: Notion sync every 24h + MMR daily at 03:00 UTC")
     return sched
 
 
