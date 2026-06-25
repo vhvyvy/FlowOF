@@ -162,13 +162,14 @@ async def my_overview(
     # Зарплата с тирами
     salary = await _calc_salary(db, user.tenant_id, user.chatter_id, year, month)
 
-    # ── Анкеты чаттера: выручка + план по каждой модели ──────────────────────
-    profile_result = await db.execute(
+    # ── Анкеты чаттера: определяем модели по кол-ву его транзакций ───────────
+    # Используем chatter_id только чтобы понять на каких анкетах он работал
+    # и выбрать основную. Выручку и план — берём по всей модели (агентская цифра).
+    chatter_profile_result = await db.execute(
         text(
             """SELECT
                    COALESCE(m.name, t.model, '') AS model_name,
-                   COUNT(t.id)                   AS shift_count,
-                   SUM(t.amount)                 AS revenue
+                   COUNT(t.id)                   AS shift_count
                FROM transactions t
                LEFT JOIN models m ON m.id = t.model_id
                WHERE t.tenant_id = :tid
@@ -179,7 +180,9 @@ async def my_overview(
         ),
         {"tid": user.tenant_id, "cid": user.chatter_id, "start": start, "end": end},
     )
-    profile_rows = list(profile_result.mappings())
+    chatter_profile_rows = list(chatter_profile_result.mappings())
+    # names the chatter worked on, ordered by shift count
+    chatter_model_names: list[str] = [r["model_name"] for r in chatter_profile_rows]
 
     # Plans for this month (all models)
     plans_result = await db.execute(
@@ -193,18 +196,36 @@ async def my_overview(
         if r.plan_amount
     }
 
-    def _profile_entry(row) -> dict:
-        mname = row["model_name"] or ""
-        rev   = float(row["revenue"] or 0)
-        plan  = plan_map.get(_norm_model_name(mname), 0.0)
-        pct   = round(rev / plan * 100, 1) if plan > 0 else None
-        return {"name": mname, "plan_amount": plan, "revenue_on_it": round(rev, 2), "performance_pct": pct}
+    # Total revenue per model for the month (all chatters, not just this one)
+    model_rev_result = await db.execute(
+        text(
+            """SELECT
+                   COALESCE(m.name, t.model, '') AS model_name,
+                   SUM(t.amount)                 AS revenue
+               FROM transactions t
+               LEFT JOIN models m ON m.id = t.model_id
+               WHERE t.tenant_id = :tid
+                 AND t.date >= :start AND t.date <= :end
+               GROUP BY COALESCE(m.name, t.model, '')"""
+        ),
+        {"tid": user.tenant_id, "start": start, "end": end},
+    )
+    total_model_revenue: dict[str, float] = {
+        r["model_name"]: float(r["revenue"] or 0)
+        for r in model_rev_result.mappings()
+    }
+
+    def _profile_entry(model_name: str) -> dict:
+        rev  = total_model_revenue.get(model_name, 0.0)
+        plan = plan_map.get(_norm_model_name(model_name), 0.0)
+        pct  = round(rev / plan * 100, 1) if plan > 0 else None
+        return {"name": model_name, "plan_amount": plan, "revenue_on_it": round(rev, 2), "performance_pct": pct}
 
     main_profile: dict | None = None
     other_profiles: list[dict] = []
-    if profile_rows:
-        main_profile = _profile_entry(profile_rows[0])
-        other_profiles = [_profile_entry(r) for r in profile_rows[1:]]
+    if chatter_model_names:
+        main_profile = _profile_entry(chatter_model_names[0])
+        other_profiles = [_profile_entry(n) for n in chatter_model_names[1:]]
         other_profiles.sort(key=lambda x: -x["revenue_on_it"])
 
     # Legacy plan_pct for salary calc compatibility
