@@ -706,8 +706,8 @@ class MMRService:
         if row is not None:
             return row
 
-        # Сезон не найден — создаём на текущий квартал
-        quarter_start, quarter_end, name = self._quarter_bounds(target_date)
+        # Сезон не найден — создаём по сезону года
+        quarter_start, quarter_end, name = self._season_bounds(target_date)
         try:
             await self.db.execute(
                 text(
@@ -784,15 +784,41 @@ class MMRService:
             },
         )
 
-    def _quarter_bounds(self, d: date) -> tuple[date, date, str]:
-        """Вернуть (start, end, name) квартала для даты."""
-        q = (d.month - 1) // 3 + 1
-        start_month = (q - 1) * 3 + 1
-        end_month = start_month + 2
-        start = date(d.year, start_month, 1)
-        end = date(d.year, end_month, monthrange(d.year, end_month)[1])
-        names = {1: "Зима", 2: "Весна", 3: "Лето", 4: "Осень"}
-        return start, end, f"{names[q]} {d.year}"
+    def _season_bounds(self, d: date) -> tuple[date, date, str]:
+        """
+        Вернуть (start, end, name) сезона года для даты.
+
+        Сезоны (метеорологические):
+          Зима   — декабрь, январь, февраль
+                   (декабрь начинает зиму следующего года: Dec Y → Feb Y+1)
+          Весна  — март, апрель, май
+          Лето   — июнь, июль, август
+          Осень  — сентябрь, октябрь, ноябрь
+        """
+        m, y = d.month, d.year
+        if m == 12:
+            # December is the first month of Winter of next year
+            start = date(y, 12, 1)
+            end   = date(y + 1, 2, monthrange(y + 1, 2)[1])
+            name  = f"Зима {y + 1}"
+        elif m in (1, 2):
+            # January / February belong to winter that started in December of previous year
+            start = date(y - 1, 12, 1)
+            end   = date(y, 2, monthrange(y, 2)[1])
+            name  = f"Зима {y}"
+        elif m in (3, 4, 5):
+            start = date(y, 3, 1)
+            end   = date(y, 5, 31)
+            name  = f"Весна {y}"
+        elif m in (6, 7, 8):
+            start = date(y, 6, 1)
+            end   = date(y, 8, 31)
+            name  = f"Лето {y}"
+        else:  # 9, 10, 11
+            start = date(y, 9, 1)
+            end   = date(y, 11, 30)
+            name  = f"Осень {y}"
+        return start, end, name
 
     def _days_in_month(self, d: date) -> int:
         return monthrange(d.year, d.month)[1]

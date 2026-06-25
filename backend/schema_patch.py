@@ -417,6 +417,56 @@ _PATCHES: list[tuple[str, bool]] = [
     # Укрепить DDL: NOT NULL DEFAULT TRUE на kpi_enabled
     ("ALTER TABLE mmr_settings ALTER COLUMN kpi_enabled SET NOT NULL", False),
     ("ALTER TABLE mmr_settings ALTER COLUMN kpi_enabled SET DEFAULT TRUE", False),
+    # ── Миграция сезонов: закрыть «Весна 2026», открыть «Лето 2026» ────────────
+    # Шаг 1: закрыть тестовый сезон «Весна 2026» (без записи season_results)
+    (
+        "UPDATE mmr_seasons SET is_active = FALSE, closed_at = NOW() "
+        "WHERE name = 'Весна 2026' AND COALESCE(is_active, TRUE) = TRUE",
+        False,
+    ),
+    # Шаг 2: создать сезон «Лето 2026» если его ещё нет
+    (
+        """INSERT INTO mmr_seasons (tenant_id, name, start_date, end_date, is_active)
+           SELECT s.tenant_id, 'Лето 2026', '2026-06-01', '2026-08-31', TRUE
+           FROM mmr_seasons s
+           WHERE s.name = 'Весна 2026'
+             AND NOT EXISTS (
+                 SELECT 1 FROM mmr_seasons n
+                 WHERE n.tenant_id = s.tenant_id AND n.name = 'Лето 2026'
+             )
+           LIMIT 1""",
+        False,
+    ),
+    # Шаг 3: перенести mmr_events с event_date >= 2026-06-01 в «Лето 2026»
+    (
+        """UPDATE mmr_events e
+           SET season_id = ns.id
+           FROM mmr_seasons ns
+           JOIN mmr_seasons os ON os.name = 'Весна 2026' AND os.tenant_id = ns.tenant_id
+           WHERE ns.name = 'Лето 2026'
+             AND e.season_id = os.id
+             AND e.event_date >= '2026-06-01'""",
+        False,
+    ),
+    # Шаг 4: скопировать записи chatter_mmr в новый сезон
+    (
+        """INSERT INTO chatter_mmr
+               (tenant_id, chatter_id, season_id,
+                current_mmr, peak_mmr, current_league, calibration_complete, days_active)
+           SELECT cm.tenant_id, cm.chatter_id, ns.id,
+                  cm.current_mmr, cm.peak_mmr, cm.current_league,
+                  cm.calibration_complete, cm.days_active
+           FROM chatter_mmr cm
+           JOIN mmr_seasons os ON os.id = cm.season_id AND os.name = 'Весна 2026'
+           JOIN mmr_seasons ns ON ns.name = 'Лето 2026' AND ns.tenant_id = os.tenant_id
+           ON CONFLICT (tenant_id, chatter_id, season_id) DO UPDATE
+           SET current_mmr          = EXCLUDED.current_mmr,
+               peak_mmr             = EXCLUDED.peak_mmr,
+               current_league       = EXCLUDED.current_league,
+               calibration_complete = EXCLUDED.calibration_complete,
+               days_active          = EXCLUDED.days_active""",
+        False,
+    ),
     # ── Повторная попытка создать MMR-таблицы (идемпотентно, IF NOT EXISTS) ───
     # chatter_mmr и season_results могли не создаться если предыдущие запуски
     # прерывались из-за InFailedSqlTransaction. Повтор в отдельной транзакции.
