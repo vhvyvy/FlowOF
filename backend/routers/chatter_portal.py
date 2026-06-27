@@ -7,7 +7,7 @@ from datetime import date
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
-from sqlalchemy import select, func, and_, text
+from sqlalchemy import select, func, and_, or_, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from database import get_db
@@ -39,6 +39,7 @@ async def _calc_salary(
     chatter_catalog_id: int,
     year: int,
     month: int,
+    chatter_text_name: str | None = None,
 ) -> float:
     """Зарплата конкретного чаттера за месяц по логике тиров агентства."""
     start, end = _month_range(year, month)
@@ -46,12 +47,24 @@ async def _calc_salary(
     settings = await load_settings(db, tenant_id)
     use_retention = settings.get("use_retention", "1") == "1"
 
+    # Fallback filter: if legacy rows exist with text only, include them too
+    def _chatter_where():
+        if chatter_text_name:
+            return or_(
+                Transaction.chatter_id == chatter_catalog_id,
+                and_(
+                    Transaction.chatter_id.is_(None),
+                    Transaction.chatter == chatter_text_name,
+                ),
+            )
+        return Transaction.chatter_id == chatter_catalog_id
+
     # Выручка чаттера по моделям
     chatter_model_result = await db.execute(
         select(Transaction.model, func.sum(Transaction.amount).label("rev"))
         .where(and_(
             Transaction.tenant_id == tenant_id,
-            Transaction.chatter_id == chatter_catalog_id,
+            _chatter_where(),
             Transaction.date >= start,
             Transaction.date <= end,
             Transaction.model.isnot(None),
@@ -166,6 +179,26 @@ async def my_overview(
 
     start, end = _month_range(year, month)
 
+    # Resolve chatter text name (for legacy-row fallback)
+    _cn_r = await db.execute(
+        text("SELECT name FROM chatters WHERE id = :cid AND tenant_id = :tid"),
+        {"cid": user.chatter_id, "tid": user.tenant_id},
+    )
+    _cn_row = _cn_r.mappings().first()
+    chatter_text_name: str | None = _cn_row["name"] if _cn_row else None
+
+    def _chatter_filter():
+        """Match by chatter_id OR legacy text field (before migration completes)."""
+        if chatter_text_name:
+            return or_(
+                Transaction.chatter_id == user.chatter_id,
+                and_(
+                    Transaction.chatter_id.is_(None),
+                    Transaction.chatter == chatter_text_name,
+                ),
+            )
+        return Transaction.chatter_id == user.chatter_id
+
     # Выручка и кол-во транзакций
     rev_result = await db.execute(
         select(
@@ -173,7 +206,7 @@ async def my_overview(
             func.count(Transaction.id).label("transactions"),
         ).where(and_(
             Transaction.tenant_id == user.tenant_id,
-            Transaction.chatter_id == user.chatter_id,
+            _chatter_filter(),
             Transaction.date >= start,
             Transaction.date <= end,
         ))
@@ -182,8 +215,9 @@ async def my_overview(
     revenue = float(rev_row.revenue)
     transactions = int(rev_row.transactions)
 
-    # Зарплата с тирами
-    salary = await _calc_salary(db, user.tenant_id, user.chatter_id, year, month)
+    # Зарплата с тирами (also uses fallback via _calc_salary)
+    salary = await _calc_salary(db, user.tenant_id, user.chatter_id, year, month,
+                                chatter_text_name=chatter_text_name)
 
     # ── Анкеты чаттера: определяем модели по кол-ву его транзакций ───────────
     # Используем chatter_id только чтобы понять на каких анкетах он работал
@@ -196,12 +230,14 @@ async def my_overview(
                FROM transactions t
                LEFT JOIN models m ON m.id = t.model_id
                WHERE t.tenant_id = :tid
-                 AND t.chatter_id = :cid
+                 AND (t.chatter_id = :cid
+                      OR (t.chatter_id IS NULL AND t.chatter = :cname))
                  AND t.date >= :start AND t.date <= :end
                GROUP BY COALESCE(m.name, t.model, '')
                ORDER BY COUNT(t.id) DESC, SUM(t.amount) DESC"""
         ),
-        {"tid": user.tenant_id, "cid": user.chatter_id, "start": start, "end": end},
+        {"tid": user.tenant_id, "cid": user.chatter_id,
+         "cname": chatter_text_name or "", "start": start, "end": end},
     )
     chatter_profile_rows = list(chatter_profile_result.mappings())
     # names the chatter worked on, ordered by shift count
@@ -262,7 +298,7 @@ async def my_overview(
             func.sum(Transaction.amount).label("amount"),
         ).where(and_(
             Transaction.tenant_id == user.tenant_id,
-            Transaction.chatter_id == user.chatter_id,
+            _chatter_filter(),
             Transaction.date >= start,
             Transaction.date <= end,
         ))
@@ -283,12 +319,15 @@ async def my_overview(
                FROM transactions t
                LEFT JOIN models m ON t.model_id = m.id
                LEFT JOIN shifts_catalog sc ON t.shift_catalog_id = sc.id
-               WHERE t.tenant_id = :tid AND t.chatter_id = :cid
+               WHERE t.tenant_id = :tid
+                 AND (t.chatter_id = :cid
+                      OR (t.chatter_id IS NULL AND t.chatter = :cname))
                  AND t.date >= :start AND t.date <= :end
                ORDER BY t.date DESC
                LIMIT 5"""
         ),
-        {"tid": user.tenant_id, "cid": user.chatter_id, "start": start, "end": end},
+        {"tid": user.tenant_id, "cid": user.chatter_id,
+         "cname": chatter_text_name or "", "start": start, "end": end},
     )
     recent = [dict(r) for r in recent_result.mappings()]
     for r in recent:
@@ -359,6 +398,14 @@ async def my_transactions(
 
     start, end = _month_range(year, month)
 
+    # Resolve text name for legacy fallback
+    _cn2 = await db.execute(
+        text("SELECT name FROM chatters WHERE id = :cid AND tenant_id = :tid"),
+        {"cid": user.chatter_id, "tid": user.tenant_id},
+    )
+    _cn2_row = _cn2.mappings().first()
+    _cname = (_cn2_row["name"] if _cn2_row else None) or ""
+
     result = await db.execute(
         text(
             """SELECT t.date, t.amount,
@@ -367,11 +414,14 @@ async def my_transactions(
                FROM transactions t
                LEFT JOIN models m ON t.model_id = m.id
                LEFT JOIN shifts_catalog sc ON t.shift_catalog_id = sc.id
-               WHERE t.tenant_id = :tid AND t.chatter_id = :cid
+               WHERE t.tenant_id = :tid
+                 AND (t.chatter_id = :cid
+                      OR (t.chatter_id IS NULL AND t.chatter = :cname))
                  AND t.date >= :start AND t.date <= :end
                ORDER BY t.date DESC"""
         ),
-        {"tid": user.tenant_id, "cid": user.chatter_id, "start": start, "end": end},
+        {"tid": user.tenant_id, "cid": user.chatter_id,
+         "cname": _cname, "start": start, "end": end},
     )
     items = []
     for row in result.mappings():

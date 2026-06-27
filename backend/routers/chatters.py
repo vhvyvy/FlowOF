@@ -143,7 +143,7 @@ async def get_chatters(
             Transaction.tenant_id == tenant.id,
             Transaction.date >= start,
             Transaction.date <= end,
-            Transaction.chatter.isnot(None),
+            Transaction.chatter_id.isnot(None),  # use FK, not text
         ]
         if selected_team is not None:
             tc2 = team_transaction_clause(selected_team.id, default_team_id)
@@ -152,25 +152,38 @@ async def get_chatters(
 
         chatter_model_result = await db.execute(
             select(
-                Transaction.chatter,
+                Transaction.chatter_id,
+                Transaction.chatter,   # keep text as display-name fallback
                 Transaction.model,
                 Transaction.team_id,
                 func.sum(Transaction.amount).label("revenue"),
                 func.count(Transaction.id).label("txn_count"),
             )
             .where(and_(*cm_cond))
-            .group_by(Transaction.chatter, Transaction.model, Transaction.team_id)
+            .group_by(Transaction.chatter_id, Transaction.chatter, Transaction.model, Transaction.team_id)
         )
         chatter_model_rows = chatter_model_result.all()
 
-        # Aggregate per chatter: sum revenue and payout across models
-        # Models not in plan_rows → DEFAULT_TIER (25%)
-        # Hard floor: no model tier can be below 20%
-        chatter_data: dict[str, dict] = {}
+        # Load catalog id→name mapping for display names
+        from sqlalchemy import text as _text2
+        _cat_r = await db.execute(
+            _text2("SELECT id, name FROM chatters WHERE tenant_id = :tid AND active IS NOT FALSE"),
+            {"tid": tenant.id},
+        )
+        chatter_id_to_name: dict[int, str] = {int(r["id"]): r["name"] for r in _cat_r.mappings()}
+
+        # Aggregate per chatter using chatter_id as key
+        # key = chatter_id (int); fallback text for rows without ID is handled below
+        chatter_data: dict[str, dict] = {}  # key = display name (from catalog or text fallback)
         for r in chatter_model_rows:
             tid = r.team_id if r.team_id is not None else default_team_id
             team_name = (team_map.get(tid).name if team_map.get(tid) else "Основная команда")
-            name = r.chatter or "Unknown"
+            # Use catalog name if we have chatter_id, otherwise fall back to text
+            cid: int | None = r.chatter_id
+            if cid is not None and cid in chatter_id_to_name:
+                name = chatter_id_to_name[cid]
+            else:
+                name = r.chatter or "Unknown"
             rev = float(r.revenue or 0)
             txns = int(r.txn_count or 0)
             mnorm = _norm_model_name(r.model)
@@ -203,6 +216,7 @@ async def get_chatters(
                     "models": [],
                     "team_id": tid,
                     "team_name": team_name,
+                    "chatter_id": cid,  # FK from transactions
                 }
             chatter_data[name]["revenue"] += rev
             chatter_data[name]["txn_count"] += txns
@@ -216,7 +230,7 @@ async def get_chatters(
                 func.coalesce(
                     func.sum(
                         case(
-                            (Transaction.chatter.isnot(None), Transaction.amount),
+                            (Transaction.chatter_id.isnot(None), Transaction.amount),
                             else_=0,
                         )
                     ),
@@ -258,15 +272,6 @@ async def get_chatters(
                 adj_by_chatter[cid] = {"advance": 0.0, "penalty": 0.0}
             adj_by_chatter[cid][r["type"]] = float(r["total"] or 0)
 
-        # Lookup table: normalized chatter name → catalog id
-        cat_result = await db.execute(
-            _text("SELECT id, LOWER(TRIM(name)) AS nname FROM chatters WHERE tenant_id = :tid"),
-            {"tid": tenant.id},
-        )
-        catalog_name_to_id: dict[str, int] = {
-            r["nname"]: int(r["id"]) for r in cat_result.mappings()
-        }
-
         # Build response rows sorted by revenue desc
         rows: list[ChatterRow] = []
         for name, d in sorted(chatter_data.items(), key=lambda x: -x[1]["revenue"]):
@@ -294,7 +299,8 @@ async def get_chatters(
                 key=lambda m: -m.revenue,
             )
 
-            cat_id = catalog_name_to_id.get(name.strip().lower())
+            # chatter_id is stored in d directly (set when building chatter_data)
+            cat_id: int | None = d.get("chatter_id")
             adj = adj_by_chatter.get(cat_id, {}) if cat_id else {}
 
             rows.append(

@@ -121,7 +121,7 @@ app.include_router(import_data.router)
 @app.on_event("startup")
 async def _create_tables():
     import models  # noqa: F401 – ensure all models are registered
-    from schema_patch import apply_schema_patches
+    from schema_patch import apply_schema_patches, backfill_transaction_ids
     from team_bootstrap import bootstrap_teams, assign_transactions_by_notion_database
     from sqlalchemy import select
 
@@ -130,6 +130,12 @@ async def _create_tables():
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
     await apply_schema_patches(engine)
+
+    try:
+        await backfill_transaction_ids(AsyncSessionLocal)
+    except Exception as _bf_err:
+        import logging as _log
+        _log.getLogger("flowof").warning("backfill_transaction_ids failed (non-fatal): %s", _bf_err)
 
     try:
         async with AsyncSessionLocal() as db:

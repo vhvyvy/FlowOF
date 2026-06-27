@@ -5,6 +5,7 @@ Apply lightweight ALTERs so production DBs stay compatible.
 from __future__ import annotations
 
 import logging
+import re
 
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine
@@ -568,3 +569,175 @@ async def apply_schema_patches(engine: AsyncEngine) -> None:
                 logger.exception("schema_patch critical: %s — %s", sql[:120], e)
                 raise
             logger.warning("schema_patch optional skip: %s — %s", sql[:120], e)
+
+
+_UUID_RE = re.compile(
+    r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$", re.I
+)
+
+
+def _norm_name(raw: str | None) -> str | None:
+    """Normalize a catalog name: strip whitespace + leading @."""
+    if not raw:
+        return None
+    s = str(raw).strip().lstrip("@").strip()
+    return s or None
+
+
+async def backfill_transaction_ids(session_factory) -> None:  # type: ignore[type-arg]
+    """One-time idempotent migration: fill chatter_id / model_id / shift_catalog_id
+    for legacy transactions that were saved with text fields only (no FK IDs).
+
+    Matching is case-insensitive + strips leading '@'.  Catalog entries are
+    created on-the-fly if not found — same logic as catalog_resolver.
+    This function is safe to call on every startup: it only touches rows
+    where the ID column is still NULL.
+    """
+    async with session_factory() as db:
+        # Fetch all active tenants
+        tenant_rows = await db.execute(text("SELECT id FROM tenants"))
+        tenant_ids = [r[0] for r in tenant_rows]
+
+    total_updated = 0
+    for tid in tenant_ids:
+        async with session_factory() as db:
+            try:
+                n = await _backfill_tenant(db, tid)
+                total_updated += n
+                if n:
+                    logger.info("backfill_transaction_ids: tenant=%d updated=%d rows", tid, n)
+            except Exception as exc:
+                logger.exception("backfill_transaction_ids: tenant=%d error: %s", tid, exc)
+
+    if total_updated:
+        logger.info("backfill_transaction_ids: DONE total updated=%d", total_updated)
+    else:
+        logger.info("backfill_transaction_ids: nothing to backfill — all IDs already set")
+
+
+async def _backfill_tenant(db, tenant_id: int) -> int:
+    """Fill missing FK IDs for one tenant. Returns the number of rows updated."""
+    updated = 0
+
+    # ── 1. Build catalog look-ups (normalized_lower → id) ────────────────────
+
+    cat_chatters_r = await db.execute(
+        text("SELECT id, name FROM chatters WHERE tenant_id = :tid"),
+        {"tid": tenant_id},
+    )
+    chatter_map: dict[str, int] = {}
+    for row in cat_chatters_r.mappings():
+        n = _norm_name(row["name"])
+        if n:
+            chatter_map[n.lower()] = int(row["id"])
+
+    cat_models_r = await db.execute(
+        text("SELECT id, name FROM models WHERE tenant_id = :tid"),
+        {"tid": tenant_id},
+    )
+    model_map: dict[str, int] = {}
+    for row in cat_models_r.mappings():
+        n = _norm_name(row["name"])
+        if n:
+            model_map[n.lower()] = int(row["id"])
+
+    cat_shifts_r = await db.execute(
+        text("SELECT id, name FROM shifts_catalog WHERE tenant_id = :tid"),
+        {"tid": tenant_id},
+    )
+    shift_map: dict[str, int] = {}
+    for row in cat_shifts_r.mappings():
+        n = _norm_name(row["name"])
+        if n:
+            shift_map[n.lower()] = int(row["id"])
+
+    # ── 2. Fetch legacy transactions missing at least one ID ─────────────────
+
+    txns_r = await db.execute(
+        text(
+            """SELECT id, chatter, model, shift_name
+               FROM transactions
+               WHERE tenant_id = :tid
+                 AND (
+                       (chatter_id IS NULL      AND chatter    IS NOT NULL AND TRIM(chatter)    != '')
+                    OR (model_id IS NULL         AND model      IS NOT NULL AND TRIM(model)      != '')
+                    OR (shift_catalog_id IS NULL AND shift_name IS NOT NULL AND TRIM(shift_name) != '')
+                 )"""
+        ),
+        {"tid": tenant_id},
+    )
+    txn_rows = list(txns_r.mappings())
+    if not txn_rows:
+        return 0
+
+    # ── Helper: find-or-create in a catalog table ────────────────────────────
+
+    async def _get_or_create_chatter(raw: str | None) -> int | None:
+        n = _norm_name(raw)
+        if not n:
+            return None
+        key = n.lower()
+        if key in chatter_map:
+            return chatter_map[key]
+        r = await db.execute(
+            text("INSERT INTO chatters (tenant_id, name, active) VALUES (:tid, :name, TRUE) RETURNING id"),
+            {"tid": tenant_id, "name": n},
+        )
+        new_id = r.scalar()
+        chatter_map[key] = new_id  # type: ignore[assignment]
+        return new_id
+
+    async def _get_or_create_model(raw: str | None) -> int | None:
+        n = _norm_name(raw)
+        if not n:
+            return None
+        key = n.lower()
+        if key in model_map:
+            return model_map[key]
+        r = await db.execute(
+            text("INSERT INTO models (tenant_id, name, active) VALUES (:tid, :name, TRUE) RETURNING id"),
+            {"tid": tenant_id, "name": n},
+        )
+        new_id = r.scalar()
+        model_map[key] = new_id  # type: ignore[assignment]
+        return new_id
+
+    async def _get_or_create_shift(raw: str | None) -> int | None:
+        n = _norm_name(raw)
+        if not n:
+            return None
+        if _UUID_RE.match(n):
+            return None  # skip Notion UUIDs
+        key = n.lower()
+        if key in shift_map:
+            return shift_map[key]
+        r = await db.execute(
+            text("INSERT INTO shifts_catalog (tenant_id, name, active) VALUES (:tid, :name, TRUE) RETURNING id"),
+            {"tid": tenant_id, "name": n},
+        )
+        new_id = r.scalar()
+        shift_map[key] = new_id  # type: ignore[assignment]
+        return new_id
+
+    # ── 3. Process each legacy transaction ────────────────────────────────────
+
+    for row in txn_rows:
+        txid = row["id"]
+        cid = await _get_or_create_chatter(row.get("chatter"))
+        mid = await _get_or_create_model(row.get("model"))
+        sid = await _get_or_create_shift(row.get("shift_name"))
+
+        await db.execute(
+            text(
+                """UPDATE transactions
+                   SET chatter_id      = COALESCE(chatter_id,      :cid),
+                       model_id        = COALESCE(model_id,        :mid),
+                       shift_catalog_id = COALESCE(shift_catalog_id, :sid)
+                   WHERE id = :txid"""
+            ),
+            {"cid": cid, "mid": mid, "sid": sid, "txid": txid},
+        )
+        updated += 1
+
+    await db.commit()
+    return updated
