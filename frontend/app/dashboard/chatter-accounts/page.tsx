@@ -359,15 +359,15 @@ export default function ChatterAccountsPage() {
             </p>
           </div>
         ) : (
-          <div className="bg-slate-800/60 border border-slate-700/50 rounded-2xl overflow-hidden">
-            <table className="w-full">
+          <div className="bg-slate-800/60 border border-slate-700/50 rounded-2xl overflow-visible">
+            <table className="w-full border-collapse">
               <thead>
                 <tr className="border-b border-slate-700/50 bg-slate-700/20">
-                  <th className="text-left px-5 py-3 text-xs font-semibold text-slate-400 uppercase tracking-wide">Чаттер</th>
+                  <th className="text-left px-5 py-3 text-xs font-semibold text-slate-400 uppercase tracking-wide rounded-tl-2xl">Чаттер</th>
                   <th className="text-left px-5 py-3 text-xs font-semibold text-slate-400 uppercase tracking-wide">Email</th>
                   <th className="text-left px-5 py-3 text-xs font-semibold text-slate-400 uppercase tracking-wide">Статус</th>
                   <th className="text-left px-5 py-3 text-xs font-semibold text-slate-400 uppercase tracking-wide">Создан</th>
-                  <th className="w-12 px-5 py-3" />
+                  <th className="w-12 px-5 py-3 rounded-tr-2xl" />
                 </tr>
               </thead>
               <tbody className="divide-y divide-slate-700/30">
