@@ -34,36 +34,38 @@ async def list_chatter_accounts(
     owner: User = Depends(require_owner),
     db: AsyncSession = Depends(get_db),
 ):
-    """Все chatter-пользователи текущего агентства."""
+    """Все чаттеры каталога агентства + данные аккаунта если есть."""
     result = await db.execute(
         text(
             """SELECT
-                 u.id,
+                 c.id        AS chatter_id,
+                 c.name      AS chatter_name,
+                 c.active    AS catalog_active,
+                 u.id        AS user_id,
                  u.email,
                  u.full_name,
-                 u.chatter_id,
-                 c.name  AS chatter_name,
-                 u.active,
+                 u.active    AS account_active,
                  u.created_at,
                  u.avatar_base64
-               FROM users u
-               LEFT JOIN chatters c ON u.chatter_id = c.id
-               WHERE u.tenant_id = :tid AND u.role = 'chatter'
-               ORDER BY c.name ASC, u.email ASC"""
+               FROM chatters c
+               LEFT JOIN users u ON u.chatter_id = c.id AND u.tenant_id = :tid AND u.role = 'chatter'
+               WHERE c.tenant_id = :tid AND c.active IS NOT FALSE
+               ORDER BY c.name ASC"""
         ),
         {"tid": owner.tenant_id},
     )
     rows = []
     for r in result.mappings():
+        has_account = r["user_id"] is not None
         rows.append({
-            "id":           int(r["id"]),
-            "email":        r["email"],
-            "full_name":    r["full_name"],
-            "chatter_id":   r["chatter_id"],
-            "chatter_name": r["chatter_name"],
-            "active":       bool(r["active"]),
-            "created_at":   str(r["created_at"]) if r["created_at"] else None,
-            "has_account":  True,
+            "id":            int(r["user_id"]) if has_account else None,
+            "chatter_id":    int(r["chatter_id"]),
+            "chatter_name":  r["chatter_name"],
+            "email":         r["email"],
+            "full_name":     r["full_name"],
+            "active":        bool(r["account_active"]) if has_account else False,
+            "created_at":    str(r["created_at"]) if r["created_at"] else None,
+            "has_account":   has_account,
             "avatar_base64": r["avatar_base64"],
         })
     return {"items": rows}
