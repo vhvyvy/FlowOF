@@ -1,8 +1,9 @@
 'use client'
 
 import { useState, useEffect, useCallback } from 'react'
+import Link from 'next/link'
 import api from '@/lib/api'
-import { Plus, Pencil, X, Check, UserPlus, Copy, CheckCheck } from 'lucide-react'
+import { Plus, Pencil, X, Check, UserPlus, Copy, CheckCheck, Settings2 } from 'lucide-react'
 
 interface ChatterItem {
   id: number
@@ -254,6 +255,14 @@ export function ChatterCatalogSection() {
                       <span className="text-xs text-slate-500 hidden sm:inline">
                         {formatDate(item.last_login_at)}
                       </span>
+                      <Link
+                        href={`/dashboard/chatter-accounts?q=${encodeURIComponent(item.name)}`}
+                        className="flex items-center gap-1 px-2 py-0.5 text-xs text-slate-400 hover:text-indigo-300 hover:bg-slate-700/60 border border-slate-600/30 hover:border-indigo-500/30 rounded-lg transition-colors"
+                        title="Управление аккаунтом"
+                      >
+                        <Settings2 className="h-3 w-3" />
+                        Управление
+                      </Link>
                     </div>
                   ) : (
                     <button
