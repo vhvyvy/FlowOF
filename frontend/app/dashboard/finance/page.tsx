@@ -8,7 +8,9 @@ import { useFinance } from '@/lib/hooks/useFinance'
 import { useMonthStore } from '@/lib/hooks/useMonth'
 import { useTeamStore } from '@/lib/hooks/useTeam'
 import { formatCurrency } from '@/lib/utils'
-import { DollarSign, TrendingDown, Percent, TrendingUp } from 'lucide-react'
+import { DollarSign, TrendingDown, Percent, TrendingUp, Download } from 'lucide-react'
+import { useState } from 'react'
+import { resolveApiBaseURL } from '@/lib/api'
 import type { EconomicBreakdown } from '@/types'
 
 function EcoCard({ label, amount, pct, color, note }: { label: string; amount: number; pct?: number; color: string; note?: string }) {
@@ -77,10 +79,39 @@ export default function FinancePage() {
   const { month, year } = useMonthStore()
   const { teamId } = useTeamStore()
   const { data, isLoading, error } = useFinance(month, year, teamId)
+  const [exporting, setExporting] = useState(false)
+
+  async function handleExport() {
+    setExporting(true)
+    try {
+      const base = resolveApiBaseURL()
+      const token = typeof window !== 'undefined' ? localStorage.getItem('token') : null
+      const res = await fetch(`${base}/api/v1/export/finance?month=${month}&year=${year}`, {
+        headers: token ? { Authorization: `Bearer ${token}` } : {},
+      })
+      if (!res.ok) throw new Error('Ошибка сервера')
+      const blob = await res.blob()
+      const a = document.createElement('a')
+      a.href = URL.createObjectURL(blob)
+      a.download = `finance_${year}_${String(month).padStart(2, '0')}.csv`
+      a.click()
+      URL.revokeObjectURL(a.href)
+    } catch (e) { console.error(e) }
+    finally { setExporting(false) }
+  }
 
   return (
     <div className="flex flex-col h-full">
-      <Header title="Финансы" />
+      <Header title="Финансы" actions={
+        <button
+          onClick={handleExport}
+          disabled={exporting || isLoading}
+          className="flex items-center gap-1.5 px-3 py-1.5 bg-slate-700/60 hover:bg-slate-700 disabled:opacity-50 border border-slate-600/50 text-slate-300 text-sm rounded-lg transition-colors"
+        >
+          <Download className="h-4 w-4" />
+          {exporting ? 'Экспорт...' : 'Экспорт CSV'}
+        </button>
+      } />
 
       <div className="flex-1 p-6 space-y-6 overflow-y-auto">
         {error && (
