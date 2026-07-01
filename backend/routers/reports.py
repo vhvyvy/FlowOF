@@ -142,3 +142,28 @@ async def get_chart(
     except Exception as e:
         logger.error("chart error tenant=%d type=%s: %s", tenant.id, chart_type, e, exc_info=True)
         raise HTTPException(status_code=500, detail=f"Ошибка генерации графика: {e}")
+
+
+@router.get("/pdf")
+async def get_pdf_report(
+    year: int  = Query(..., ge=2020),
+    month: int = Query(..., ge=1, le=12),
+    tenant: Tenant = Depends(get_current_tenant),
+    db: AsyncSession = Depends(get_db),
+):
+    """Generate and return a full management PDF report for the given month."""
+    try:
+        from services.report_pdf import build_agency_report_pdf
+
+        pdf_bytes = await build_agency_report_pdf(
+            db, tenant.id, year, month, tenant_name=tenant.name or "Агентство"
+        )
+        filename = f"report_{year}_{month:02d}.pdf"
+        return Response(
+            content=pdf_bytes,
+            media_type="application/pdf",
+            headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+        )
+    except Exception as e:
+        logger.error("pdf report error tenant=%d: %s", tenant.id, e, exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Ошибка генерации PDF: {e}")

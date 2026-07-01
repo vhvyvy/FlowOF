@@ -1,6 +1,7 @@
 """Claude-based LLM analyst for agency data questions."""
 from __future__ import annotations
 
+import json
 import logging
 import os
 
@@ -32,6 +33,66 @@ class LLMAnalyst:
     def __init__(self) -> None:
         self.api_key       = os.getenv("ANTHROPIC_API_KEY", "")
         self.analyst_model = os.getenv("AI_ANALYST_MODEL", "claude-sonnet-4-6")
+
+    async def generate_report_insights(self, snapshot_text: str, kpi_text: str) -> dict:
+        """Generate structured management report insights via Claude.
+        Returns dict with keys: summary, diagnosis, priorities, chatter_notes.
+        Falls back to empty placeholders on parse errors.
+        """
+        if not self.api_key:
+            raise ValueError("ANTHROPIC_API_KEY not configured")
+
+        from anthropic import AsyncAnthropic
+
+        report_model = os.getenv("AI_REPORT_MODEL", "claude-opus-4-8")
+        system = (
+            "Ты Head of Sales OnlyFans-агентства. По предоставленным данным составь управленческий отчёт. "
+            "Верни СТРОГО валидный JSON без markdown-обёртки (без ```json) с ключами:\n"
+            "  summary — главный вывод за период, 2–3 предложения;\n"
+            "  diagnosis — диагноз текущей ситуации, 2–4 предложения;\n"
+            "  priorities — массив из 3–5 строк: что исправить или развить в первую очередь;\n"
+            "  chatter_notes — массив объектов {\"chatter\": \"...\", \"note\": \"...\"} "
+            "по топ-5 чаттерам (короткий управленческий вывод по каждому).\n"
+            "КРИТИЧНО: используй ТОЛЬКО цифры из данных. Не выдумывай числа."
+        )
+        user_content = (
+            f"Финансовые данные:\n{snapshot_text}\n\n"
+            f"KPI данные:\n{kpi_text}"
+        )
+
+        client = AsyncAnthropic(api_key=self.api_key)
+        resp = await client.messages.create(
+            model=report_model,
+            max_tokens=1500,
+            system=system,
+            messages=[{"role": "user", "content": user_content}],
+        )
+        raw = resp.content[0].text.strip()
+
+        # Strip optional markdown code fence if model added it
+        if raw.startswith("```"):
+            raw = raw.split("```")[1]
+            if raw.startswith("json"):
+                raw = raw[4:]
+            raw = raw.strip()
+
+        try:
+            data = json.loads(raw)
+        except json.JSONDecodeError:
+            logger.warning("report_insights: failed to parse JSON, using raw text as summary")
+            data = {
+                "summary":       raw[:500],
+                "diagnosis":     "Не удалось разобрать структурированный ответ.",
+                "priorities":    [],
+                "chatter_notes": [],
+            }
+
+        return {
+            "summary":       data.get("summary", ""),
+            "diagnosis":     data.get("diagnosis", ""),
+            "priorities":    data.get("priorities", []),
+            "chatter_notes": data.get("chatter_notes", []),
+        }
 
     async def answer_question(self, snapshot_text: str, question: str) -> str:
         if not self.api_key:

@@ -4,7 +4,7 @@ import { useEffect, useState, useCallback } from 'react'
 import { Header } from '@/components/layout/Header'
 import { useMonthStore } from '@/lib/hooks/useMonth'
 import { resolveApiBaseURL } from '@/lib/api'
-import { Download, RefreshCw, ImageOff } from 'lucide-react'
+import { Download, RefreshCw, ImageOff, FileText, Loader2 } from 'lucide-react'
 
 const FINANCE_CHARTS = [
   { id: 'revenue_trend',           label: 'Выручка по месяцам' },
@@ -133,6 +133,50 @@ function SectionHeading({ label, note }: { label: string; note?: string }) {
   )
 }
 
+function PdfDownloadButton({ year, month }: { year: number; month: number }) {
+  const [loading, setLoading] = useState(false)
+  const [error, setError]     = useState<string | null>(null)
+
+  const handleDownload = async () => {
+    const token = typeof window !== 'undefined' ? localStorage.getItem('token') || '' : ''
+    const base  = resolveApiBaseURL()
+    const url   = `${base}/api/v1/reports/pdf?year=${year}&month=${month}`
+    setLoading(true)
+    setError(null)
+    try {
+      const res = await fetch(url, { headers: { Authorization: `Bearer ${token}` } })
+      if (!res.ok) throw new Error(`HTTP ${res.status}`)
+      const blob     = await res.blob()
+      const objectUrl = URL.createObjectURL(blob)
+      const a = document.createElement('a')
+      a.href     = objectUrl
+      a.download = `report_${year}_${month.toString().padStart(2, '0')}.pdf`
+      a.click()
+      URL.revokeObjectURL(objectUrl)
+    } catch (e) {
+      setError('Не удалось сгенерировать PDF')
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  return (
+    <div className="flex items-center gap-3">
+      <button
+        onClick={handleDownload}
+        disabled={loading}
+        className="flex items-center gap-2 px-4 py-2 rounded-xl bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 disabled:cursor-not-allowed text-white text-sm font-medium transition-colors"
+      >
+        {loading
+          ? <><Loader2 className="h-4 w-4 animate-spin" /> Генерируется отчёт…</>
+          : <><FileText className="h-4 w-4" /> Скачать PDF-отчёт</>
+        }
+      </button>
+      {error && <span className="text-xs text-red-400">{error}</span>}
+    </div>
+  )
+}
+
 export default function ReportsPage() {
   const { month, year } = useMonthStore()
 
@@ -141,10 +185,14 @@ export default function ReportsPage() {
       <Header title="Отчёты" />
 
       <div className="flex-1 overflow-y-auto p-6 space-y-8">
-        <p className="text-xs text-slate-500">
-          Фокусный месяц: <span className="text-slate-300 font-medium">{month.toString().padStart(2, '0')}/{year}</span>.
-          {' '}Графики тренда строятся по всей истории. Смените месяц в заголовке — детализация пересчитается.
-        </p>
+        {/* Top bar: hint + PDF button */}
+        <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
+          <p className="text-xs text-slate-500">
+            Фокусный месяц: <span className="text-slate-300 font-medium">{month.toString().padStart(2, '0')}/{year}</span>.
+            {' '}Графики тренда строятся по всей истории. Смените месяц в заголовке — детализация пересчитается.
+          </p>
+          <PdfDownloadButton year={year} month={month} />
+        </div>
 
         {/* ── Финансы ── */}
         <section className="space-y-4">
