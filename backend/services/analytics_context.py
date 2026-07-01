@@ -223,8 +223,9 @@ async def _monthly_detail(
         return []
 
     # Cutoff date = first day of the earliest month in the list
-    cutoff_str = months[0] + "-01"
-    months_set  = set(months)
+    cutoff_year, cutoff_month = int(months[0][:4]), int(months[0][5:7])
+    cutoff = date(cutoff_year, cutoff_month, 1)
+    months_set = set(months)
 
     # ── Revenue + expense totals per month ────────────────────────────────────
     tx_tot_r = await db.execute(
@@ -235,7 +236,7 @@ async def _monthly_detail(
                WHERE tenant_id = :tid AND date >= :cutoff
                GROUP BY TO_CHAR(date, 'YYYY-MM')"""
         ),
-        {"tid": tenant_id, "cutoff": cutoff_str},
+        {"tid": tenant_id, "cutoff": cutoff},
     )
     rev_map: dict[str, float] = {
         r["month"]: float(r["revenue"] or 0)
@@ -251,7 +252,7 @@ async def _monthly_detail(
                WHERE tenant_id = :tid AND date >= :cutoff
                GROUP BY TO_CHAR(date, 'YYYY-MM')"""
         ),
-        {"tid": tenant_id, "cutoff": cutoff_str},
+        {"tid": tenant_id, "cutoff": cutoff},
     )
     exp_map: dict[str, float] = {
         r["month"]: float(r["expenses"] or 0)
@@ -282,7 +283,7 @@ async def _monthly_detail(
                WHERE rn <= 10
                ORDER BY month, rn"""
         ),
-        {"tid": tenant_id, "cutoff": cutoff_str},
+        {"tid": tenant_id, "cutoff": cutoff},
     )
     chatters_by_month: dict[str, list] = defaultdict(list)
     for r in top_chat_r.mappings():
@@ -306,7 +307,7 @@ async def _monthly_detail(
                         COALESCE(mo.name, t.model, '(без модели)')
                ORDER BY month, revenue DESC"""
         ),
-        {"tid": tenant_id, "cutoff": cutoff_str},
+        {"tid": tenant_id, "cutoff": cutoff},
     )
     models_by_month: dict[str, list] = defaultdict(list)
     for r in model_r.mappings():
@@ -330,7 +331,7 @@ async def _monthly_detail(
                         COALESCE(sc.name, t.shift_name, '(без смены)')
                ORDER BY month, revenue DESC"""
         ),
-        {"tid": tenant_id, "cutoff": cutoff_str},
+        {"tid": tenant_id, "cutoff": cutoff},
     )
     shifts_by_month: dict[str, list] = defaultdict(list)
     for r in shift_r.mappings():
