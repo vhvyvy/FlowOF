@@ -20,6 +20,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from models import SyncLog, Team, Tenant, Transaction
 from team_bootstrap import assign_transactions_by_notion_database
 from team_helpers import list_teams, normalize_notion_db_id, split_notion_db_ids
+from services.catalog_resolver import resolve_model_id, resolve_chatter_id, resolve_shift_catalog_id
 
 logger = logging.getLogger("flowof.notion_sync")
 
@@ -686,6 +687,8 @@ async def sync_notion_transactions_for_tenant(
     inserted = updated = skipped = 0
     skipped_no_model = 0
     skipped_parse = 0
+    skipped_manual = 0
+    affected: set[tuple[int, date]] = set()   # (tenant_id, date) for MMR recalc
     model_cache: dict[str, str] = {}
     chatter_cache: dict[str, str] = {}
     shift_cache: dict[str, str] = {}
@@ -743,23 +746,47 @@ async def sync_notion_transactions_for_tenant(
                         continue
 
                 synced_at = datetime.utcnow()
+
+                # ── Resolve catalog IDs for incoming row ──────────────────────
+                new_model_id   = await resolve_model_id(model_name, tenant_id, db)
+                new_chatter_id = await resolve_chatter_id(chatter, tenant_id, db)
+                shift_display  = str(shift_name or "").strip() or None
+                new_shift_id   = await resolve_shift_catalog_id(shift_display, tenant_id, db)
+
+                # ── UPSERT by (tenant_id, notion_id) ─────────────────────────
                 stmt = select(Transaction).where(
                     Transaction.tenant_id == tenant_id,
                     Transaction.notion_id == notion_id,
                 )
                 r = await db.execute(stmt)
                 existing = r.scalar_one_or_none()
+
                 if existing:
-                    existing.date = date_val
-                    existing.model = model_name
-                    existing.chatter = chatter
-                    existing.amount = Decimal(str(amount))
-                    existing.shift_id = shift_id
-                    existing.shift_name = shift_name
+                    # GUARD: manual edits are authoritative — skip Notion overwrite
+                    if getattr(existing, "source", None) == "manual":
+                        skipped_manual += 1
+                        continue
+
+                    # Track old date so we recalc MMR for it too if date moved
+                    old_date = existing.date
+                    if old_date and old_date != date_val:
+                        affected.add((tenant_id, old_date))
+
+                    # UPDATE
+                    existing.date              = date_val
+                    existing.model             = model_name
+                    existing.chatter           = chatter
+                    existing.amount            = Decimal(str(amount))
+                    existing.shift_id          = shift_id
+                    existing.shift_name        = shift_name
+                    existing.model_id          = new_model_id
+                    existing.chatter_id        = new_chatter_id
+                    existing.shift_catalog_id  = new_shift_id
                     existing.notion_database_id = canon
-                    existing.synced_at = synced_at
+                    existing.synced_at         = synced_at
                     updated += 1
                 else:
+                    # INSERT
                     db.add(
                         Transaction(
                             tenant_id=tenant_id,
@@ -770,18 +797,26 @@ async def sync_notion_transactions_for_tenant(
                             amount=Decimal(str(amount)),
                             shift_id=shift_id,
                             shift_name=shift_name,
+                            model_id=new_model_id,
+                            chatter_id=new_chatter_id,
+                            shift_catalog_id=new_shift_id,
                             notion_database_id=canon,
                             synced_at=synced_at,
+                            source="notion",
                         )
                     )
                     inserted += 1
+
+                if date_val:
+                    affected.add((tenant_id, date_val))
+
             await asyncio.sleep(0.2)
 
     fin = datetime.utcnow()
     sync_log.finished_at = fin
     sync_log.status = "success"
     sync_log.rows_imported = inserted + updated
-    sync_log.rows_skipped = skipped
+    sync_log.rows_skipped = skipped + skipped_manual
     await db.execute(
         update(Tenant).where(Tenant.id == tenant_id).values(last_sync_at=fin)
     )
@@ -789,22 +824,39 @@ async def sync_notion_transactions_for_tenant(
     await db.commit()
     n = await assign_transactions_by_notion_database(db)
     logger.info(
-        "notion sync tenant=%s inserted=%s updated=%s skipped=%s assign=%s",
-        tenant_id,
-        inserted,
-        updated,
-        skipped,
-        n,
+        "notion sync tenant=%s inserted=%s updated=%s skipped=%s skipped_manual=%s assign=%s affected_days=%s",
+        tenant_id, inserted, updated, skipped, skipped_manual, n, len(affected),
     )
+
+    # ── MMR recalculation for all affected days ───────────────────────────────
+    if affected:
+        from services.mmr_service import MMRService
+        mmr_days_done = 0
+        for (tid, day) in sorted(affected):
+            try:
+                await MMRService(db).process_day(tid, day)
+                mmr_days_done += 1
+            except Exception as exc:
+                logger.warning(
+                    "notion sync: MMR process_day failed tenant=%s date=%s: %s",
+                    tid, day, exc,
+                )
+        logger.info(
+            "notion sync tenant=%s MMR recalculated for %s/%s days",
+            tenant_id, mmr_days_done, len(affected),
+        )
+
     return {
-        "inserted": inserted,
-        "updated": updated,
-        "skipped": skipped,
+        "inserted":         inserted,
+        "updated":          updated,
+        "skipped":          skipped,
+        "skipped_manual":   skipped_manual,
         "skipped_no_model": skipped_no_model,
-        "skipped_parse": skipped_parse,
-        "databases": len(db_ids),
-        "assigned_rows": n,
+        "skipped_parse":    skipped_parse,
+        "databases":        len(db_ids),
+        "assigned_rows":    n,
+        "mmr_days":         len(affected),
         "noaccess_chatter": access_counter.get("noaccess_chatter", 0),
-        "noaccess_model": access_counter.get("noaccess_model", 0),
-        "noaccess_shift": access_counter.get("noaccess_shift", 0),
+        "noaccess_model":   access_counter.get("noaccess_model", 0),
+        "noaccess_shift":   access_counter.get("noaccess_shift", 0),
     }
