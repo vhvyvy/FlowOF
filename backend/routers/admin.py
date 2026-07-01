@@ -1,8 +1,12 @@
 import os
 import logging
-from fastapi import APIRouter, Depends, HTTPException, Header, status
+from calendar import monthrange
+from datetime import date
+from typing import Any
+
+from fastapi import APIRouter, Depends, HTTPException, Header, Query, status
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select
+from sqlalchemy import select, text
 
 from database import get_db
 from dependencies import get_current_tenant
@@ -165,3 +169,201 @@ async def toggle_active(
     await db.refresh(tenant)
     logger.info("Tenant=%d active=%s", tenant_id, tenant.active)
     return tenant
+
+
+# ── Notion ↔ DB diff (READ-ONLY diagnostic) ───────────────────────────────────
+
+def _norm_chatter(name: str | None) -> str:
+    """Normalise chatter name: strip, drop leading '@', lowercase."""
+    if not name:
+        return ""
+    return str(name).strip().lstrip("@").strip().lower()
+
+
+@router.get("/notion-diff")
+async def notion_diff(
+    tenant_id: int = Query(..., description="ID тенанта"),
+    chatter: str = Query(..., description="Имя чаттера (без @)"),
+    year: int = Query(..., ge=2020),
+    month: int = Query(..., ge=1, le=12),
+    db: AsyncSession = Depends(get_db),
+    _admin: Tenant = Depends(_require_is_admin),
+):
+    """READ-ONLY сверка транзакций Notion ↔ БД для конкретного чаттера за месяц."""
+    import asyncio
+    import httpx
+    from notion_sync_service import (
+        _query_all_pages, _parse_row, _collect_database_ids, NOTION_VERSION,
+    )
+    from team_helpers import list_teams, normalize_notion_db_id
+
+    # ── Fetch target tenant ────────────────────────────────────────────────────
+    target_tenant = await db.get(Tenant, tenant_id)
+    if not target_tenant:
+        raise HTTPException(status_code=404, detail="Tenant not found")
+    notion_token = (target_tenant.notion_token or "").strip()
+    if not notion_token:
+        raise HTTPException(status_code=400, detail="У тенанта нет Notion token")
+
+    chatter_norm = _norm_chatter(chatter)
+    if not chatter_norm:
+        raise HTTPException(status_code=422, detail="Параметр chatter не может быть пустым")
+
+    last_day = monthrange(year, month)[1]
+    period_start = date(year, month, 1)
+    period_end   = date(year, month, last_day)
+
+    # ── 1. Pull rows from Notion ───────────────────────────────────────────────
+    teams = await list_teams(db, tenant_id)
+    db_ids = _collect_database_ids(teams)
+    if not db_ids:
+        raise HTTPException(status_code=400, detail="Нет ID баз Notion у тенанта")
+
+    headers_n = {
+        "Authorization": f"Bearer {notion_token}",
+        "Notion-Version": NOTION_VERSION,
+        "Content-Type": "application/json",
+    }
+
+    notion_rows: list[dict[str, Any]] = []
+    model_cache: dict[str, str] = {}
+    chatter_cache: dict[str, str] = {}
+    shift_cache: dict[str, str] = {}
+
+    async with httpx.AsyncClient() as client:
+        for raw_db in db_ids:
+            canon = normalize_notion_db_id(raw_db) or raw_db
+            pages = await _query_all_pages(client, headers_n, canon)
+            for row in pages:
+                notion_id = row.get("id")
+                if not notion_id:
+                    continue
+                try:
+                    parsed = await _parse_row(
+                        row, "relation", client, headers_n,
+                        model_cache, chatter_cache, shift_cache,
+                    )
+                    date_val, model_name, chatter_name, amount, shift_id, shift_name = parsed
+                except Exception:
+                    continue
+
+                # Filter by period
+                if date_val is None:
+                    continue
+                if not (period_start <= date_val <= period_end):
+                    continue
+
+                # Filter by chatter (normalised)
+                if _norm_chatter(chatter_name) != chatter_norm:
+                    continue
+
+                notion_rows.append({
+                    "notion_id": notion_id,
+                    "date":      str(date_val),
+                    "model":     model_name or "",
+                    "shift":     shift_name or "",
+                    "amount":    round(float(amount or 0), 2),
+                })
+
+    # ── 2. Pull rows from DB ───────────────────────────────────────────────────
+    db_result = await db.execute(
+        text(
+            """SELECT t.id, t.notion_id, t.amount, t.model, t.chatter,
+                      t.shift_name, t.date
+               FROM transactions t
+               WHERE t.tenant_id = :tid
+                 AND t.date >= :start AND t.date <= :end
+                 AND (
+                   t.chatter_id IN (
+                     SELECT id FROM chatters
+                     WHERE tenant_id = :tid
+                       AND LOWER(TRIM(LTRIM(name, '@'))) = :cn
+                   )
+                   OR LOWER(TRIM(LTRIM(COALESCE(t.chatter, ''), '@'))) = :cn
+                 )
+               ORDER BY t.date"""
+        ),
+        {"tid": tenant_id, "start": period_start, "end": period_end, "cn": chatter_norm},
+    )
+    db_rows_raw = list(db_result.mappings())
+
+    db_by_notion_id: dict[str, dict] = {}
+    db_no_notion_id: list[dict] = []
+    for r in db_rows_raw:
+        nid = r.get("notion_id")
+        entry = {
+            "id":       int(r["id"]),
+            "notion_id": nid,
+            "date":     str(r["date"]),
+            "model":    r.get("model") or "",
+            "amount":   round(float(r.get("amount") or 0), 2),
+        }
+        if nid:
+            # A DB row may have a composite notion_id like "prefix:0" → extract raw page id
+            raw_nid = nid.split(":")[0] if ":" in nid else nid
+            db_by_notion_id[raw_nid] = entry
+        else:
+            db_no_notion_id.append(entry)
+
+    # ── 3. Match ───────────────────────────────────────────────────────────────
+    matched_ok_count = 0
+    amount_mismatch: list[dict] = []
+    notion_only: list[dict] = []
+
+    notion_ids_seen: set[str] = set()
+
+    for nr in sorted(notion_rows, key=lambda x: x["date"]):
+        nid = nr["notion_id"]
+        # strip hyphens for loose matching
+        nid_clean = nid.replace("-", "")
+        matched = None
+        for key in (nid, nid_clean):
+            if key in db_by_notion_id:
+                matched = db_by_notion_id[key]
+                notion_ids_seen.add(key)
+                break
+
+        if matched is None:
+            notion_only.append(nr)
+        elif abs(matched["amount"] - nr["amount"]) < 0.005:
+            matched_ok_count += 1
+        else:
+            amount_mismatch.append({
+                "notion_id":     nid,
+                "date":          nr["date"],
+                "model":         nr["model"],
+                "shift":         nr["shift"],
+                "notion_amount": nr["amount"],
+                "db_amount":     matched["amount"],
+                "diff":          round(matched["amount"] - nr["amount"], 2),
+            })
+
+    # DB rows whose notion_id was NOT matched + rows without notion_id
+    db_only: list[dict] = []
+    for key, entry in db_by_notion_id.items():
+        if key not in notion_ids_seen:
+            db_only.append(entry)
+    db_only.extend(db_no_notion_id)
+    db_only.sort(key=lambda x: x["date"])
+
+    notion_sum = round(sum(r["amount"] for r in notion_rows), 2)
+    db_sum     = round(sum(float(r.get("amount", 0)) for r in db_rows_raw), 2)
+
+    logger.info(
+        "notion-diff tenant=%d chatter=%r %d/%d: notion=%d db=%d",
+        tenant_id, chatter, year, month, len(notion_rows), len(db_rows_raw),
+    )
+
+    return {
+        "matched_ok":      matched_ok_count,
+        "amount_mismatch": sorted(amount_mismatch, key=lambda x: x["date"]),
+        "notion_only":     sorted(notion_only,     key=lambda x: x["date"]),
+        "db_only":         sorted(db_only,         key=lambda x: x["date"]),
+        "totals": {
+            "notion_sum":   notion_sum,
+            "db_sum":       db_sum,
+            "diff":         round(db_sum - notion_sum, 2),
+            "notion_count": len(notion_rows),
+            "db_count":     len(db_rows_raw),
+        },
+    }
