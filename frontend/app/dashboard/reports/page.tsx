@@ -158,7 +158,7 @@ export default function ReportsPage() {
 
   return (
     <div className="flex flex-col h-full">
-      <Header title="Отчёты" subtitle="Графики агентства" />
+      <Header title="Отчёты" />
 
       <div className="flex-1 overflow-y-auto p-6 space-y-6">
         {/* Month hint */}
