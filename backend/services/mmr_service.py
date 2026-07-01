@@ -380,7 +380,7 @@ class MMRService:
         if not resolved_kpi:
             logger.info("MMR KPI: falling back to monthly chatter_kpi_mt for %s/%s",
                         target_date.month, target_date.year)
-            from routers.kpi import _load_kpi_data, _load_mapping, _resolve_kpi
+            from services.kpi_service import load_kpi_data as _load_kpi_data, load_mapping as _load_mapping, _resolve_kpi
 
             kpi_data = await _load_kpi_data(self.db, tenant_id, target_date.year, target_date.month)
             id_to_name, name_to_id = await _load_mapping(self.db, tenant_id)

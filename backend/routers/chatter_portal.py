@@ -15,7 +15,7 @@ from dependencies import require_chatter
 from economics import PLAN_TIERS, DEFAULT_TIER, RETENTION_RATE, load_settings, _norm_model_name
 from models import AppSetting, ChatterKpi, Plan, Transaction, User
 from team_helpers import list_teams, ensure_default_team
-from routers.kpi import _load_kpi_data, _load_mapping, _resolve_kpi
+from services.kpi_service import load_kpi_data as _load_kpi_data, load_mapping as _load_mapping, _resolve_kpi
 
 logger = logging.getLogger("flowof.chatter_portal")
 router = APIRouter(prefix="/api/v1/me", tags=["chatter_portal"])
