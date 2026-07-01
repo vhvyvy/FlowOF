@@ -296,6 +296,179 @@ def chart_expenses_by_category(expenses_by_category: list[dict], period: str = "
     return _to_png(fig)
 
 
+# ── KPI charts (data pre-fetched by router via kpi_service) ──────────────────
+
+def chart_kpi_scatter_rpc_chats(rows: list, period: str = "") -> bytes:
+    """Scatter: X=total_chats, Y=rpc. Quadrant lines at medians."""
+    from statistics import median
+
+    pts = [
+        (r.chatter, r.total_chats, r.rpc, r.revenue)
+        for r in rows
+        if r.total_chats and r.rpc
+    ]
+    if not pts:
+        return _empty_chart(f"RPC × Объём диалогов — {period}")
+
+    names, xs, ys, revs = zip(*pts)
+    xs = list(xs); ys = list(ys); revs = list(revs)
+
+    med_x = median(xs)
+    med_y = median(ys)
+    max_rev = max(revs) or 1
+    sizes = [max(40, r / max_rev * 600) for r in revs]
+
+    fig, ax = plt.subplots(figsize=(10, 6))
+    _apply_theme(fig, ax)
+    _title(ax, f"Объём диалогов × Эффективность (RPC) — {period}" if period else "Объём диалогов × Эффективность (RPC)")
+
+    ax.scatter(xs, ys, s=sizes, color=ACCENT, alpha=0.75, zorder=3, edgecolors="white", linewidths=0.5)
+
+    # Median lines (quadrant dividers)
+    ax.axvline(med_x, color=GREY, linewidth=1.0, linestyle="--", zorder=2)
+    ax.axhline(med_y, color=GREY, linewidth=1.0, linestyle="--", zorder=2)
+
+    # Quadrant annotations
+    xlim = ax.get_xlim(); ylim = ax.get_ylim()
+    kw = dict(color="#94a3b8", fontsize=7, fontfamily=FONT, alpha=0.8)
+    ax.text(xlim[0] + (med_x - xlim[0]) * 0.05, ylim[0] + (ylim[1] - med_y) * 0.97 + med_y,
+            "мало объёма, высокий RPC", ha="left", va="top", **kw)
+    ax.text(med_x + (xlim[1] - med_x) * 0.97, ylim[0] + (med_y - ylim[0]) * 0.05,
+            "много чатов, слабая монетизация", ha="right", va="bottom", **kw)
+    ax.text(med_x + (xlim[1] - med_x) * 0.97, ylim[0] + (ylim[1] - med_y) * 0.97 + med_y,
+            "объём + монетизация", ha="right", va="top", **kw)
+    ax.text(xlim[0] + (med_x - xlim[0]) * 0.05, ylim[0] + (med_y - ylim[0]) * 0.05,
+            "мало чатов, слабый RPC", ha="left", va="bottom", **kw)
+
+    # Name labels near points
+    for name, x, y in zip(names, xs, ys):
+        ax.annotate(name, (x, y), textcoords="offset points", xytext=(5, 4),
+                    fontsize=7, color="#334155", fontfamily=FONT)
+
+    ax.set_xlabel("Кол-во диалогов", fontfamily=FONT, fontsize=9, color="#475569")
+    ax.set_ylabel("RPC ($)", fontfamily=FONT, fontsize=9, color="#475569")
+    ax.yaxis.set_major_formatter(mticker.FuncFormatter(lambda x, _: _dollar(x)))
+    fig.tight_layout()
+    return _to_png(fig)
+
+
+def chart_kpi_open_rate(rows: list, period: str = "") -> bytes:
+    """Horizontal bar: PPV Open Rate %, top-15, colour-coded by zone."""
+    pts = sorted(
+        [(r.chatter, float(r.ppv_open_rate)) for r in rows if r.ppv_open_rate is not None],
+        key=lambda x: x[1], reverse=True,
+    )[:15]
+    if not pts:
+        return _empty_chart(f"PPV Open Rate — {period}")
+
+    # Sort ascending so highest is at top
+    pts_sorted = list(reversed(pts))
+    names  = [p[0] for p in pts_sorted]
+    values = [p[1] for p in pts_sorted]
+
+    def _zone_color(v: float) -> str:
+        if v < 20:   return EXPENSE   # red
+        if v < 35:   return "#fbbf24" # yellow
+        return PROFIT                  # green
+
+    colors = [_zone_color(v) for v in values]
+
+    fig, ax = plt.subplots(figsize=(9, max(3, len(names) * 0.55 + 1.5)))
+    _apply_theme(fig, ax)
+    _title(ax, f"PPV Open Rate (%) — {period}" if period else "PPV Open Rate (%)")
+    ax.xaxis.grid(True, color=GRID_CLR, linewidth=0.7, linestyle="--", zorder=0)
+    ax.yaxis.grid(False)
+
+    bars = ax.barh(names, values, color=colors, height=0.6, zorder=3)
+    # Reference lines
+    ax.axvline(20, color=EXPENSE, linewidth=1.0, linestyle=":", label="20% (критично)")
+    ax.axvline(35, color=PROFIT,  linewidth=1.0, linestyle=":", label="35% (сильно)")
+    ax.legend(fontsize=7, framealpha=0.7, prop={"family": FONT})
+
+    for bar, v in zip(bars, values):
+        ax.text(
+            bar.get_width() + 0.3, bar.get_y() + bar.get_height() / 2,
+            f"{v:.1f}%", va="center", ha="left", fontsize=8, color="#334155", fontfamily=FONT,
+        )
+    ax.set_xlabel("Open Rate (%)", fontfamily=FONT, fontsize=9, color="#475569")
+    fig.tight_layout()
+    return _to_png(fig)
+
+
+def chart_kpi_top_revenue(rows: list, period: str = "") -> bytes:
+    """Horizontal bar: top-10 chatters by revenue this month."""
+    pts = sorted(
+        [(r.chatter, r.revenue) for r in rows],
+        key=lambda x: x[1], reverse=True,
+    )[:10]
+    if not pts:
+        return _empty_chart(f"Топ-10 по выручке — {period}")
+
+    pts_sorted = list(reversed(pts))
+    names  = [p[0] for p in pts_sorted]
+    values = [p[1] for p in pts_sorted]
+
+    fig, ax = plt.subplots(figsize=(9, max(3, len(names) * 0.55 + 1.5)))
+    _apply_theme(fig, ax)
+    _title(ax, f"Топ-10 по выручке — {period}" if period else "Топ-10 по выручке")
+    ax.xaxis.grid(True, color=GRID_CLR, linewidth=0.7, linestyle="--", zorder=0)
+    ax.yaxis.grid(False)
+
+    bars = ax.barh(names, values, color=ACCENT, height=0.6, zorder=3)
+    for bar, v in zip(bars, values):
+        ax.text(
+            bar.get_width() + max(values) * 0.01, bar.get_y() + bar.get_height() / 2,
+            _dollar(v), va="center", ha="left", fontsize=8, color="#334155", fontfamily=FONT,
+        )
+    ax.set_xlabel("Выручка ($)", fontfamily=FONT, fontsize=9, color="#475569")
+    ax.xaxis.set_major_formatter(mticker.FuncFormatter(lambda x, _: _dollar(x)))
+    fig.tight_layout()
+    return _to_png(fig)
+
+
+def chart_kpi_biggest_movers(rows: list, period: str = "", period_prev: str = "") -> bytes:
+    """Divergent bar: revenue_delta MoM, top by |delta|."""
+    pts = [
+        (r.chatter, float(r.revenue_delta))
+        for r in rows
+        if r.revenue_delta is not None
+    ]
+    if not pts:
+        return _empty_chart("Крупнейшие изменения выручки MoM")
+
+    pts_sorted = sorted(pts, key=lambda x: abs(x[1]), reverse=True)[:12]
+    pts_sorted = sorted(pts_sorted, key=lambda x: x[1])
+    names  = [p[0] for p in pts_sorted]
+    values = [p[1] for p in pts_sorted]
+    colors = [PROFIT if v >= 0 else EXPENSE for v in values]
+
+    label = (f"Крупнейшие изменения выручки: {period_prev} → {period}"
+             if period else "Крупнейшие изменения выручки MoM")
+
+    fig, ax = plt.subplots(figsize=(9, max(3, len(names) * 0.55 + 1.5)))
+    _apply_theme(fig, ax)
+    _title(ax, label)
+    ax.xaxis.grid(True, color=GRID_CLR, linewidth=0.7, linestyle="--", zorder=0)
+    ax.yaxis.grid(False)
+
+    bars = ax.barh(names, values, color=colors, height=0.6, zorder=3)
+    ax.axvline(0, color="#475569", linewidth=0.8)
+    max_abs = max(abs(v) for v in values) or 1
+    for bar, v in zip(bars, values):
+        offset = max_abs * 0.015
+        x_pos = bar.get_width() + (offset if v >= 0 else -offset)
+        ha = "left" if v >= 0 else "right"
+        ax.text(
+            x_pos, bar.get_y() + bar.get_height() / 2,
+            f"{'+'if v>=0 else ''}{v:.1f}%",
+            va="center", ha=ha, fontsize=8, color="#334155", fontfamily=FONT,
+        )
+    ax.set_xlabel("Изменение выручки (%)", fontfamily=FONT, fontsize=9, color="#475569")
+    ax.xaxis.set_major_formatter(mticker.FuncFormatter(lambda x, _: f"{'+'if x>=0 else ''}{x:.0f}%"))
+    fig.tight_layout()
+    return _to_png(fig)
+
+
 # ── Helper ────────────────────────────────────────────────────────────────────
 
 def _empty_chart(title: str) -> bytes:

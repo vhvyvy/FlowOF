@@ -13,7 +13,7 @@ from services.analytics_context import build_agency_snapshot
 logger = logging.getLogger("flowof.reports")
 router = APIRouter(prefix="/api/v1/reports", tags=["reports"])
 
-CHART_TYPES = {
+FINANCE_CHART_TYPES = {
     "revenue_trend",
     "revenue_expenses_profit",
     "top_chatters",
@@ -22,6 +22,15 @@ CHART_TYPES = {
     "avg_check",
     "expenses_by_category",
 }
+
+KPI_CHART_TYPES = {
+    "kpi_scatter_rpc_chats",
+    "kpi_open_rate",
+    "kpi_top_revenue",
+    "kpi_biggest_movers",
+}
+
+ALL_CHART_TYPES = FINANCE_CHART_TYPES | KPI_CHART_TYPES
 
 
 @router.get("/chart/{chart_type}")
@@ -32,13 +41,44 @@ async def get_chart(
     tenant: Tenant = Depends(get_current_tenant),
     db: AsyncSession = Depends(get_db),
 ):
-    if chart_type not in CHART_TYPES:
+    if chart_type not in ALL_CHART_TYPES:
         raise HTTPException(
             status_code=400,
-            detail=f"Неизвестный тип графика. Доступные: {', '.join(sorted(CHART_TYPES))}",
+            detail=f"Неизвестный тип графика. Доступные: {', '.join(sorted(ALL_CHART_TYPES))}",
         )
 
     try:
+        # ── KPI charts ────────────────────────────────────────────────────────
+        if chart_type in KPI_CHART_TYPES:
+            from services.kpi_service import get_chatter_kpi
+            from services.report_charts import (
+                chart_kpi_scatter_rpc_chats,
+                chart_kpi_open_rate,
+                chart_kpi_top_revenue,
+                chart_kpi_biggest_movers,
+            )
+
+            rows, _total_rev, _total_txns, _avg_rpc = await get_chatter_kpi(
+                db, tenant.id, year, month
+            )
+            period      = f"{month:02d}/{year}"
+            py, pm      = (year - 1, 12) if month == 1 else (year, month - 1)
+            period_prev = f"{pm:02d}/{py}"
+
+            if chart_type == "kpi_scatter_rpc_chats":
+                png = chart_kpi_scatter_rpc_chats(rows, period)
+            elif chart_type == "kpi_open_rate":
+                png = chart_kpi_open_rate(rows, period)
+            elif chart_type == "kpi_top_revenue":
+                png = chart_kpi_top_revenue(rows, period)
+            elif chart_type == "kpi_biggest_movers":
+                png = chart_kpi_biggest_movers(rows, period, period_prev)
+            else:
+                raise HTTPException(status_code=400, detail="Неизвестный тип графика")
+
+            return Response(content=png, media_type="image/png")
+
+        # ── Finance charts ────────────────────────────────────────────────────
         from services.report_charts import (
             chart_revenue_trend,
             chart_revenue_expenses_profit,
@@ -49,7 +89,7 @@ async def get_chart(
             chart_expenses_by_category,
         )
 
-        snapshot = await build_agency_snapshot(db, tenant.id, year, month)
+        snapshot    = await build_agency_snapshot(db, tenant.id, year, month)
         period      = snapshot.get("period", "")
         period_prev = snapshot.get("period_prev", "")
 
@@ -63,11 +103,10 @@ async def get_chart(
             png = chart_top_chatters(snapshot.get("top_chatters") or [], period)
 
         elif chart_type == "chatter_mom_change":
-            # Get current and prev month top chatters from monthly_detail
-            detail = snapshot.get("monthly_detail") or []
-            ym_cur  = f"{year}-{month:02d}"
-            py, pm  = (year - 1, 12) if month == 1 else (year, month - 1)
-            ym_prev = f"{py}-{pm:02d}"
+            detail      = snapshot.get("monthly_detail") or []
+            ym_cur      = f"{year}-{month:02d}"
+            py, pm      = (year - 1, 12) if month == 1 else (year, month - 1)
+            ym_prev     = f"{py}-{pm:02d}"
             cur_detail  = next((d for d in detail if d["month"] == ym_cur),  {})
             prev_detail = next((d for d in detail if d["month"] == ym_prev), {})
             png = chart_chatter_mom_change(
@@ -78,12 +117,11 @@ async def get_chart(
             )
 
         elif chart_type == "tx_count":
-            # Build tx_count series from monthly_detail where available
-            detail = snapshot.get("monthly_detail") or []
+            detail     = snapshot.get("monthly_detail") or []
             detail_map = {d["month"]: d for d in detail}
             series_with_count = []
             for row in snapshot.get("monthly_series") or []:
-                d = detail_map.get(row["month"])
+                d        = detail_map.get(row["month"])
                 tx_total = sum(c.get("tx_count", 0) for c in (d.get("top_chatters") or [])) if d else 0
                 series_with_count.append({**row, "tx_count": tx_total})
             png = chart_tx_count(series_with_count)

@@ -6,7 +6,7 @@ import { useMonthStore } from '@/lib/hooks/useMonth'
 import { resolveApiBaseURL } from '@/lib/api'
 import { Download, RefreshCw, ImageOff } from 'lucide-react'
 
-const CHART_TYPES = [
+const FINANCE_CHARTS = [
   { id: 'revenue_trend',           label: 'Выручка по месяцам' },
   { id: 'revenue_expenses_profit', label: 'Выручка / Расходы / Прибыль' },
   { id: 'top_chatters',            label: 'Топ чаттеров (месяц)' },
@@ -16,52 +16,39 @@ const CHART_TYPES = [
   { id: 'expenses_by_category',    label: 'Расходы по категориям (месяц)' },
 ] as const
 
-type ChartId = typeof CHART_TYPES[number]['id']
-type LoadState = 'idle' | 'loading' | 'ok' | 'error'
+const KPI_CHARTS = [
+  { id: 'kpi_top_revenue',         label: 'Топ-10 по выручке (KPI)' },
+  { id: 'kpi_open_rate',           label: 'PPV Open Rate (%)' },
+  { id: 'kpi_scatter_rpc_chats',   label: 'Объём диалогов × RPC' },
+  { id: 'kpi_biggest_movers',      label: 'Крупнейшие изменения выручки MoM' },
+] as const
 
-interface ChartEntry {
-  url: string
-  state: LoadState
-}
+type FinanceChartId = typeof FINANCE_CHARTS[number]['id']
+type KpiChartId     = typeof KPI_CHARTS[number]['id']
+type ChartId        = FinanceChartId | KpiChartId
+type LoadState      = 'idle' | 'loading' | 'ok' | 'error'
 
-function buildChartUrl(id: ChartId, year: number, month: number): string {
+async function fetchChartBlob(id: ChartId, year: number, month: number, token: string): Promise<string> {
   const base = resolveApiBaseURL()
-  return `${base}/api/v1/reports/chart/${id}?year=${year}&month=${month}`
-}
-
-async function fetchChartBlob(
-  id: ChartId,
-  year: number,
-  month: number,
-  token: string,
-): Promise<string> {
-  const url = buildChartUrl(id, year, month)
-  const res = await fetch(url, {
-    headers: { Authorization: `Bearer ${token}` },
-  })
+  const url  = `${base}/api/v1/reports/chart/${id}?year=${year}&month=${month}`
+  const res  = await fetch(url, { headers: { Authorization: `Bearer ${token}` } })
   if (!res.ok) throw new Error(`HTTP ${res.status}`)
   const blob = await res.blob()
   return URL.createObjectURL(blob)
 }
 
-function ChartCard({
-  chartId,
-  label,
-  year,
-  month,
-}: {
+function ChartCard({ chartId, label, year, month }: {
   chartId: ChartId
   label: string
   year: number
   month: number
 }) {
   const [objectUrl, setObjectUrl] = useState<string | null>(null)
-  const [state, setState] = useState<LoadState>('idle')
+  const [state, setState]         = useState<LoadState>('idle')
 
   const load = useCallback(async () => {
     const token = typeof window !== 'undefined' ? localStorage.getItem('token') || '' : ''
     setState('loading')
-    // Revoke previous blob URL to avoid memory leaks
     if (objectUrl) URL.revokeObjectURL(objectUrl)
     try {
       const url = await fetchChartBlob(chartId, year, month, token)
@@ -76,23 +63,20 @@ function ChartCard({
 
   useEffect(() => {
     load()
-    return () => {
-      if (objectUrl) URL.revokeObjectURL(objectUrl)
-    }
+    return () => { if (objectUrl) URL.revokeObjectURL(objectUrl) }
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [chartId, year, month])
 
   const handleDownload = () => {
     if (!objectUrl) return
     const a = document.createElement('a')
-    a.href = objectUrl
+    a.href     = objectUrl
     a.download = `${chartId}_${year}_${month.toString().padStart(2, '0')}.png`
     a.click()
   }
 
   return (
     <div className="bg-slate-800/50 border border-slate-700/50 rounded-2xl overflow-hidden flex flex-col">
-      {/* Card header */}
       <div className="flex items-center justify-between px-4 py-3 border-b border-slate-700/40">
         <span className="text-sm font-medium text-slate-200">{label}</span>
         <div className="flex items-center gap-2">
@@ -115,7 +99,6 @@ function ChartCard({
         </div>
       </div>
 
-      {/* Chart area */}
       <div className="relative min-h-[260px] flex items-center justify-center bg-white/[0.02]">
         {state === 'loading' && (
           <div className="absolute inset-0 flex flex-col items-center justify-center gap-2">
@@ -123,32 +106,29 @@ function ChartCard({
             <span className="text-xs text-slate-500">Генерация графика…</span>
           </div>
         )}
-
         {state === 'error' && (
           <div className="flex flex-col items-center gap-2 text-slate-500">
             <ImageOff className="h-8 w-8" />
             <span className="text-xs">Не удалось загрузить</span>
-            <button
-              onClick={load}
-              className="text-xs text-indigo-400 hover:text-indigo-300 underline"
-            >
+            <button onClick={load} className="text-xs text-indigo-400 hover:text-indigo-300 underline">
               Повторить
             </button>
           </div>
         )}
-
         {state === 'ok' && objectUrl && (
-          <img
-            src={objectUrl}
-            alt={label}
-            className="w-full h-auto object-contain rounded-b-xl"
-          />
+          <img src={objectUrl} alt={label} className="w-full h-auto object-contain rounded-b-xl" />
         )}
-
-        {state === 'idle' && (
-          <div className="text-xs text-slate-600">Ожидание…</div>
-        )}
+        {state === 'idle' && <div className="text-xs text-slate-600">Ожидание…</div>}
       </div>
+    </div>
+  )
+}
+
+function SectionHeading({ label, note }: { label: string; note?: string }) {
+  return (
+    <div className="flex items-baseline gap-3 pt-2">
+      <h2 className="text-base font-semibold text-slate-200">{label}</h2>
+      {note && <span className="text-xs text-slate-500">{note}</span>}
     </div>
   )
 }
@@ -160,25 +140,31 @@ export default function ReportsPage() {
     <div className="flex flex-col h-full">
       <Header title="Отчёты" />
 
-      <div className="flex-1 overflow-y-auto p-6 space-y-6">
-        {/* Month hint */}
+      <div className="flex-1 overflow-y-auto p-6 space-y-8">
         <p className="text-xs text-slate-500">
           Фокусный месяц: <span className="text-slate-300 font-medium">{month.toString().padStart(2, '0')}/{year}</span>.
-          {' '}Графики тренда и динамики строятся по всей истории. Смените месяц в заголовке — детализация пересчитается.
+          {' '}Графики тренда строятся по всей истории. Смените месяц в заголовке — детализация пересчитается.
         </p>
 
-        {/* Grid */}
-        <div className="grid grid-cols-1 xl:grid-cols-2 gap-5">
-          {CHART_TYPES.map(({ id, label }) => (
-            <ChartCard
-              key={`${id}-${year}-${month}`}
-              chartId={id}
-              label={label}
-              year={year}
-              month={month}
-            />
-          ))}
-        </div>
+        {/* ── Финансы ── */}
+        <section className="space-y-4">
+          <SectionHeading label="Финансы" note="выручка, расходы, чаттеры, тренды" />
+          <div className="grid grid-cols-1 xl:grid-cols-2 gap-5">
+            {FINANCE_CHARTS.map(({ id, label }) => (
+              <ChartCard key={`${id}-${year}-${month}`} chartId={id} label={label} year={year} month={month} />
+            ))}
+          </div>
+        </section>
+
+        {/* ── KPI ── */}
+        <section className="space-y-4">
+          <SectionHeading label="KPI чаттеров" note="Onlymonster-метрики, RPC, Open Rate, MoM" />
+          <div className="grid grid-cols-1 xl:grid-cols-2 gap-5">
+            {KPI_CHARTS.map(({ id, label }) => (
+              <ChartCard key={`${id}-${year}-${month}`} chartId={id} label={label} year={year} month={month} />
+            ))}
+          </div>
+        </section>
       </div>
     </div>
   )
