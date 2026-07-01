@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import logging
 from calendar import monthrange
+from collections import defaultdict
 from datetime import date
 from typing import Any
 
@@ -205,6 +206,158 @@ async def _monthly_series(db: AsyncSession, tenant_id: int) -> list[dict]:
     return series
 
 
+_MAX_DETAIL_MONTHS = 18
+
+
+async def _monthly_detail(
+    db: AsyncSession,
+    tenant_id: int,
+    months: list[str],
+) -> list[dict]:
+    """
+    Per-month breakdown (chatters / models / shifts) for the given month list.
+    Uses 4 bulk queries (no N×4 round-trips).
+    months: sorted list of 'YYYY-MM' strings.
+    """
+    if not months:
+        return []
+
+    # Cutoff date = first day of the earliest month in the list
+    cutoff_str = months[0] + "-01"
+    months_set  = set(months)
+
+    # ── Revenue + expense totals per month ────────────────────────────────────
+    tx_tot_r = await db.execute(
+        text(
+            """SELECT TO_CHAR(date, 'YYYY-MM') AS month,
+                      COALESCE(SUM(amount), 0)  AS revenue
+               FROM transactions
+               WHERE tenant_id = :tid AND date >= :cutoff
+               GROUP BY TO_CHAR(date, 'YYYY-MM')"""
+        ),
+        {"tid": tenant_id, "cutoff": cutoff_str},
+    )
+    rev_map: dict[str, float] = {
+        r["month"]: float(r["revenue"] or 0)
+        for r in tx_tot_r.mappings()
+        if r["month"] in months_set
+    }
+
+    exp_tot_r = await db.execute(
+        text(
+            """SELECT TO_CHAR(date, 'YYYY-MM') AS month,
+                      COALESCE(SUM(amount), 0)  AS expenses
+               FROM expenses
+               WHERE tenant_id = :tid AND date >= :cutoff
+               GROUP BY TO_CHAR(date, 'YYYY-MM')"""
+        ),
+        {"tid": tenant_id, "cutoff": cutoff_str},
+    )
+    exp_map: dict[str, float] = {
+        r["month"]: float(r["expenses"] or 0)
+        for r in exp_tot_r.mappings()
+        if r["month"] in months_set
+    }
+
+    # ── Top-10 chatters per month (window function) ───────────────────────────
+    top_chat_r = await db.execute(
+        text(
+            """SELECT month, chatter, revenue, tx_count FROM (
+                 SELECT TO_CHAR(t.date, 'YYYY-MM')                         AS month,
+                        COALESCE(c.name, t.chatter, '(неизвестен)')        AS chatter,
+                        COALESCE(SUM(t.amount), 0)                         AS revenue,
+                        COUNT(t.id)                                         AS tx_count,
+                        ROW_NUMBER() OVER (
+                          PARTITION BY TO_CHAR(t.date, 'YYYY-MM')
+                          ORDER BY SUM(t.amount) DESC
+                        )                                                   AS rn
+                 FROM transactions t
+                 LEFT JOIN chatters c ON c.id = t.chatter_id AND c.tenant_id = :tid
+                 WHERE t.tenant_id = :tid
+                   AND t.date >= :cutoff
+                   AND (t.chatter_id IS NOT NULL OR t.chatter IS NOT NULL)
+                 GROUP BY TO_CHAR(t.date, 'YYYY-MM'),
+                          COALESCE(c.name, t.chatter, '(неизвестен)')
+               ) sub
+               WHERE rn <= 10
+               ORDER BY month, rn"""
+        ),
+        {"tid": tenant_id, "cutoff": cutoff_str},
+    )
+    chatters_by_month: dict[str, list] = defaultdict(list)
+    for r in top_chat_r.mappings():
+        if r["month"] in months_set:
+            chatters_by_month[r["month"]].append({
+                "chatter":  r["chatter"],
+                "revenue":  round(float(r["revenue"] or 0), 2),
+                "tx_count": int(r["tx_count"] or 0),
+            })
+
+    # ── By model per month ────────────────────────────────────────────────────
+    model_r = await db.execute(
+        text(
+            """SELECT TO_CHAR(t.date, 'YYYY-MM')                       AS month,
+                      COALESCE(mo.name, t.model, '(без модели)')        AS model,
+                      COALESCE(SUM(t.amount), 0)                        AS revenue
+               FROM transactions t
+               LEFT JOIN models mo ON mo.id = t.model_id AND mo.tenant_id = :tid
+               WHERE t.tenant_id = :tid AND t.date >= :cutoff
+               GROUP BY TO_CHAR(t.date, 'YYYY-MM'),
+                        COALESCE(mo.name, t.model, '(без модели)')
+               ORDER BY month, revenue DESC"""
+        ),
+        {"tid": tenant_id, "cutoff": cutoff_str},
+    )
+    models_by_month: dict[str, list] = defaultdict(list)
+    for r in model_r.mappings():
+        if r["month"] in months_set:
+            models_by_month[r["month"]].append({
+                "model":   r["model"],
+                "revenue": round(float(r["revenue"] or 0), 2),
+            })
+
+    # ── By shift per month ────────────────────────────────────────────────────
+    shift_r = await db.execute(
+        text(
+            """SELECT TO_CHAR(t.date, 'YYYY-MM')                           AS month,
+                      COALESCE(sc.name, t.shift_name, '(без смены)')       AS shift,
+                      COALESCE(SUM(t.amount), 0)                            AS revenue,
+                      COUNT(t.id)                                            AS tx_count
+               FROM transactions t
+               LEFT JOIN shifts_catalog sc ON sc.id = t.shift_catalog_id AND sc.tenant_id = :tid
+               WHERE t.tenant_id = :tid AND t.date >= :cutoff
+               GROUP BY TO_CHAR(t.date, 'YYYY-MM'),
+                        COALESCE(sc.name, t.shift_name, '(без смены)')
+               ORDER BY month, revenue DESC"""
+        ),
+        {"tid": tenant_id, "cutoff": cutoff_str},
+    )
+    shifts_by_month: dict[str, list] = defaultdict(list)
+    for r in shift_r.mappings():
+        if r["month"] in months_set:
+            shifts_by_month[r["month"]].append({
+                "shift":    r["shift"],
+                "revenue":  round(float(r["revenue"] or 0), 2),
+                "tx_count": int(r["tx_count"] or 0),
+            })
+
+    # ── Assemble ──────────────────────────────────────────────────────────────
+    result = []
+    for m in months:
+        rev  = round(rev_map.get(m, 0.0), 2)
+        exp  = round(exp_map.get(m, 0.0), 2)
+        result.append({
+            "month":        m,
+            "revenue":      rev,
+            "expenses":     exp,
+            "profit":       round(rev - exp, 2),
+            "top_chatters": chatters_by_month.get(m, []),
+            "by_model":     models_by_month.get(m, []),
+            "by_shift":     shifts_by_month.get(m, []),
+        })
+    return result
+
+
 async def build_agency_snapshot(
     db: AsyncSession,
     tenant_id: int,
@@ -332,6 +485,19 @@ async def build_agency_snapshot(
     # ── Monthly series (full history) ─────────────────────────────────────────
     monthly_series = await _monthly_series(db, tenant_id)
 
+    # ── Monthly detail: last ≤18 months with transactions ────────────────────
+    tx_months_r = await db.execute(
+        text(
+            "SELECT DISTINCT TO_CHAR(date, 'YYYY-MM') AS month "
+            "FROM transactions WHERE tenant_id=:tid AND date IS NOT NULL "
+            "ORDER BY month"
+        ),
+        {"tid": tenant_id},
+    )
+    all_tx_months = [r["month"] for r in tx_months_r.mappings()]
+    detail_months = all_tx_months[-_MAX_DETAIL_MONTHS:]
+    monthly_detail = await _monthly_detail(db, tenant_id, detail_months)
+
     return {
         "period":               f"{month:02d}/{year}",
         "period_prev":          f"{pm:02d}/{py}",
@@ -344,6 +510,7 @@ async def build_agency_snapshot(
         "expenses_by_category": expenses_by_category,
         "all_time":             all_time,
         "monthly_series":       monthly_series,
+        "monthly_detail":       monthly_detail,
     }
 
 
@@ -422,7 +589,43 @@ def snapshot_to_text(snapshot: dict) -> str:
     else:
         lines.append("  нет данных")
 
-    # ── 3. FOCUS MONTH ────────────────────────────────────────────────────────
+    # ── 3. MONTHLY DETAIL ────────────────────────────────────────────────────
+    detail = snapshot.get("monthly_detail") or []
+    lines.append("\n=== ДЕТАЛИЗАЦИЯ ПО МЕСЯЦАМ ===")
+    if detail:
+        for md in detail:
+            m = md["month"]
+            lines.append(f"\n  [{m}]  выручка {_f(md['revenue'])}  расходы {_f(md['expenses'])}  прибыль {_f(md['profit'])}")
+
+            md_top = md.get("top_chatters") or []
+            if md_top:
+                lines.append("    Чаттеры: " + "  |  ".join(
+                    f"{c['chatter']}: {_f(c['revenue'])} ({c['tx_count']} тр.)"
+                    for c in md_top
+                ))
+            else:
+                lines.append("    Чаттеры: нет данных")
+
+            md_models = md.get("by_model") or []
+            if md_models:
+                lines.append("    Модели:  " + "  |  ".join(
+                    f"{m_['model']}: {_f(m_['revenue'])}" for m_ in md_models
+                ))
+            else:
+                lines.append("    Модели:  нет данных")
+
+            md_shifts = md.get("by_shift") or []
+            if md_shifts:
+                lines.append("    Смены:   " + "  |  ".join(
+                    f"{s['shift']}: {_f(s['revenue'])} ({s['tx_count']} тр.)"
+                    for s in md_shifts
+                ))
+            else:
+                lines.append("    Смены:   нет данных")
+    else:
+        lines.append("  нет данных")
+
+    # ── 4. FOCUS MONTH ────────────────────────────────────────────────────────
     period      = snapshot.get("period", "")
     period_prev = snapshot.get("period_prev", "")
     t  = snapshot.get("totals", {})
