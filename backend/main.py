@@ -87,6 +87,7 @@ from routers import (  # noqa: E402
     sync,
     onboarding,
     import_data,
+    reports,
 )
 from database import engine, Base, AsyncSessionLocal  # noqa: E402
 
@@ -116,6 +117,7 @@ app.include_router(teams.router)
 app.include_router(sync.router)
 app.include_router(onboarding.router)
 app.include_router(import_data.router)
+app.include_router(reports.router)
 
 
 # ── Startup: create missing tables ───────────────────────────────────────────
