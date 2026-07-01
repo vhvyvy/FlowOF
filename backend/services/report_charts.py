@@ -346,8 +346,8 @@ def chart_kpi_scatter_rpc_chats(rows: list, period: str = "") -> bytes:
                     fontsize=7, color="#334155", fontfamily=FONT)
 
     ax.set_xlabel("Кол-во диалогов", fontfamily=FONT, fontsize=9, color="#475569")
-    ax.set_ylabel("RPC ($)", fontfamily=FONT, fontsize=9, color="#475569")
-    ax.yaxis.set_major_formatter(mticker.FuncFormatter(lambda x, _: _dollar(x)))
+    ax.set_ylabel("RPC (revenue/chat)", fontfamily=FONT, fontsize=9, color="#475569")
+    ax.yaxis.set_major_formatter(mticker.FuncFormatter(lambda x, _: f"{x:.2f}"))
     fig.tight_layout()
     return _to_png(fig)
 
@@ -427,14 +427,23 @@ def chart_kpi_top_revenue(rows: list, period: str = "") -> bytes:
 
 
 def chart_kpi_biggest_movers(rows: list, period: str = "", period_prev: str = "") -> bytes:
-    """Divergent bar: revenue_delta MoM, top by |delta|."""
-    pts = [
-        (r.chatter, float(r.revenue_delta))
-        for r in rows
-        if r.revenue_delta is not None
-    ]
+    """Divergent bar: absolute revenue change ($) MoM, top by |delta|.
+    revenue_delta is stored as %; reconstruct dollar delta via:
+        delta_$ = revenue_current * delta_pct / (100 + delta_pct)
+    """
+    pts = []
+    for r in rows:
+        if r.revenue_delta is None:
+            continue
+        d_pct = float(r.revenue_delta)
+        denom = 100.0 + d_pct
+        if abs(denom) < 0.01:      # edge-case: prev ≈ 0
+            continue
+        delta_dollars = r.revenue * d_pct / denom
+        pts.append((r.chatter, delta_dollars))
+
     if not pts:
-        return _empty_chart("Крупнейшие изменения выручки MoM")
+        return _empty_chart("Крупнейшие изменения выручки ($) MoM")
 
     pts_sorted = sorted(pts, key=lambda x: abs(x[1]), reverse=True)[:12]
     pts_sorted = sorted(pts_sorted, key=lambda x: x[1])
@@ -442,8 +451,8 @@ def chart_kpi_biggest_movers(rows: list, period: str = "", period_prev: str = ""
     values = [p[1] for p in pts_sorted]
     colors = [PROFIT if v >= 0 else EXPENSE for v in values]
 
-    label = (f"Крупнейшие изменения выручки: {period_prev} → {period}"
-             if period else "Крупнейшие изменения выручки MoM")
+    label = (f"Крупнейшие изменения выручки ($): {period_prev} → {period}"
+             if period else "Крупнейшие изменения выручки ($) MoM")
 
     fig, ax = plt.subplots(figsize=(9, max(3, len(names) * 0.55 + 1.5)))
     _apply_theme(fig, ax)
@@ -456,15 +465,19 @@ def chart_kpi_biggest_movers(rows: list, period: str = "", period_prev: str = ""
     max_abs = max(abs(v) for v in values) or 1
     for bar, v in zip(bars, values):
         offset = max_abs * 0.015
+        # Positive: label right of bar end; Negative: label left of bar end (away from name)
         x_pos = bar.get_width() + (offset if v >= 0 else -offset)
-        ha = "left" if v >= 0 else "right"
+        ha    = "left"  if v >= 0 else "right"
+        sign  = "+"     if v >= 0 else ""
+        lbl   = f"{sign}${abs(v):,.0f}" if v >= 0 else f"-${abs(v):,.0f}"
         ax.text(
             x_pos, bar.get_y() + bar.get_height() / 2,
-            f"{'+'if v>=0 else ''}{v:.1f}%",
-            va="center", ha=ha, fontsize=8, color="#334155", fontfamily=FONT,
+            lbl, va="center", ha=ha, fontsize=8, color="#334155", fontfamily=FONT,
         )
-    ax.set_xlabel("Изменение выручки (%)", fontfamily=FONT, fontsize=9, color="#475569")
-    ax.xaxis.set_major_formatter(mticker.FuncFormatter(lambda x, _: f"{'+'if x>=0 else ''}{x:.0f}%"))
+    ax.set_xlabel("Изменение выручки ($)", fontfamily=FONT, fontsize=9, color="#475569")
+    ax.xaxis.set_major_formatter(mticker.FuncFormatter(
+        lambda x, _: f"+${x:,.0f}" if x >= 0 else f"-${abs(x):,.0f}"
+    ))
     fig.tight_layout()
     return _to_png(fig)
 
