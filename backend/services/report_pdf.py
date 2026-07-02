@@ -117,7 +117,7 @@ async def build_agency_report_pdf(
         }
 
     # ── 3. Charts ─────────────────────────────────────────────────────────────
-    def _img(png_bytes: bytes, width_cm: float = 16.0) -> Image:
+    def _img(png_bytes: bytes, width_cm: float = 17.0) -> Image:
         buf = io.BytesIO(png_bytes)
         img = Image(buf)
         aspect = img.imageHeight / img.imageWidth
@@ -134,12 +134,12 @@ async def build_agency_report_pdf(
     chart_movers     = _img(chart_kpi_biggest_movers(kpi_rows, period, period_prev))
 
     # ── 4. Styles ─────────────────────────────────────────────────────────────
-    base = getSampleStyleSheet()
+    # A4 usable width = 21cm - 2*2cm margins = 17cm
+    CONTENT_W = 17.0 * cm
+
     BLUE    = colors.HexColor("#4f46e5")
     DARK    = colors.HexColor("#1e293b")
     GREY    = colors.HexColor("#64748b")
-    GREEN   = colors.HexColor("#059669")
-    RED     = colors.HexColor("#dc2626")
     BOX_BG  = colors.HexColor("#eef2ff")
 
     def _style(name, **kw) -> ParagraphStyle:
@@ -147,15 +147,23 @@ async def build_agency_report_pdf(
         defaults.update(kw)
         return ParagraphStyle(name, **defaults)
 
-    s_title     = _style("title",    fontName=FONT_BOLD, fontSize=22, leading=28, textColor=BLUE,  alignment=TA_CENTER)
-    s_subtitle  = _style("subtitle", fontName=FONT,      fontSize=11, textColor=GREY,               alignment=TA_CENTER)
-    s_h1        = _style("h1",       fontName=FONT_BOLD, fontSize=14, leading=20, textColor=BLUE,  spaceBefore=12)
-    s_h2        = _style("h2",       fontName=FONT_BOLD, fontSize=11, leading=16, textColor=DARK,  spaceBefore=8)
-    s_body      = _style("body",     fontSize=10, leading=14)
-    s_caption   = _style("caption",  fontSize=8,  textColor=GREY, alignment=TA_CENTER)
-    s_box       = _style("box",      fontSize=10, leading=15, leftIndent=12, rightIndent=12,
-                          backColor=BOX_BG, borderColor=BLUE, borderWidth=1, borderPadding=8)
-    s_bullet    = _style("bullet",   fontSize=10, leading=14, leftIndent=16, bulletIndent=8)
+    s_title    = _style("title",   fontName=FONT_BOLD, fontSize=22, leading=28, textColor=BLUE,
+                         alignment=TA_CENTER, spaceAfter=4)
+    s_subtitle = _style("subtitle",fontName=FONT, fontSize=11, textColor=GREY,
+                         alignment=TA_CENTER, spaceAfter=8)
+    # Section headings: generous spaceBefore so they never sit right on previous content
+    s_h1       = _style("h1",      fontName=FONT_BOLD, fontSize=14, leading=20, textColor=BLUE,
+                         spaceBefore=18, spaceAfter=10)
+    s_body     = _style("body",    fontSize=10, leading=15, spaceAfter=4)
+    s_box      = _style("box",     fontSize=10, leading=15, leftIndent=12, rightIndent=12,
+                         backColor=BOX_BG, borderColor=BLUE, borderWidth=1, borderPadding=8,
+                         spaceAfter=6)
+    s_bullet   = _style("bullet",  fontSize=10, leading=15, leftIndent=20, bulletIndent=8,
+                         spaceAfter=3)
+    # Cell style for tables — wraps text, uses DejaVu so Cyrillic renders
+    s_cell     = _style("cell",    fontSize=9,  leading=13)
+    s_cell_hdr = _style("cell_hdr",fontName=FONT_BOLD, fontSize=9, leading=13,
+                         textColor=colors.white)
 
     # ── 5. Page template with footer ──────────────────────────────────────────
     buf = io.BytesIO()
@@ -178,99 +186,99 @@ async def build_agency_report_pdf(
     )
 
     # ── 6. Content ────────────────────────────────────────────────────────────
-    story = []
+    story: list = []
 
     def hr():
-        return HRFlowable(width="100%", thickness=0.5, color=colors.HexColor("#e2e8f0"), spaceAfter=8)
+        return HRFlowable(width="100%", thickness=0.5, color=colors.HexColor("#e2e8f0"),
+                          spaceBefore=6, spaceAfter=6)
 
-    def spacer(h: float = 0.3):
+    def spacer(h: float = 0.4):
         return Spacer(1, h * cm)
 
-    # Title
+    # ── Title ─────────────────────────────────────────────────────────────────
     story.append(Paragraph(f"Отчёт агентства {tenant_name}", s_title))
-    story.append(Paragraph(f"{period} · сгенерирован {datetime.now().strftime('%d.%m.%Y %H:%M')}", s_subtitle))
-    story.append(spacer(0.6))
+    story.append(Paragraph(
+        f"{period} · сгенерирован {datetime.now().strftime('%d.%m.%Y %H:%M')}", s_subtitle
+    ))
     story.append(hr())
 
     # ── Ключевые метрики ──────────────────────────────────────────────────────
     story.append(Paragraph("Ключевые метрики", s_h1))
-    t = snapshot.get("totals", {})
+    t  = snapshot.get("totals", {})
     tp = snapshot.get("totals_prev", {})
     d  = snapshot.get("deltas", {})
 
     def _delta_str(pct) -> str:
-        if pct is None: return "—"
+        if pct is None:
+            return "—"
         sign = "+" if pct >= 0 else ""
         return f"{sign}{pct:.1f}%"
 
+    # Wrap every header cell in Paragraph so DejaVu renders Cyrillic correctly
+    COL_W = [5 * cm, 4 * cm, 4 * cm, 4 * cm]  # total = 17 cm = full content width
+
+    def _hdr(txt: str):
+        return Paragraph(txt, s_cell_hdr)
+
+    def _cell(txt: str):
+        return Paragraph(txt, s_cell)
+
     metrics_data = [
-        ["Показатель", f"Тек. {period}", f"Пред. {period_prev}", "Изменение"],
-        ["Выручка",    f"${t.get('revenue',0):,.0f}",  f"${tp.get('revenue',0):,.0f}",  _delta_str(d.get("revenue_pct"))],
-        ["Расходы",    f"${t.get('expenses',0):,.0f}", f"${tp.get('expenses',0):,.0f}", "—"],
-        ["Прибыль",    f"${t.get('profit',0):,.0f}",   f"${tp.get('profit',0):,.0f}",   _delta_str(d.get("profit_pct"))],
-        ["Маржа",      f"{t.get('margin_pct',0):.1f}%", f"{tp.get('margin_pct',0):.1f}%", "—"],
+        [_hdr("Показатель"), _hdr(f"Тек. {period}"), _hdr(f"Пред. {period_prev}"), _hdr("Изменение")],
+        [_cell("Выручка"),   _cell(f"${t.get('revenue',0):,.0f}"),   _cell(f"${tp.get('revenue',0):,.0f}"),   _cell(_delta_str(d.get("revenue_pct")))],
+        [_cell("Расходы"),   _cell(f"${t.get('expenses',0):,.0f}"),  _cell(f"${tp.get('expenses',0):,.0f}"),  _cell("—")],
+        [_cell("Прибыль"),   _cell(f"${t.get('profit',0):,.0f}"),    _cell(f"${tp.get('profit',0):,.0f}"),    _cell(_delta_str(d.get("profit_pct")))],
+        [_cell("Маржа"),     _cell(f"{t.get('margin_pct',0):.1f}%"), _cell(f"{tp.get('margin_pct',0):.1f}%"), _cell("—")],
     ]
-    tbl = Table(metrics_data, colWidths=[4*cm, 4*cm, 4*cm, 3.5*cm])
-    tbl.setStyle(TableStyle([
-        ("BACKGROUND",  (0, 0), (-1, 0), BLUE),
-        ("TEXTCOLOR",   (0, 0), (-1, 0), colors.white),
-        ("FONTNAME",    (0, 0), (-1, 0), FONT_BOLD),
-        ("FONTNAME",    (0, 1), (-1, -1), FONT),
-        ("FONTSIZE",    (0, 0), (-1, -1), 9),
-        ("ALIGN",       (1, 0), (-1, -1), "CENTER"),
-        ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, colors.HexColor("#f8fafc")]),
-        ("GRID",        (0, 0), (-1, -1), 0.4, colors.HexColor("#e2e8f0")),
-        ("TOPPADDING",  (0, 0), (-1, -1), 5),
+    metrics_tbl = Table(metrics_data, colWidths=COL_W)
+    metrics_tbl.setStyle(TableStyle([
+        ("BACKGROUND",    (0, 0), (-1, 0), BLUE),
+        ("ROWBACKGROUNDS",(0, 1), (-1, -1), [colors.white, colors.HexColor("#f8fafc")]),
+        ("GRID",          (0, 0), (-1, -1), 0.4, colors.HexColor("#e2e8f0")),
+        ("ALIGN",         (1, 0), (-1, -1), "CENTER"),
+        ("VALIGN",        (0, 0), (-1, -1), "MIDDLE"),
+        ("TOPPADDING",    (0, 0), (-1, -1), 5),
         ("BOTTOMPADDING", (0, 0), (-1, -1), 5),
+        ("LEFTPADDING",   (0, 0), (-1, -1), 6),
+        ("RIGHTPADDING",  (0, 0), (-1, -1), 6),
     ]))
-    story.append(tbl)
-    story.append(spacer())
+    story.append(metrics_tbl)
+    story.append(spacer(0.5))
+    story.append(hr())
 
     # ── Главный вывод ─────────────────────────────────────────────────────────
     if insights.get("summary"):
         story.append(Paragraph("Главный вывод", s_h1))
         story.append(Paragraph(insights["summary"], s_box))
-        story.append(spacer())
-
-    story.append(hr())
+        story.append(spacer(0.3))
+        story.append(hr())
 
     # ── Финансовые графики ────────────────────────────────────────────────────
+    # Chart titles are already embedded by matplotlib — no duplicate caption here.
     story.append(Paragraph("Финансовые графики", s_h1))
-
     story.append(chart_rev_trend)
-    story.append(Paragraph("Выручка по месяцам", s_caption))
-    story.append(spacer(0.4))
-
+    story.append(spacer(0.5))
     story.append(chart_rev_exp)
-    story.append(Paragraph("Выручка / Расходы / Прибыль", s_caption))
-    story.append(spacer(0.4))
-
+    story.append(spacer(0.5))
     story.append(chart_top)
-    story.append(Paragraph("Топ чаттеров за месяц", s_caption))
-    story.append(spacer())
+    story.append(spacer(0.3))
     story.append(hr())
 
     # ── Диагноз ───────────────────────────────────────────────────────────────
     if insights.get("diagnosis"):
         story.append(Paragraph("Диагноз", s_h1))
         story.append(Paragraph(insights["diagnosis"], s_body))
-        story.append(spacer())
+        story.append(spacer(0.3))
         story.append(hr())
 
     # ── KPI графики ───────────────────────────────────────────────────────────
     story.append(Paragraph("KPI чаттеров", s_h1))
-
     story.append(chart_scatter)
-    story.append(Paragraph("Объём диалогов × RPC", s_caption))
-    story.append(spacer(0.4))
-
+    story.append(spacer(0.5))
     story.append(chart_open_rate)
-    story.append(Paragraph("PPV Open Rate (%)", s_caption))
-    story.append(spacer(0.4))
-
+    story.append(spacer(0.5))
     story.append(chart_movers)
-    story.append(Paragraph(f"Крупнейшие изменения выручки: {period_prev} → {period}", s_caption))
-    story.append(spacer())
+    story.append(spacer(0.3))
     story.append(hr())
 
     # ── Приоритеты ────────────────────────────────────────────────────────────
@@ -278,32 +286,38 @@ async def build_agency_report_pdf(
     if priorities:
         story.append(Paragraph("Приоритеты на следующий период", s_h1))
         for i, p in enumerate(priorities, 1):
-            story.append(Paragraph(f"{i}. {p}", s_bullet))
-        story.append(spacer())
+            story.append(Paragraph(f"{i}.\u2002{p}", s_bullet))
+        story.append(spacer(0.3))
         story.append(hr())
 
     # ── Выводы по чаттерам ────────────────────────────────────────────────────
+    # Wrap every cell in Paragraph(s_cell) so text wraps and uses DejaVu (Cyrillic).
+    # Column widths: Чаттер 4.5 cm + Комментарий 12.5 cm = 17 cm (full content width).
     chatter_notes = insights.get("chatter_notes") or []
     if chatter_notes:
         story.append(Paragraph("Выводы по чаттерам", s_h1))
-        cn_data = [["Чаттер", "Комментарий"]]
+        CN_COLS = [4.5 * cm, 12.5 * cm]
+        cn_data = [
+            [Paragraph("Чаттер", s_cell_hdr), Paragraph("Комментарий", s_cell_hdr)],
+        ]
         for cn in chatter_notes:
-            cn_data.append([cn.get("chatter", ""), cn.get("note", "")])
-        cn_tbl = Table(cn_data, colWidths=[5*cm, 11*cm])
+            cn_data.append([
+                Paragraph(str(cn.get("chatter") or ""), s_cell),
+                Paragraph(str(cn.get("note") or ""),    s_cell),
+            ])
+        cn_tbl = Table(cn_data, colWidths=CN_COLS)
         cn_tbl.setStyle(TableStyle([
-            ("BACKGROUND",  (0, 0), (-1, 0), DARK),
-            ("TEXTCOLOR",   (0, 0), (-1, 0), colors.white),
-            ("FONTNAME",    (0, 0), (-1, 0), FONT_BOLD),
-            ("FONTNAME",    (0, 1), (-1, -1), FONT),
-            ("FONTSIZE",    (0, 0), (-1, -1), 9),
-            ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, colors.HexColor("#f8fafc")]),
-            ("GRID",        (0, 0), (-1, -1), 0.4, colors.HexColor("#e2e8f0")),
-            ("VALIGN",      (0, 0), (-1, -1), "TOP"),
-            ("TOPPADDING",  (0, 0), (-1, -1), 5),
+            ("BACKGROUND",    (0, 0), (-1, 0), DARK),
+            ("ROWBACKGROUNDS",(0, 1), (-1, -1), [colors.white, colors.HexColor("#f8fafc")]),
+            ("GRID",          (0, 0), (-1, -1), 0.4, colors.HexColor("#e2e8f0")),
+            ("VALIGN",        (0, 0), (-1, -1), "TOP"),
+            ("TOPPADDING",    (0, 0), (-1, -1), 5),
             ("BOTTOMPADDING", (0, 0), (-1, -1), 5),
-            ("WORDWRAP",    (1, 1), (1, -1), True),
+            ("LEFTPADDING",   (0, 0), (-1, -1), 6),
+            ("RIGHTPADDING",  (0, 0), (-1, -1), 6),
         ]))
         story.append(cn_tbl)
+        story.append(spacer(0.3))
 
     # ── Build ─────────────────────────────────────────────────────────────────
     doc.build(story)

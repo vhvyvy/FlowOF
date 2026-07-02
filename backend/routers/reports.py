@@ -146,12 +146,31 @@ async def get_chart(
 
 @router.get("/pdf")
 async def get_pdf_report(
-    year: int  = Query(..., ge=2020),
-    month: int = Query(..., ge=1, le=12),
+    year: int | None  = Query(None, ge=2020),
+    month: int | None = Query(None, ge=1, le=12),
     tenant: Tenant = Depends(get_current_tenant),
     db: AsyncSession = Depends(get_db),
 ):
-    """Generate and return a full management PDF report for the given month."""
+    """Generate and return a full management PDF report for the given month.
+
+    Defaults to the last *completed* month so the report is never generated for
+    an in-progress month (which would show artificially low numbers).
+    """
+    from datetime import date as _date
+
+    today = _date.today()
+    # Last completed month = the calendar month before the current one.
+    if today.month == 1:
+        last_y, last_m = today.year - 1, 12
+    else:
+        last_y, last_m = today.year, today.month - 1
+
+    # If caller omitted params, or explicitly asked for the current unfinished month → use last.
+    if year is None or month is None:
+        year, month = last_y, last_m
+    elif year == today.year and month == today.month:
+        year, month = last_y, last_m
+
     try:
         from services.report_pdf import build_agency_report_pdf
 
