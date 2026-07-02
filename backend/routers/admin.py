@@ -449,21 +449,28 @@ async def catalog_duplicates(
 
 # ── One-time chatter duplicate merge ─────────────────────────────────────────
 
-# Tables that may hold a chatter_id FK referencing chatters.id.
-# Extend this list if new FK tables appear.
-_CHATTER_FK_TABLES: list[tuple[str, str]] = [
-    ("transactions",       "chatter_id"),
-    ("chatter_mmr",        "chatter_id"),
-    ("chatter_adjustments","chatter_id"),
-    ("chatter_invites",    "chatter_id"),
-    ("mmr_events",         "chatter_id"),
-    ("chatter_kpi",        "chatter_id"),
-    ("chatter_kpi_mt",     "chatter_id"),
-    ("users",              "chatter_id"),
-    ("scripts",            "chatter_id"),
-    ("script_folders",     "chatter_id"),
-    ("season_results",     "chatter_id"),
+# TYPE 1: plain tables — many rows per chatter_id, no unique key on chatter_id.
+# Strategy: UPDATE chatter_id = keep WHERE chatter_id = drop.
+_CHATTER_FK_PLAIN: list[tuple[str, str]] = [
+    ("transactions",                "chatter_id"),
+    ("chatter_adjustments",         "chatter_id"),
+    ("chatter_invites",             "chatter_id"),
+    ("mmr_events",                  "chatter_id"),
+    ("chatter_kpi",                 "chatter_id"),
+    ("users",                       "chatter_id"),
+    ("scripts",                     "chatter_id"),
+    ("script_folders",              "chatter_id"),
     ("chatter_onlymonster_mapping", "chatter_id"),
+]
+
+# TYPE 2: aggregate tables with a unique/composite key that includes chatter_id.
+# Strategy: DELETE all rows for drop_id (they are recalculated aggregates).
+# Fields are (table, chatter_col, [other_key_cols...]) — other keys used to
+# detect conflicts, but we always DELETE drop rows to stay safe.
+_CHATTER_FK_AGGREGATE: list[tuple[str, str]] = [
+    ("chatter_mmr",      "chatter_id"),   # uq: tenant_id, chatter_id, season_id
+    ("chatter_kpi_mt",   "chatter_id"),   # uq: tenant_id, year, month, chatter
+    ("season_results",   "chatter_id"),   # uq: tenant_id, chatter_id, season_id
 ]
 
 
@@ -478,8 +485,9 @@ async def merge_chatter_duplicate(
 ):
     """
     Одноразовое слияние двух записей в таблице chatters.
-    Все шаги выполняются в единой транзакции; при любой ошибке — rollback.
-    Только для использования через admin-secret.
+    Тип 1 (plain): UPDATE chatter_id=keep WHERE chatter_id=drop.
+    Тип 2 (aggregate, пересчитываемые): DELETE все строки drop — агрегаты пересчитаются.
+    Все шаги в единой транзакции; при любой ошибке — rollback.
     """
     if not ADMIN_SECRET or (x_admin_secret != ADMIN_SECRET and secret != ADMIN_SECRET):
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Forbidden")
@@ -505,72 +513,95 @@ async def merge_chatter_duplicate(
     if drop_row is None:
         raise HTTPException(400, f"drop_id={drop_id} не найден в chatters для tenant_id={tenant_id}")
 
-    log.append(f"[CHECK] keep_id={keep_id} active={keep_row['active']}  |  drop_id={drop_id} active={drop_row['active']}")
+    log.append(
+        f"[CHECK] keep_id={keep_id} active={keep_row['active']}  |  "
+        f"drop_id={drop_id} active={drop_row['active']}"
+    )
 
     # Считаем транзакции ДО перевески
-    r_tx_keep = await db.execute(
+    tx_keep_before = (await db.execute(
         text("SELECT COUNT(*) FROM transactions WHERE chatter_id=:cid AND tenant_id=:tid"),
         {"cid": keep_id, "tid": tenant_id},
-    )
-    r_tx_drop = await db.execute(
+    )).scalar()
+    tx_drop_before = (await db.execute(
         text("SELECT COUNT(*) FROM transactions WHERE chatter_id=:cid AND tenant_id=:tid"),
         {"cid": drop_id, "tid": tenant_id},
+    )).scalar()
+    log.append(
+        f"[BEFORE] transactions: keep_id={keep_id} → {tx_keep_before}  |  "
+        f"drop_id={drop_id} → {tx_drop_before}"
     )
-    tx_keep_before = r_tx_keep.scalar()
-    tx_drop_before = r_tx_drop.scalar()
-    log.append(f"[BEFORE] transactions: keep_id={keep_id} → {tx_keep_before}  |  drop_id={drop_id} → {tx_drop_before}")
 
-    # ── Шаги 2–4: перевешиваем все FK-таблицы ────────────────────────────────
     tables_affected: list[dict] = []
-    unknown_refs: list[str] = []
 
-    for table, col in _CHATTER_FK_TABLES:
-        # Проверяем, существует ли таблица + столбец (устойчиво к отсутствующим таблицам)
-        exists_q = await db.execute(
+    # Helper: check whether a table+column actually exists in this schema
+    async def _col_exists(tbl: str, col: str) -> bool:
+        r = await db.execute(
             text(
-                """
-                SELECT EXISTS (
-                    SELECT 1 FROM information_schema.columns
-                    WHERE table_name = :tbl AND column_name = :col
-                )
-                """
+                "SELECT EXISTS ("
+                "  SELECT 1 FROM information_schema.columns"
+                "  WHERE table_name = :tbl AND column_name = :col"
+                ")"
             ),
-            {"tbl": table, "col": col},
+            {"tbl": tbl, "col": col},
         )
-        if not exists_q.scalar():
-            continue  # таблица или колонка не существует в этой схеме
+        return bool(r.scalar())
 
-        cnt_q = await db.execute(
+    # ── Шаг 2а: TYPE 1 — plain UPDATE ────────────────────────────────────────
+    for table, col in _CHATTER_FK_PLAIN:
+        if not await _col_exists(table, col):
+            continue
+        cnt = (await db.execute(
             text(f"SELECT COUNT(*) FROM {table} WHERE {col} = :drop_id"),
             {"drop_id": drop_id},
-        )
-        cnt_before = cnt_q.scalar()
-        if cnt_before == 0:
-            continue  # нечего перевешивать
-
-        # tenant_id-колонка у части таблиц есть, у части нет — UPDATE без неё безопасен
+        )).scalar()
+        if cnt == 0:
+            continue
         upd = await db.execute(
             text(f"UPDATE {table} SET {col} = :keep_id WHERE {col} = :drop_id"),
             {"keep_id": keep_id, "drop_id": drop_id},
         )
         moved = upd.rowcount
-        tables_affected.append({"table": table, "column": col, "rows_moved": moved})
-        log.append(f"[UPDATE] {table}.{col}: {cnt_before} → keep_id={keep_id}  (rowcount={moved})")
+        tables_affected.append({"table": table, "action": "UPDATE", "rows": moved})
+        log.append(f"[UPDATE] {table}.{col}: {cnt} строк → keep_id={keep_id} (rowcount={moved})")
 
-    # ── Шаг 3: проверяем, что транзакций на drop_id больше нет ──────────────
-    r_tx_drop_after = await db.execute(
+    # ── Шаг 2б: TYPE 2 — aggregate DELETE (пересчитываемые агрегаты) ─────────
+    for table, col in _CHATTER_FK_AGGREGATE:
+        if not await _col_exists(table, col):
+            continue
+        cnt = (await db.execute(
+            text(f"SELECT COUNT(*) FROM {table} WHERE {col} = :drop_id"),
+            {"drop_id": drop_id},
+        )).scalar()
+        if cnt == 0:
+            continue
+        # Считаем, сколько из них конфликтуют с keep (для информации в логе)
+        # — удаляем ВСЕ строки drop_id: агрегаты пересчитаются при следующем MMR/KPI run
+        del_q = await db.execute(
+            text(f"DELETE FROM {table} WHERE {col} = :drop_id"),
+            {"drop_id": drop_id},
+        )
+        deleted = del_q.rowcount
+        tables_affected.append({"table": table, "action": "DELETE_AGGREGATE", "rows": deleted})
+        log.append(
+            f"[DELETE_AGGREGATE] {table}.{col}: удалено {deleted} строк drop_id={drop_id} "
+            f"(агрегат пересчитается)"
+        )
+
+    # ── Шаг 3: убеждаемся, что на drop_id не осталось транзакций ─────────────
+    tx_drop_after = (await db.execute(
         text("SELECT COUNT(*) FROM transactions WHERE chatter_id=:cid AND tenant_id=:tid"),
         {"cid": drop_id, "tid": tenant_id},
-    )
-    tx_drop_after = r_tx_drop_after.scalar()
+    )).scalar()
     if tx_drop_after != 0:
         raise HTTPException(
             500,
-            f"После UPDATE в transactions всё ещё {tx_drop_after} строк с chatter_id={drop_id} — rollback",
+            f"После UPDATE в transactions всё ещё {tx_drop_after} строк "
+            f"с chatter_id={drop_id} — rollback",
         )
     log.append(f"[CHECK] transactions после UPDATE: drop_id={drop_id} → {tx_drop_after} ✓")
 
-    # ── Шаг 4b: проверяем через information_schema, нет ли других FK ─────────
+    # ── Шаг 4: проверяем information_schema на остаточные FK ──────────────────
     other_fk_q = await db.execute(
         text(
             """
@@ -586,14 +617,16 @@ async def merge_chatter_duplicate(
             """
         )
     )
-    all_fk_tables = {(r[0], r[1]) for r in other_fk_q.all()}
-    known_set = {(t, c) for t, c in _CHATTER_FK_TABLES}
-    for tbl, col in sorted(all_fk_tables - known_set):
-        cnt_q = await db.execute(
+    known_set = (
+        {(t, c) for t, c in _CHATTER_FK_PLAIN}
+        | {(t, c) for t, c in _CHATTER_FK_AGGREGATE}
+    )
+    unknown_refs: list[str] = []
+    for tbl, col in sorted({(r[0], r[1]) for r in other_fk_q.all()} - known_set):
+        residual = (await db.execute(
             text(f"SELECT COUNT(*) FROM {tbl} WHERE {col} = :drop_id"),
             {"drop_id": drop_id},
-        )
-        residual = cnt_q.scalar()
+        )).scalar()
         if residual > 0:
             unknown_refs.append(f"{tbl}.{col} → {residual} строк")
 
@@ -601,31 +634,32 @@ async def merge_chatter_duplicate(
         raise HTTPException(
             409,
             {
-                "error": "Найдены неожиданные ссылки на drop_id — остановлено перед DELETE",
+                "error": "Найдены неожиданные ссылки на drop_id — остановлено перед DELETE chatters",
                 "unknown_refs": unknown_refs,
                 "log": log,
             },
         )
+    log.append("[CHECK] information_schema: остаточных FK-ссылок нет ✓")
 
-    # ── Шаг 5: DELETE дубля ──────────────────────────────────────────────────
-    del_q = await db.execute(
+    # ── Шаг 5: DELETE дубля из chatters ──────────────────────────────────────
+    del_chatter = await db.execute(
         text("DELETE FROM chatters WHERE id = :id AND tenant_id = :tid"),
         {"id": drop_id, "tid": tenant_id},
     )
-    if del_q.rowcount != 1:
-        raise HTTPException(500, f"DELETE chatters id={drop_id} вернул rowcount={del_q.rowcount}")
-    log.append(f"[DELETE] chatters id={drop_id} удалён (rowcount={del_q.rowcount})")
+    if del_chatter.rowcount != 1:
+        raise HTTPException(
+            500, f"DELETE chatters id={drop_id} вернул rowcount={del_chatter.rowcount}"
+        )
+    log.append(f"[DELETE] chatters id={drop_id} удалён ✓")
 
     # ── Шаг 6: commit ────────────────────────────────────────────────────────
     await db.commit()
     log.append("[COMMIT] ✓")
 
-    # Итоговое число транзакций на keep_id
-    r_tx_keep_after = await db.execute(
+    tx_keep_after = (await db.execute(
         text("SELECT COUNT(*) FROM transactions WHERE chatter_id=:cid AND tenant_id=:tid"),
         {"cid": keep_id, "tid": tenant_id},
-    )
-    tx_keep_after = r_tx_keep_after.scalar()
+    )).scalar()
 
     return {
         "status": "ok",
