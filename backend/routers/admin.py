@@ -374,9 +374,12 @@ async def notion_diff(
 @router.get("/catalog-duplicates")
 async def catalog_duplicates(
     tenant_id: int = Query(...),
-    _: None = Depends(_require_secret),
+    secret: str | None = Query(None),
     db: AsyncSession = Depends(get_db),
+    x_admin_secret: str | None = Header(None, alias="X-Admin-Secret"),
 ):
+    if not ADMIN_SECRET or (x_admin_secret != ADMIN_SECRET and secret != ADMIN_SECRET):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Forbidden")
     """
     Read-only: найти записи с дублирующимся name внутри одного tenant_id в трёх
     каталожных таблицах (models, chatters, shifts_catalog).
