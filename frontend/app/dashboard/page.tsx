@@ -11,6 +11,7 @@ import { useTeamStore } from '@/lib/hooks/useTeam'
 import { teamColor } from '@/lib/teamColors'
 import { formatCurrency } from '@/lib/utils'
 import { resolveApiBaseURL } from '@/lib/api'
+import { AgentInsights } from '@/components/agent/AgentInsights'
 
 function fmtForecast(v?: number | null) {
   if (v == null) return undefined
@@ -57,6 +58,9 @@ export default function OverviewPage() {
       } />
 
       <div className="flex-1 p-6 space-y-6 overflow-y-auto">
+        {/* Agent memory insights */}
+        <AgentInsights />
+
         {error && (
           <div className="bg-red-500/10 border border-red-500/20 rounded-xl p-4">
             <p className="text-sm text-red-400">Не удалось загрузить данные</p>

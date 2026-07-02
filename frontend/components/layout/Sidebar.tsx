@@ -21,6 +21,7 @@ import {
   Trophy,
   UserCog,
   LineChart,
+  Brain,
 } from 'lucide-react'
 import { useState } from 'react'
 import { cn } from '@/lib/utils'
@@ -43,6 +44,7 @@ const NAV_ITEMS = [
   { href: '/dashboard/reports', label: 'Отчёты', icon: LineChart },
   { href: '/dashboard/lab', label: 'Лаборатория', icon: FlaskConical },
   { href: '/dashboard/ai', label: 'AI Аналитик', icon: Sparkles },
+  { href: '/dashboard/ai/events', label: 'Мозг (события)', icon: Brain },
   { href: '/dashboard/settings', label: 'Настройки', icon: Settings },
 ]
 
