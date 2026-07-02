@@ -267,10 +267,12 @@ function ScanNowButton() {
   const qc = useQueryClient()
   const [scanning, setScanning] = useState(false)
   const [result, setResult] = useState<{ level_a: number; level_b: number; total: number } | null>(null)
+  const [error, setError] = useState(false)
 
   async function handleScan() {
     setScanning(true)
     setResult(null)
+    setError(false)
     try {
       const res = await api.post<{ level_a: number; level_b: number; total: number }>(
         '/api/v1/agent-events/scan-now'
@@ -278,31 +280,44 @@ function ScanNowButton() {
       setResult(res.data)
       qc.invalidateQueries({ queryKey: ['agent-events'] })
       qc.invalidateQueries({ queryKey: ['agent-events-insights'] })
-    } catch { /* ignore */ } finally {
+    } catch {
+      setError(true)
+    } finally {
       setScanning(false)
     }
   }
 
   return (
-    <div className="flex items-center gap-3">
+    <div className="flex items-center gap-3 flex-wrap justify-end">
       <button
         onClick={handleScan}
         disabled={scanning}
-        className="flex items-center gap-2 px-3 py-1.5 text-sm font-medium rounded-lg bg-violet-500/15 text-violet-300 border border-violet-500/25 hover:bg-violet-500/25 disabled:opacity-50 transition-colors"
+        className="flex items-center gap-2 px-4 py-2 text-sm font-semibold rounded-xl bg-violet-600 hover:bg-violet-500 disabled:opacity-60 text-white shadow-sm transition-colors"
       >
         {scanning ? (
-          <Loader2 className="h-4 w-4 animate-spin" />
+          <Loader2 className="h-4 w-4 animate-spin shrink-0" />
         ) : (
-          <ScanSearch className="h-4 w-4" />
+          <ScanSearch className="h-4 w-4 shrink-0" />
         )}
-        {scanning ? 'Осматриваю…' : 'Осмотреть агентство сейчас'}
+        {scanning ? 'Мозг осматривает агентство…' : 'Осмотреть агентство сейчас'}
       </button>
-      {result && (
-        <span className="text-xs text-slate-400">
-          {result.total === 0
-            ? 'Новых проблем не найдено'
-            : `Создано событий: ${result.total} (A: ${result.level_a}, B: ${result.level_b})`}
+
+      {scanning && (
+        <span className="text-xs text-slate-500 animate-pulse">
+          Анализирую тренды, займёт 10–20 сек…
         </span>
+      )}
+
+      {!scanning && result && (
+        <span className={`text-xs font-medium ${result.total > 0 ? 'text-violet-400' : 'text-slate-400'}`}>
+          {result.total === 0
+            ? '✓ Новых проблем не найдено'
+            : `Создано событий: ${result.total} (правила: ${result.level_a}, тренды: ${result.level_b})`}
+        </span>
+      )}
+
+      {!scanning && error && (
+        <span className="text-xs text-red-400">Ошибка при сканировании</span>
       )}
     </div>
   )
@@ -478,7 +493,7 @@ export default function AgentEventsPage() {
 
   return (
     <div className="flex flex-col h-full">
-      <Header title="События мозга" actions={<ScanNowButton />} />
+      <Header title="События мозга" />
 
       {/* Sub-nav */}
       <div className="flex gap-1 px-6 pt-3 pb-0 border-b border-slate-700/50">
@@ -499,22 +514,27 @@ export default function AgentEventsPage() {
         </Link>
       </div>
 
-      {/* Tab bar */}
-      <div className="flex gap-1 px-6 pt-4">
-        {TABS.map(({ id, label, icon: Icon }) => (
-          <button
-            key={id}
-            onClick={() => setTab(id)}
-            className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-sm font-medium transition-colors ${
-              tab === id
-                ? 'bg-indigo-500/15 text-indigo-300 border border-indigo-500/25'
-                : 'text-slate-400 hover:text-slate-200 hover:bg-slate-800/50 border border-transparent'
-            }`}
-          >
-            <Icon className="h-3.5 w-3.5" />
-            {label}
-          </button>
-        ))}
+      {/* Tab bar + Scan button on same row */}
+      <div className="flex items-center justify-between gap-2 px-6 pt-4 pb-0">
+        <div className="flex gap-1">
+          {TABS.map(({ id, label, icon: Icon }) => (
+            <button
+              key={id}
+              onClick={() => setTab(id)}
+              className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-sm font-medium transition-colors ${
+                tab === id
+                  ? 'bg-indigo-500/15 text-indigo-300 border border-indigo-500/25'
+                  : 'text-slate-400 hover:text-slate-200 hover:bg-slate-800/50 border border-transparent'
+              }`}
+            >
+              <Icon className="h-3.5 w-3.5" />
+              {label}
+            </button>
+          ))}
+        </div>
+
+        {/* Scan-now button — always visible, right of tabs */}
+        <ScanNowButton />
       </div>
 
       {/* Content */}
