@@ -293,12 +293,12 @@ async def get_model_performance(
         {"tid": tenant_id, "s": start, "e": end},
     )).fetchall()
 
+    # plans.model is a plain text column matching models.name (no model_id FK)
     plans = (await db.execute(
         text(
             """
-            SELECT m.name, p.planned_amount
+            SELECT p.model, p.plan_amount
             FROM plans p
-            JOIN models m ON m.id = p.model_id
             WHERE p.tenant_id = :tid AND p.year = :y AND p.month = :mo
             """
         ),

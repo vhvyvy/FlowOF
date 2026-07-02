@@ -192,6 +192,13 @@ class LLMAnalyst:
                         logger.warning(
                             "agentic tool error tool=%s: %s", tool_name, exc
                         )
+                        # Roll back the aborted transaction so subsequent tool calls
+                        # in the same session are not poisoned by the failed query.
+                        # Tools are read-only (no commits), so rollback is always safe.
+                        try:
+                            await db.rollback()
+                        except Exception:
+                            pass
                         result_content = json.dumps(
                             {"error": f"Ошибка при выполнении {tool_name}: {exc}"},
                             ensure_ascii=False,
