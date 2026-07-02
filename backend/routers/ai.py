@@ -1,4 +1,5 @@
 import logging
+from datetime import date
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
@@ -28,14 +29,26 @@ async def analyze(
     tenant: Tenant = Depends(get_current_tenant),
     db: AsyncSession = Depends(get_db),
 ):
+    """Agentic AI analyst: Claude calls read tools, investigates data, answers in Russian.
+
+    tenant.id is always injected from JWT — the model never receives or requests it.
+    month/year from the request are passed as a context hint so the model knows the
+    currently selected period, but it is free to query other periods via tools.
+    """
     try:
-        from services.analytics_context import build_agency_snapshot, snapshot_to_text
         from services.llm_analyst import LLMAnalyst
 
-        snapshot      = await build_agency_snapshot(db, tenant.id, body.year, body.month)
-        snapshot_text = snapshot_to_text(snapshot)
-        analyst       = LLMAnalyst()
-        answer        = await analyst.answer_question(snapshot_text, body.question)
+        context_hint = (
+            f"Владелец сейчас смотрит на период {body.month:02d}/{body.year}. "
+            "При ответе на вопросы без явного периода используй этот месяц как дефолтный."
+        )
+        analyst = LLMAnalyst()
+        answer  = await analyst.answer_question_agentic(
+            db=db,
+            tenant_id=tenant.id,
+            question=body.question,
+            context_hint=context_hint,
+        )
         return AnalyzeResponse(answer=answer)
 
     except ValueError as e:

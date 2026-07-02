@@ -96,8 +96,9 @@ export default function AiPage() {
 
           {loading && (
             <div className="flex justify-start">
-              <div className="bg-slate-800/80 border border-slate-700/50 rounded-2xl px-5 py-3">
-                <Loader2 className="h-4 w-4 animate-spin text-indigo-400" />
+              <div className="bg-slate-800/80 border border-slate-700/50 rounded-2xl px-5 py-3 flex items-center gap-2.5">
+                <Loader2 className="h-4 w-4 animate-spin text-indigo-400 shrink-0" />
+                <span className="text-sm text-slate-400">Анализирую данные агентства…</span>
               </div>
             </div>
           )}
