@@ -367,3 +367,78 @@ async def notion_diff(
             "db_count":     len(db_rows_raw),
         },
     }
+
+
+# ── Catalog duplicates diagnostic ────────────────────────────────────────────
+
+@router.get("/catalog-duplicates")
+async def catalog_duplicates(
+    tenant_id: int = Query(...),
+    _: None = Depends(_require_secret),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Read-only: найти записи с дублирующимся name внутри одного tenant_id в трёх
+    каталожных таблицах (models, chatters, shifts_catalog).
+    Ничего не меняет, только SELECT.
+    """
+
+    async def _find_dupes(table: str, fk_col: str) -> list[dict]:
+        # Найти имена с COUNT > 1
+        dup_names_q = await db.execute(
+            text(
+                f"""
+                SELECT name
+                FROM {table}
+                WHERE tenant_id = :tid
+                GROUP BY name
+                HAVING COUNT(*) > 1
+                ORDER BY name
+                """
+            ),
+            {"tid": tenant_id},
+        )
+        dup_names = [r[0] for r in dup_names_q.all()]
+        if not dup_names:
+            return []
+
+        groups: list[dict] = []
+        for name in dup_names:
+            rows_q = await db.execute(
+                text(
+                    f"""
+                    SELECT c.id, c.active,
+                           COUNT(t.id) AS tx_count
+                    FROM {table} c
+                    LEFT JOIN transactions t
+                           ON t.{fk_col} = c.id
+                          AND t.tenant_id = :tid
+                    WHERE c.tenant_id = :tid
+                      AND c.name = :name
+                    GROUP BY c.id, c.active
+                    ORDER BY c.id
+                    """
+                ),
+                {"tid": tenant_id, "name": name},
+            )
+            entries = [
+                {"id": r[0], "active": r[1], "tx_count": r[2]}
+                for r in rows_q.all()
+            ]
+            groups.append({"name": name, "entries": entries})
+
+        return groups
+
+    models_dupes   = await _find_dupes("models",          "model_id")
+    chatters_dupes = await _find_dupes("chatters",         "chatter_id")
+    shifts_dupes   = await _find_dupes("shifts_catalog",   "shift_catalog_id")
+
+    total = len(models_dupes) + len(chatters_dupes) + len(shifts_dupes)
+
+    return {
+        "tenant_id": tenant_id,
+        "total_duplicate_names": total,
+        "models":         {"duplicate_count": len(models_dupes),   "groups": models_dupes},
+        "chatters":       {"duplicate_count": len(chatters_dupes),  "groups": chatters_dupes},
+        "shifts_catalog": {"duplicate_count": len(shifts_dupes),    "groups": shifts_dupes},
+    }
