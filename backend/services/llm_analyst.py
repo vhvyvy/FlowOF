@@ -123,6 +123,18 @@ class LLMAnalyst:
 
         from anthropic import AsyncAnthropic
         from services.analyst_tools import TOOL_DESCRIPTIONS, TOOL_REGISTRY, get_open_events
+        from services.agency_profile import build_profile_context
+
+        # ── Load agency passport (semantic context) ────────────────────────────
+        profile_context = ""
+        try:
+            profile_context = await build_profile_context(db, tenant_id)
+        except Exception as e:
+            logger.debug("agentic: could not load agency profile: %s", e)
+            try:
+                await db.rollback()
+            except Exception:
+                pass
 
         # ── Load open events for memory context ───────────────────────────────
         open_events_context = ""
@@ -145,7 +157,7 @@ class LLMAnalyst:
             except Exception:
                 pass
 
-        # ── System prompt (spec section 1.2 + 2.4 extensions) ─────────────────
+        # ── System prompt (spec 1.2 + 2.4 + 4.x extensions) ──────────────────
         system = (
             "Ты AI-аналитик OnlyFans-агентства — второй мозг владельца. "
             "У тебя есть инструменты для доступа к реальным данным и слой памяти (события).\n\n"
@@ -159,6 +171,12 @@ class LLMAnalyst:
             "Нет данных → скажи прямо «таких данных нет», не выдумывай.\n"
             "5. Отвечай на русском, конкретно.\n"
             "6. tenant_id ты не знаешь и не запрашиваешь — сервер сам передаёт его в инструменты.\n\n"
+            "ПРАВИЛА ПАСПОРТА АГЕНТСТВА:\n"
+            "Тебе дан ПАСПОРТ АГЕНТСТВА с порогами нормы и приоритетами владельца. "
+            "Используй эти пороги при оценке метрик (напр. RPC ниже rpc_critical — тревога, "
+            "выше rpc_strong — отлично), а не абстрактные значения. "
+            "Учитывай приоритеты владельца в рекомендациях. "
+            "Пороги — это мнение владельца о своём агентстве, не стандартные нормативы.\n\n"
             "ПРАВИЛА ПАМЯТИ (события):\n"
             "7. Перед ответом сверяйся с открытыми событиями: если вопрос касается сущности "
             "с открытым событием — отвечай с учётом его истории и статуса.\n"
@@ -168,6 +186,8 @@ class LLMAnalyst:
             "Предлагай владельцу через proposed_events в ответе (не вызывай create_event).\n"
             "10. Не создавай дубли: проверь get_open_events по entity_ref перед create_event."
         )
+        if profile_context:
+            system += f"\n\n{profile_context}"
         if context_hint:
             system += f"\n\nКонтекст сессии: {context_hint}"
         if open_events_context:

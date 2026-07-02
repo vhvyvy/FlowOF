@@ -45,6 +45,7 @@ const NAV_ITEMS = [
   { href: '/dashboard/lab', label: 'Лаборатория', icon: FlaskConical },
   { href: '/dashboard/ai', label: 'AI Аналитик', icon: Sparkles },
   { href: '/dashboard/ai/events', label: 'Мозг (события)', icon: Brain },
+  { href: '/dashboard/ai/profile', label: 'Настройки мозга', icon: Settings },
   { href: '/dashboard/settings', label: 'Настройки', icon: Settings },
 ]
 

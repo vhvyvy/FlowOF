@@ -574,6 +574,23 @@ _PATCHES: list[tuple[str, bool]] = [
     ("CREATE INDEX IF NOT EXISTS ix_agent_events_tenant_status ON agent_events (tenant_id, status)", False),
     ("CREATE INDEX IF NOT EXISTS ix_agent_events_tenant_review ON agent_events (tenant_id, review_date)", False),
     ("CREATE INDEX IF NOT EXISTS ix_agent_events_tenant_entity ON agent_events (tenant_id, entity_type, entity_ref)", False),
+    # ── Agency profile / semantic context (Этап 4) ────────────────────────────
+    (
+        """CREATE TABLE IF NOT EXISTS agency_profile (
+            tenant_id              INTEGER PRIMARY KEY REFERENCES tenants(id) ON DELETE CASCADE,
+            rpc_critical           NUMERIC(10, 4) NOT NULL DEFAULT 0.15,
+            rpc_working_low        NUMERIC(10, 4) NOT NULL DEFAULT 0.25,
+            rpc_strong             NUMERIC(10, 4) NOT NULL DEFAULT 0.50,
+            open_rate_critical     NUMERIC(10, 2) NOT NULL DEFAULT 20.0,
+            open_rate_working      NUMERIC(10, 2) NOT NULL DEFAULT 25.0,
+            open_rate_strong       NUMERIC(10, 2) NOT NULL DEFAULT 35.0,
+            priorities             TEXT,
+            glossary               TEXT,
+            target_notes           TEXT,
+            updated_at             TIMESTAMP NOT NULL DEFAULT NOW()
+        )""",
+        False,
+    ),
 ]
 
 # Catalog tables that should have UNIQUE(tenant_id, name).

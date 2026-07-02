@@ -417,6 +417,12 @@ export default function AgentEventsPage() {
         <span className="px-3 py-1.5 text-sm font-medium text-indigo-300 border-b-2 border-indigo-400 -mb-px">
           События
         </span>
+        <Link
+          href="/dashboard/ai/profile"
+          className="px-3 py-1.5 text-sm font-medium text-slate-400 hover:text-slate-200 -mb-px transition-colors"
+        >
+          Настройки
+        </Link>
       </div>
 
       {/* Tab bar */}

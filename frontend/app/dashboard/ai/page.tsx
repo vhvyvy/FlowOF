@@ -214,6 +214,12 @@ export default function AiPage() {
         >
           События
         </Link>
+        <Link
+          href="/dashboard/ai/profile"
+          className="px-3 py-1.5 text-sm font-medium text-slate-400 hover:text-slate-200 -mb-px transition-colors"
+        >
+          Настройки
+        </Link>
       </div>
 
       <div className="flex-1 flex flex-col p-6 overflow-hidden">
