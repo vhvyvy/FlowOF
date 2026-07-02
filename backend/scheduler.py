@@ -104,6 +104,71 @@ def setup_scheduler() -> Any:
         except Exception as exc:
             logger.error("Season auto-close job error: %s", exc, exc_info=True)
 
+    # ── Agent Watcher jobs (optional, AGENT_WATCHER_ENABLED=1) ────────────────
+    watcher_enabled = os.getenv("AGENT_WATCHER_ENABLED", "").strip().lower() in ("1", "true", "yes")
+
+    if watcher_enabled:
+        async def _watcher_scan_job() -> None:
+            """Daily proactive scan: find anomalies and create accepted events."""
+            from services.agent_watcher import watcher_scan
+
+            async with AsyncSessionLocal() as db:
+                r = await db.execute(select(Tenant).where(Tenant.active.is_(True)))
+                tenants = list(r.scalars().all())
+
+            total_created = 0
+            for t in tenants:
+                try:
+                    async with AsyncSessionLocal() as db:
+                        result = await watcher_scan(db, t.id)
+                        total_created += result.get("total", 0)
+                        logger.info(
+                            "watcher_scan tenant=%s level_a=%s level_b=%s",
+                            t.id, result.get("level_a"), result.get("level_b"),
+                        )
+                except Exception as exc:
+                    logger.warning("watcher_scan scheduler error tenant=%s: %s", t.id, exc)
+
+            logger.info("watcher_scan job DONE: total events created=%s", total_created)
+
+        async def _watcher_review_job() -> None:
+            """Daily review: check past-deadline events and update outcomes."""
+            from services.agent_watcher import watcher_review
+
+            async with AsyncSessionLocal() as db:
+                r = await db.execute(select(Tenant).where(Tenant.active.is_(True)))
+                tenants = list(r.scalars().all())
+
+            total_updated = 0
+            for t in tenants:
+                try:
+                    async with AsyncSessionLocal() as db:
+                        result = await watcher_review(db, t.id)
+                        total_updated += result.get("updated", 0)
+                        logger.info(
+                            "watcher_review tenant=%s checked=%s updated=%s",
+                            t.id, result.get("checked"), result.get("updated"),
+                        )
+                except Exception as exc:
+                    logger.warning("watcher_review scheduler error tenant=%s: %s", t.id, exc)
+
+            logger.info("watcher_review job DONE: total events updated=%s", total_updated)
+
+        sched.add_job(
+            _watcher_scan_job,
+            "cron",
+            hour=6, minute=0,
+            id="agent_watcher_scan",
+            replace_existing=True,
+        )
+        sched.add_job(
+            _watcher_review_job,
+            "cron",
+            hour=7, minute=0,
+            id="agent_watcher_review",
+            replace_existing=True,
+        )
+
     sched.add_job(_notion_job, "interval", hours=24, id="notion_sync_all", replace_existing=True)
     sched.add_job(
         _mmr_daily_job,
@@ -121,7 +186,12 @@ def setup_scheduler() -> Any:
     )
     sched.start()
     _scheduler = sched
-    logger.info("APScheduler started: Notion sync every 24h, MMR daily 03:00 UTC, Season close 23:55 UTC")
+    watcher_msg = " + Watcher scan 06:00 + Watcher review 07:00 UTC" if watcher_enabled else ""
+    logger.info(
+        "APScheduler started: Notion sync every 24h, MMR daily 03:00 UTC, "
+        "Season close 23:55 UTC%s",
+        watcher_msg,
+    )
     return sched
 
 

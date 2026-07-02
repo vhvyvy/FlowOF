@@ -5,9 +5,7 @@ import Link from 'next/link'
 import { Header } from '@/components/layout/Header'
 import {
   Brain,
-  ChevronLeft,
   CheckCheck,
-  Clock,
   AlertTriangle,
   XCircle,
   CheckCircle,
@@ -17,7 +15,12 @@ import {
   CalendarClock,
   Archive,
   ListFilter,
+  ScanSearch,
+  Loader2,
+  Bot,
 } from 'lucide-react'
+import api from '@/lib/api'
+import { useQueryClient } from '@tanstack/react-query'
 import {
   useAgentEvents,
   usePatchAgentEvent,
@@ -79,6 +82,56 @@ function isReviewSoon(ev: AgentEvent) {
 
 // ── Event card ─────────────────────────────────────────────────────────────
 
+function SourceBadge({ source }: { source: string }) {
+  if (source !== 'watcher') return null
+  return (
+    <span className="inline-flex items-center gap-1 text-xs font-medium px-2 py-0.5 rounded-md bg-violet-500/10 text-violet-400 border border-violet-500/25">
+      <Bot className="h-3 w-3" />
+      Найдено мозгом
+    </span>
+  )
+}
+
+function BeforeAfterBlock({ ev }: { ev: AgentEvent }) {
+  const before = ev.trigger_value_before
+  const after  = ev.outcome_value_after
+  if (before == null && after == null) return null
+
+  const diff = before != null && after != null ? after - before : null
+  const improved = diff != null && diff > 0
+  const worsened = diff != null && diff < 0
+
+  return (
+    <div className="mt-2 pl-11 flex items-center gap-2 flex-wrap">
+      <span className="text-xs text-slate-500">{ev.trigger_metric}:</span>
+      {before != null && (
+        <span className="text-xs font-mono text-slate-400">{before.toFixed(2)}</span>
+      )}
+      {after != null && (
+        <>
+          <ArrowRight className="h-3 w-3 text-slate-600" />
+          <span className={`text-xs font-mono font-semibold ${
+            improved ? 'text-emerald-400' : worsened ? 'text-red-400' : 'text-slate-300'
+          }`}>
+            {after.toFixed(2)}
+          </span>
+          {diff != null && (
+            <span className={`text-xs px-1.5 py-0.5 rounded-md ${
+              improved
+                ? 'bg-emerald-500/10 text-emerald-400'
+                : worsened
+                ? 'bg-red-500/10 text-red-400'
+                : 'bg-slate-700/40 text-slate-400'
+            }`}>
+              {improved ? '↑ улучшилось' : worsened ? '↓ ухудшилось' : '→ без изменений'}
+            </span>
+          )}
+        </>
+      )}
+    </div>
+  )
+}
+
 function EventCard({ ev }: { ev: AgentEvent }) {
   const patch = usePatchAgentEvent()
   const [optimisticStatus, setOptimisticStatus] = useState<string | null>(null)
@@ -95,14 +148,11 @@ function EventCard({ ev }: { ev: AgentEvent }) {
 
   const m = STATUS_META[status] ?? STATUS_META.dismissed
   const Icon = m.icon
-
   const isOpen = !['closed_success', 'closed_failed', 'dismissed'].includes(status)
 
   return (
     <div
-      className={`rounded-xl border bg-slate-800/50 p-4 transition-opacity ${
-        isOpen ? '' : 'opacity-70'
-      }`}
+      className={`rounded-xl border bg-slate-800/50 p-4 transition-opacity ${isOpen ? '' : 'opacity-70'}`}
       style={{ borderColor: 'rgba(100,116,139,0.3)' }}
     >
       {/* Header row */}
@@ -119,7 +169,10 @@ function EventCard({ ev }: { ev: AgentEvent }) {
             <p className="text-xs text-slate-500 mt-1 line-clamp-2">{ev.description}</p>
           )}
         </div>
-        <StatusBadge status={status} />
+        <div className="flex items-center gap-2 shrink-0 flex-wrap justify-end">
+          <SourceBadge source={ev.source} />
+          <StatusBadge status={status} />
+        </div>
       </div>
 
       {/* Meta tags */}
@@ -137,98 +190,119 @@ function EventCard({ ev }: { ev: AgentEvent }) {
           </span>
         )}
         {ev.review_date && (
-          <span
-            className={`text-xs rounded-md px-2 py-0.5 flex items-center gap-1 ${
-              isReviewSoon(ev) ? 'bg-orange-500/15 text-orange-400' : 'bg-slate-700/40 text-slate-400'
-            }`}
-          >
+          <span className={`text-xs rounded-md px-2 py-0.5 flex items-center gap-1 ${
+            isReviewSoon(ev) ? 'bg-orange-500/15 text-orange-400' : 'bg-slate-700/40 text-slate-400'
+          }`}>
             <CalendarClock className="h-3 w-3" />
             Проверить {fmtDate(ev.review_date)}
           </span>
         )}
-        <span className="text-xs text-slate-600">
-          {fmtDate(ev.created_at)}
-          {ev.source !== 'user' && (
-            <span className="ml-1 text-slate-600">· {ev.source}</span>
-          )}
-        </span>
+        <span className="text-xs text-slate-600">{fmtDate(ev.created_at)}</span>
       </div>
 
-      {/* Archive outcome */}
-      {(ev.status === 'closed_success' || ev.status === 'closed_failed') && ev.outcome && (
-        <div className="mt-3 pl-11">
+      {/* Before → After comparison (review_due / archive) */}
+      {(status === 'review_due' || status === 'closed_success' || status === 'closed_failed') && (
+        <BeforeAfterBlock ev={ev} />
+      )}
+
+      {/* Outcome text */}
+      {ev.outcome && (
+        <div className="mt-2 pl-11">
           <p className="text-xs text-slate-400">
-            <span className="text-slate-500">Итог: </span>
-            {ev.outcome}
+            <span className="text-slate-500">Итог: </span>{ev.outcome}
           </p>
-          {ev.trigger_value_before != null && ev.outcome_value_after != null && (
-            <p className="text-xs text-slate-500 mt-0.5">
-              {ev.trigger_metric}: {ev.trigger_value_before}{' '}
-              <ArrowRight className="inline h-3 w-3 mx-0.5" />
-              {ev.outcome_value_after}
-            </p>
-          )}
         </div>
       )}
 
-      {/* Action buttons (open events only) */}
+      {/* Action buttons */}
       {isOpen && (
         <div className="flex gap-2 mt-3 pl-11 flex-wrap">
           {status === 'proposed' && (
             <>
-              <button
-                onClick={() => doStatus('accepted')}
-                disabled={patch.isPending}
-                className="text-xs px-2.5 py-1 rounded-lg bg-indigo-500/15 text-indigo-300 border border-indigo-500/25 hover:bg-indigo-500/25 transition-colors disabled:opacity-50"
-              >
+              <button onClick={() => doStatus('accepted')} disabled={patch.isPending}
+                className="text-xs px-2.5 py-1 rounded-lg bg-indigo-500/15 text-indigo-300 border border-indigo-500/25 hover:bg-indigo-500/25 transition-colors disabled:opacity-50">
                 Принять
               </button>
-              <button
-                onClick={() => doStatus('dismissed')}
-                disabled={patch.isPending}
-                className="text-xs px-2.5 py-1 rounded-lg bg-slate-700/40 text-slate-400 border border-slate-600/30 hover:bg-slate-700 transition-colors disabled:opacity-50"
-              >
+              <button onClick={() => doStatus('dismissed')} disabled={patch.isPending}
+                className="text-xs px-2.5 py-1 rounded-lg bg-slate-700/40 text-slate-400 border border-slate-600/30 hover:bg-slate-700 transition-colors disabled:opacity-50">
                 Отклонить
               </button>
             </>
           )}
           {status === 'accepted' && (
-            <button
-              onClick={() => doStatus('in_progress')}
-              disabled={patch.isPending}
-              className="text-xs px-2.5 py-1 rounded-lg bg-amber-500/15 text-amber-400 border border-amber-500/25 hover:bg-amber-500/25 transition-colors disabled:opacity-50"
-            >
+            <button onClick={() => doStatus('in_progress')} disabled={patch.isPending}
+              className="text-xs px-2.5 py-1 rounded-lg bg-amber-500/15 text-amber-400 border border-amber-500/25 hover:bg-amber-500/25 transition-colors disabled:opacity-50">
               Взять в работу
             </button>
           )}
           {status === 'in_progress' && (
-            <button
-              onClick={() => doStatus('review_due')}
-              disabled={patch.isPending}
-              className="text-xs px-2.5 py-1 rounded-lg bg-orange-500/15 text-orange-400 border border-orange-500/25 hover:bg-orange-500/25 transition-colors disabled:opacity-50"
-            >
+            <button onClick={() => doStatus('review_due')} disabled={patch.isPending}
+              className="text-xs px-2.5 py-1 rounded-lg bg-orange-500/15 text-orange-400 border border-orange-500/25 hover:bg-orange-500/25 transition-colors disabled:opacity-50">
               На проверку
             </button>
           )}
           {(status === 'in_progress' || status === 'review_due') && (
             <>
-              <button
-                onClick={() => doStatus('closed_success', { outcome: 'Выполнено' })}
+              <button onClick={() => doStatus('closed_success', { outcome: 'Сработало — выполнено' })}
                 disabled={patch.isPending}
-                className="text-xs px-2.5 py-1 rounded-lg bg-emerald-500/15 text-emerald-400 border border-emerald-500/25 hover:bg-emerald-500/25 transition-colors disabled:opacity-50"
-              >
-                ✓ Выполнено
+                className="text-xs px-2.5 py-1 rounded-lg bg-emerald-500/15 text-emerald-400 border border-emerald-500/25 hover:bg-emerald-500/25 transition-colors disabled:opacity-50">
+                ✓ Сработало
               </button>
-              <button
-                onClick={() => doStatus('closed_failed', { outcome: 'Не выполнено' })}
+              <button onClick={() => doStatus('closed_failed', { outcome: 'Не помогло' })}
                 disabled={patch.isPending}
-                className="text-xs px-2.5 py-1 rounded-lg bg-red-500/15 text-red-400 border border-red-500/25 hover:bg-red-500/25 transition-colors disabled:opacity-50"
-              >
-                ✕ Не выполнено
+                className="text-xs px-2.5 py-1 rounded-lg bg-red-500/15 text-red-400 border border-red-500/25 hover:bg-red-500/25 transition-colors disabled:opacity-50">
+                ✕ Не помогло
               </button>
             </>
           )}
         </div>
+      )}
+    </div>
+  )
+}
+
+// ── Scan-now button ────────────────────────────────────────────────────────
+
+function ScanNowButton() {
+  const qc = useQueryClient()
+  const [scanning, setScanning] = useState(false)
+  const [result, setResult] = useState<{ level_a: number; level_b: number; total: number } | null>(null)
+
+  async function handleScan() {
+    setScanning(true)
+    setResult(null)
+    try {
+      const res = await api.post<{ level_a: number; level_b: number; total: number }>(
+        '/api/v1/agent-events/scan-now'
+      )
+      setResult(res.data)
+      qc.invalidateQueries({ queryKey: ['agent-events'] })
+      qc.invalidateQueries({ queryKey: ['agent-events-insights'] })
+    } catch { /* ignore */ } finally {
+      setScanning(false)
+    }
+  }
+
+  return (
+    <div className="flex items-center gap-3">
+      <button
+        onClick={handleScan}
+        disabled={scanning}
+        className="flex items-center gap-2 px-3 py-1.5 text-sm font-medium rounded-lg bg-violet-500/15 text-violet-300 border border-violet-500/25 hover:bg-violet-500/25 disabled:opacity-50 transition-colors"
+      >
+        {scanning ? (
+          <Loader2 className="h-4 w-4 animate-spin" />
+        ) : (
+          <ScanSearch className="h-4 w-4" />
+        )}
+        {scanning ? 'Осматриваю…' : 'Осмотреть агентство сейчас'}
+      </button>
+      {result && (
+        <span className="text-xs text-slate-400">
+          {result.total === 0
+            ? 'Новых проблем не найдено'
+            : `Создано событий: ${result.total} (A: ${result.level_a}, B: ${result.level_b})`}
+        </span>
       )}
     </div>
   )
@@ -404,7 +478,7 @@ export default function AgentEventsPage() {
 
   return (
     <div className="flex flex-col h-full">
-      <Header title="События мозга" />
+      <Header title="События мозга" actions={<ScanNowButton />} />
 
       {/* Sub-nav */}
       <div className="flex gap-1 px-6 pt-3 pb-0 border-b border-slate-700/50">

@@ -272,6 +272,24 @@ async def patch_agent_event(
 
 # ── GET /agent-events/insights ────────────────────────────────────────────────
 
+@router.post("/scan-now")
+async def trigger_watcher_scan(
+    _: Any = Depends(require_owner),
+    tenant: Tenant = Depends(get_current_tenant),
+    db: AsyncSession = Depends(get_db),
+):
+    """Immediately run a watcher scan for the current tenant (manual trigger).
+    Returns how many events were created at each level.
+    """
+    from services.agent_watcher import watcher_scan
+    result = await watcher_scan(db, tenant.id)
+    logger.info(
+        "manual scan-now tenant=%s level_a=%s level_b=%s total=%s",
+        tenant.id, result.get("level_a"), result.get("level_b"), result.get("total"),
+    )
+    return result
+
+
 @router.get("/insights", response_model=list[AgentEventOut])
 async def get_agent_insights(
     limit: int = Query(3, ge=1, le=10),
