@@ -549,6 +549,14 @@ _PATCHES: list[tuple[str, bool]] = [
     ("CREATE INDEX IF NOT EXISTS idx_scripts_user_folder ON scripts(user_id, folder_id)", False),
 ]
 
+# Catalog tables that should have UNIQUE(tenant_id, name).
+# Each entry: (table_name, constraint_name)
+_CATALOG_UNIQUE_CONSTRAINTS: list[tuple[str, str]] = [
+    ("chatters",       "uq_chatters_tenant_name"),
+    ("models",         "uq_models_tenant_name"),
+    ("shifts_catalog", "uq_shifts_catalog_tenant_name"),
+]
+
 
 async def apply_schema_patches(engine: AsyncEngine) -> None:
     """
@@ -569,6 +577,61 @@ async def apply_schema_patches(engine: AsyncEngine) -> None:
                 logger.exception("schema_patch critical: %s — %s", sql[:120], e)
                 raise
             logger.warning("schema_patch optional skip: %s — %s", sql[:120], e)
+
+    # ── UNIQUE(tenant_id, name) on catalog tables ──────────────────────────
+    # Check for duplicates first; skip the constraint if any remain so we
+    # never crash startup.  Once duplicates are cleaned the constraint applies
+    # on the next deploy automatically.
+    for tbl, cname in _CATALOG_UNIQUE_CONSTRAINTS:
+        try:
+            async with engine.begin() as conn:
+                # Check whether constraint already exists
+                exists = (await conn.execute(
+                    text(
+                        "SELECT EXISTS ("
+                        "  SELECT 1 FROM pg_constraint"
+                        "  WHERE conname = :cname"
+                        ")"
+                    ),
+                    {"cname": cname},
+                )).scalar()
+                if exists:
+                    continue  # already applied on a previous deploy
+
+                # Check for duplicate (tenant_id, name) pairs
+                dup_q = await conn.execute(
+                    text(
+                        f"SELECT tenant_id, name, COUNT(*) AS cnt"
+                        f" FROM {tbl}"
+                        f" GROUP BY tenant_id, name"
+                        f" HAVING COUNT(*) > 1"
+                        f" LIMIT 5"
+                    )
+                )
+                dups = dup_q.fetchall()
+                if dups:
+                    examples = "; ".join(
+                        f"tenant={r[0]} name={r[1]!r} count={r[2]}" for r in dups
+                    )
+                    logger.warning(
+                        "schema_patch: skipping UNIQUE(%s, tenant_id, name) — "
+                        "duplicates still present: %s",
+                        tbl, examples,
+                    )
+                    continue
+
+                await conn.execute(
+                    text(
+                        f"ALTER TABLE {tbl}"
+                        f" ADD CONSTRAINT {cname} UNIQUE (tenant_id, name)"
+                    )
+                )
+                logger.info("schema_patch: added UNIQUE constraint %s on %s", cname, tbl)
+        except Exception as e:
+            logger.warning(
+                "schema_patch optional skip: UNIQUE constraint %s on %s — %s",
+                cname, tbl, e,
+            )
 
 
 _UUID_RE = re.compile(

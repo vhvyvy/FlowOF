@@ -703,11 +703,24 @@ async def sync_notion_transactions_for_tenant(
     async with httpx.AsyncClient() as client:
         for raw_db in db_ids:
             canon = normalize_notion_db_id(raw_db) or raw_db
-            pages = await _query_all_pages(client, headers, canon)
+            db_inserted = db_updated = db_skipped = db_skipped_parse = db_skipped_no_model = 0
+
+            try:
+                pages = await _query_all_pages(client, headers, canon)
+            except Exception as e:
+                logger.warning(
+                    "notion sync: failed to query database %s — skipping: %s", canon[:8], e
+                )
+                await asyncio.sleep(0.2)
+                continue
+
             for row in pages:
                 notion_id = row.get("id")
                 if not notion_id:
                     continue
+
+                # ── Parse + resolve + upsert — all in a single per-row try/except ──
+                # A bad row must never abort the entire database or other databases.
                 try:
                     parsed = await _parse_row(
                         row,
@@ -720,7 +733,7 @@ async def sync_notion_transactions_for_tenant(
                         access_counter=access_counter,
                     )
                     date_val, model_name, chatter, amount, shift_id, shift_name = parsed
-                    # Диагностика: если chatter не найден — логируем свойства строки
+
                     if chatter is None:
                         props_debug = row.get("properties") or {}
                         chatter_keys = {
@@ -732,83 +745,107 @@ async def sync_notion_transactions_for_tenant(
                             (notion_id or "")[:8],
                             chatter_keys,
                         )
-                except Exception as e:
-                    logger.debug("parse row skip: %s", e)
-                    skipped += 1
-                    skipped_parse += 1
-                    continue
-                if not model_name or not str(model_name).strip():
-                    if allow_empty_model:
-                        model_name = "—"
-                    else:
-                        skipped += 1
-                        skipped_no_model += 1
-                        continue
 
-                synced_at = datetime.utcnow()
+                    if not model_name or not str(model_name).strip():
+                        if allow_empty_model:
+                            model_name = "—"
+                        else:
+                            db_skipped += 1
+                            db_skipped_no_model += 1
+                            continue
 
-                # ── Resolve catalog IDs for incoming row ──────────────────────
-                new_model_id   = await resolve_model_id(model_name, tenant_id, db)
-                new_chatter_id = await resolve_chatter_id(chatter, tenant_id, db)
-                shift_display  = str(shift_name or "").strip() or None
-                new_shift_id   = await resolve_shift_catalog_id(shift_display, tenant_id, db)
+                    synced_at = datetime.utcnow()
 
-                # ── UPSERT by (tenant_id, notion_id) ─────────────────────────
-                stmt = select(Transaction).where(
-                    Transaction.tenant_id == tenant_id,
-                    Transaction.notion_id == notion_id,
-                )
-                r = await db.execute(stmt)
-                existing = r.scalar_one_or_none()
+                    # Resolve catalog IDs
+                    new_model_id   = await resolve_model_id(model_name, tenant_id, db)
+                    new_chatter_id = await resolve_chatter_id(chatter, tenant_id, db)
+                    shift_display  = str(shift_name or "").strip() or None
+                    new_shift_id   = await resolve_shift_catalog_id(shift_display, tenant_id, db)
 
-                if existing:
-                    # GUARD: manual edits are authoritative — skip Notion overwrite
-                    if getattr(existing, "source", None) == "manual":
-                        skipped_manual += 1
-                        continue
-
-                    # Track old date so we recalc MMR for it too if date moved
-                    old_date = existing.date
-                    if old_date and old_date != date_val:
-                        affected.add((tenant_id, old_date))
-
-                    # UPDATE
-                    existing.date              = date_val
-                    existing.model             = model_name
-                    existing.chatter           = chatter
-                    existing.amount            = Decimal(str(amount))
-                    existing.shift_id          = shift_id
-                    existing.shift_name        = shift_name
-                    existing.model_id          = new_model_id
-                    existing.chatter_id        = new_chatter_id
-                    existing.shift_catalog_id  = new_shift_id
-                    existing.notion_database_id = canon
-                    existing.synced_at         = synced_at
-                    updated += 1
-                else:
-                    # INSERT
-                    db.add(
-                        Transaction(
-                            tenant_id=tenant_id,
-                            notion_id=notion_id,
-                            date=date_val,
-                            model=model_name,
-                            chatter=chatter,
-                            amount=Decimal(str(amount)),
-                            shift_id=shift_id,
-                            shift_name=shift_name,
-                            model_id=new_model_id,
-                            chatter_id=new_chatter_id,
-                            shift_catalog_id=new_shift_id,
-                            notion_database_id=canon,
-                            synced_at=synced_at,
-                            source="notion",
-                        )
+                    # UPSERT by (tenant_id, notion_id)
+                    stmt = select(Transaction).where(
+                        Transaction.tenant_id == tenant_id,
+                        Transaction.notion_id == notion_id,
                     )
-                    inserted += 1
+                    r = await db.execute(stmt)
+                    existing = r.scalars().first()  # tolerant: first row if dupes exist
 
-                if date_val:
-                    affected.add((tenant_id, date_val))
+                    if existing:
+                        if getattr(existing, "source", None) == "manual":
+                            skipped_manual += 1
+                            continue
+
+                        old_date = existing.date
+                        if old_date and old_date != date_val:
+                            affected.add((tenant_id, old_date))
+
+                        existing.date               = date_val
+                        existing.model              = model_name
+                        existing.chatter            = chatter
+                        existing.amount             = Decimal(str(amount))
+                        existing.shift_id           = shift_id
+                        existing.shift_name         = shift_name
+                        existing.model_id           = new_model_id
+                        existing.chatter_id         = new_chatter_id
+                        existing.shift_catalog_id   = new_shift_id
+                        existing.notion_database_id = canon
+                        existing.synced_at          = synced_at
+                        db_updated += 1
+                    else:
+                        db.add(
+                            Transaction(
+                                tenant_id=tenant_id,
+                                notion_id=notion_id,
+                                date=date_val,
+                                model=model_name,
+                                chatter=chatter,
+                                amount=Decimal(str(amount)),
+                                shift_id=shift_id,
+                                shift_name=shift_name,
+                                model_id=new_model_id,
+                                chatter_id=new_chatter_id,
+                                shift_catalog_id=new_shift_id,
+                                notion_database_id=canon,
+                                synced_at=synced_at,
+                                source="notion",
+                            )
+                        )
+                        db_inserted += 1
+
+                    if date_val:
+                        affected.add((tenant_id, date_val))
+
+                except Exception as e:
+                    logger.warning(
+                        "notion sync: row %s db=%s skipped: %s",
+                        (notion_id or "")[:8], canon[:8], e,
+                    )
+                    db_skipped += 1
+                    db_skipped_parse += 1
+                    # Roll back any pending ORM state for this row so the session
+                    # stays clean for the next row.
+                    await db.rollback()
+                    continue
+
+            # ── Per-database commit ───────────────────────────────────────────
+            # Each database's data is committed independently so that a failure
+            # in a later database cannot roll back an earlier one.
+            try:
+                await db.commit()
+                inserted          += db_inserted
+                updated           += db_updated
+                skipped           += db_skipped
+                skipped_parse     += db_skipped_parse
+                skipped_no_model  += db_skipped_no_model
+                logger.info(
+                    "notion sync db=%s committed: inserted=%s updated=%s skipped=%s",
+                    canon[:8], db_inserted, db_updated, db_skipped,
+                )
+            except Exception as e:
+                logger.warning(
+                    "notion sync: commit failed for db=%s — rolling back: %s", canon[:8], e
+                )
+                await db.rollback()
 
             await asyncio.sleep(0.2)
 
@@ -820,8 +857,9 @@ async def sync_notion_transactions_for_tenant(
     await db.execute(
         update(Tenant).where(Tenant.id == tenant_id).values(last_sync_at=fin)
     )
-
     await db.commit()
+
+    # Assign team_id for all newly inserted rows across all databases
     n = await assign_transactions_by_notion_database(db)
     logger.info(
         "notion sync tenant=%s inserted=%s updated=%s skipped=%s skipped_manual=%s assign=%s affected_days=%s",
