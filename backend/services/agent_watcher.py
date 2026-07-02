@@ -14,6 +14,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 from datetime import date, datetime, timedelta
 from typing import Any
 
@@ -294,23 +295,93 @@ async def _level_a_scan(
     return created
 
 
+# Read-only tool names safe for the watcher B-scan.
+# Write tools (create_event, update_event_status, close_event) are
+# intentionally excluded — the LLM must not call them during a scan;
+# it should only return a JSON list of findings.
+_WATCHER_READ_TOOL_NAMES = frozenset({
+    "get_agency_summary",
+    "get_monthly_trend",
+    "get_top_chatters",
+    "get_chatter_detail",
+    "get_chatter_kpi_tool",
+    "get_model_performance",
+    "get_shift_breakdown",
+    "query_transactions_flexible",
+    "find_anomalies",
+    "get_open_events",
+})
+
+
+def _extract_json_array(text: str) -> list | None:
+    """Robustly extract a JSON array from LLM output.
+
+    Handles:
+      - Plain JSON array
+      - Wrapped in ```json ... ``` fences
+      - Array embedded in prose text
+    """
+    # 1. Try to parse the full text first
+    stripped = text.strip()
+    try:
+        parsed = json.loads(stripped)
+        if isinstance(parsed, list):
+            return parsed
+    except Exception:
+        pass
+
+    # 2. Strip markdown fences (``` or ```json)
+    fence_match = re.search(r"```(?:json)?\s*(.*?)```", stripped, re.DOTALL)
+    if fence_match:
+        candidate = fence_match.group(1).strip()
+        try:
+            parsed = json.loads(candidate)
+            if isinstance(parsed, list):
+                return parsed
+        except Exception:
+            pass
+
+    # 3. Find first [...] block in the text (handles prose around it)
+    array_match = re.search(r"\[.*?\]", stripped, re.DOTALL)
+    if array_match:
+        try:
+            parsed = json.loads(array_match.group())
+            if isinstance(parsed, list):
+                return parsed
+        except Exception:
+            pass
+
+    return None
+
+
 # ── LEVEL B — LLM trend detection ─────────────────────────────────────────────
 
-async def _level_b_scan(db: AsyncSession, tenant_id: int) -> int:
-    """Ask the LLM to find subtle 2-3 month sliding trends not caught by rules."""
+async def _level_b_scan(db: AsyncSession, tenant_id: int) -> tuple[int, str | None]:
+    """Ask the LLM to find subtle 2-3 month sliding trends not caught by rules.
+
+    Returns (created_count, error_str | None).
+    Never raises — all exceptions are caught and returned as error_str.
+    """
     api_key = os.getenv("ANTHROPIC_API_KEY", "")
     if not api_key:
         logger.debug("watcher level_b: ANTHROPIC_API_KEY not set, skipping")
-        return 0
-
-    from anthropic import AsyncAnthropic
-    from services.analyst_tools import TOOL_DESCRIPTIONS, TOOL_REGISTRY
-    from services.agency_profile import build_profile_context
+        return 0, None
 
     try:
+        from anthropic import AsyncAnthropic
+        from services.analyst_tools import TOOL_DESCRIPTIONS, TOOL_REGISTRY
+        from services.agency_profile import build_profile_context
+    except ImportError as exc:
+        return 0, f"import error: {exc}"
+
+    # Restrict to read-only tools — prevent LLM from accidentally writing events
+    watcher_tools = [t for t in TOOL_DESCRIPTIONS if t["name"] in _WATCHER_READ_TOOL_NAMES]
+
+    profile_ctx = ""
+    try:
         profile_ctx = await build_profile_context(db, tenant_id)
-    except Exception:
-        profile_ctx = ""
+    except Exception as exc:
+        logger.debug("watcher level_b: profile context failed: %s", exc)
         try:
             await db.rollback()
         except Exception:
@@ -323,98 +394,102 @@ async def _level_b_scan(db: AsyncSession, tenant_id: int) -> int:
         "Ты проактивный аналитик OnlyFans-агентства. Твоя задача — обнаружить "
         "ПОЛЗУЩИЕ риски: метрики, которые ухудшаются 2-3 месяца подряд, ещё не "
         "пробив критический порог, но уже в зоне риска.\n"
-        "Вызывай инструменты: get_monthly_trend, get_chatter_detail, get_chatter_kpi_tool "
-        "за последние 3 месяца. Ищи сползание RPC, Open Rate, выручки по чаттерам.\n"
-        "После анализа верни СТРОГО JSON-массив (без markdown):\n"
+        "Вызывай инструменты (только для чтения). Ищи сползание RPC, Open Rate, "
+        "выручки по чаттерам за последние 3 месяца.\n"
+        "В ФИНАЛЬНОМ ОТВЕТЕ верни ТОЛЬКО JSON-массив (без пояснений, без markdown):\n"
         '[{"title":"...","description":"...","entity_type":"chatter|model|agency",'
         '"entity_ref":"имя или null","trigger_metric":"...","trigger_value":число,'
         '"priority":"high|normal|low","review_in_days":число}]\n'
-        "Только реальные находки. Если трендов нет — верни [].\n"
-        "tenant_id не передавай — сервер подставляет его сам."
+        "Если трендов нет — верни [].\n"
+        "НЕ вызывай create_event или другие write-инструменты — только read."
     )
     if profile_ctx:
         system = profile_ctx + "\n\n" + system
 
     question = (
         "Проведи полный осмотр агентства за последние 3 месяца. "
-        "Найди все сползающие тренды и скрытые риски. Верни JSON-список."
+        "Найди все сползающие тренды и скрытые риски. "
+        "В ответе верни ТОЛЬКО JSON-массив findings."
     )
 
     messages: list[dict[str, Any]] = [{"role": "user", "content": question}]
     iterations = 0
     max_iter   = 6
     findings: list[dict] = []
+    raw_final  = ""
 
-    while iterations < max_iter:
-        iterations += 1
-        try:
-            resp = await client.messages.create(
-                model=analyst_model,
-                max_tokens=2000,
-                system=system,
-                tools=TOOL_DESCRIPTIONS,  # type: ignore[arg-type]
-                messages=messages,
-            )
-        except Exception as exc:
-            logger.warning("watcher level_b LLM call error tenant=%s: %s", tenant_id, exc)
-            break
-
-        messages.append({"role": "assistant", "content": resp.content})
-
-        if resp.stop_reason != "tool_use":
-            # Extract JSON from final text
-            for block in resp.content:
-                if not hasattr(block, "text"):
-                    continue
-                raw = block.text.strip()
-                if raw.startswith("```"):
-                    raw = raw.split("```")[1]
-                    if raw.startswith("json"):
-                        raw = raw[4:]
-                    raw = raw.strip()
-                try:
-                    parsed = json.loads(raw)
-                    if isinstance(parsed, list):
-                        findings = parsed
-                except Exception:
-                    pass
-            break
-
-        # Handle tool calls
-        tool_results: list[dict[str, Any]] = []
-        for block in resp.content:
-            if block.type != "tool_use":
-                continue
-            fn = TOOL_REGISTRY.get(block.name)
-            if fn is None:
-                tool_results.append({
-                    "type": "tool_result",
-                    "tool_use_id": block.id,
-                    "content": json.dumps({"error": "tool not found"}),
-                    "is_error": True,
-                })
-                continue
+    try:
+        while iterations < max_iter:
+            iterations += 1
             try:
-                result = await fn(db, tenant_id, **(block.input or {}))
-                tool_results.append({
-                    "type": "tool_result",
-                    "tool_use_id": block.id,
-                    "content": json.dumps(result, ensure_ascii=False, default=str),
-                })
+                resp = await client.messages.create(
+                    model=analyst_model,
+                    max_tokens=2000,
+                    system=system,
+                    tools=watcher_tools,  # type: ignore[arg-type]
+                    messages=messages,
+                )
             except Exception as exc:
-                logger.warning("watcher level_b tool=%s error: %s", block.name, exc)
-                try:
-                    await db.rollback()
-                except Exception:
-                    pass
-                tool_results.append({
-                    "type": "tool_result",
-                    "tool_use_id": block.id,
-                    "content": json.dumps({"error": str(exc)}),
-                    "is_error": True,
-                })
+                logger.warning("watcher level_b LLM call error tenant=%s: %s", tenant_id, exc)
+                return 0, f"LLM call failed: {exc}"
 
-        messages.append({"role": "user", "content": tool_results})
+            messages.append({"role": "assistant", "content": resp.content})
+
+            if resp.stop_reason != "tool_use":
+                # Extract JSON from final response
+                for block in resp.content:
+                    if hasattr(block, "text"):
+                        raw_final = block.text
+                        parsed = _extract_json_array(raw_final)
+                        if parsed is not None:
+                            findings = parsed
+                        else:
+                            logger.warning(
+                                "watcher level_b: could not parse JSON from response "
+                                "tenant=%s raw=%r", tenant_id, raw_final[:300]
+                            )
+                        break
+                break
+
+            # Handle tool calls (read-only tools only)
+            tool_results: list[dict[str, Any]] = []
+            for block in resp.content:
+                if block.type != "tool_use":
+                    continue
+                fn = TOOL_REGISTRY.get(block.name)
+                if fn is None or block.name not in _WATCHER_READ_TOOL_NAMES:
+                    tool_results.append({
+                        "type": "tool_result",
+                        "tool_use_id": block.id,
+                        "content": json.dumps({"error": f"tool '{block.name}' not available in watcher"}),
+                        "is_error": True,
+                    })
+                    continue
+                try:
+                    result = await fn(db, tenant_id, **(block.input or {}))
+                    tool_results.append({
+                        "type": "tool_result",
+                        "tool_use_id": block.id,
+                        "content": json.dumps(result, ensure_ascii=False, default=str),
+                    })
+                except Exception as exc:
+                    logger.warning("watcher level_b tool=%s error: %s", block.name, exc)
+                    try:
+                        await db.rollback()
+                    except Exception:
+                        pass
+                    tool_results.append({
+                        "type": "tool_result",
+                        "tool_use_id": block.id,
+                        "content": json.dumps({"error": str(exc)}),
+                        "is_error": True,
+                    })
+
+            messages.append({"role": "user", "content": tool_results})
+
+    except Exception as exc:
+        logger.exception("watcher level_b unexpected error tenant=%s: %s", tenant_id, exc)
+        return 0, str(exc)
 
     # Create events for each finding
     created = 0
@@ -427,39 +502,89 @@ async def _level_b_scan(db: AsyncSession, tenant_id: int) -> int:
                 entity_type=f.get("entity_type"),
                 entity_ref=f.get("entity_ref"),
                 trigger_metric=f.get("trigger_metric"),
-                trigger_value_before=float(f["trigger_value"]) if f.get("trigger_value") is not None else None,
+                trigger_value_before=(
+                    float(f["trigger_value"])
+                    if f.get("trigger_value") is not None else None
+                ),
                 priority=f.get("priority", "normal"),
-                review_in_days=int(f.get("review_in_days", 14)),
+                review_in_days=int(f.get("review_in_days") or 14),
             )
             if ok:
                 created += 1
         except Exception as exc:
             logger.warning("watcher level_b create event error: %s", exc)
 
-    return created
+    return created, None
 
 
 # ── PUBLIC: watcher_scan ───────────────────────────────────────────────────────
 
-async def watcher_scan(db: AsyncSession, tenant_id: int) -> dict[str, int]:
+async def watcher_scan(db: AsyncSession, tenant_id: int) -> dict:
     """Run full proactive scan: Level A (rules) + Level B (LLM trends).
 
-    Returns {"level_a": N, "level_b": M, "total": N+M}
+    Returns:
+        {
+            "level_a": N,   # events created by threshold rules
+            "level_b": M,   # events created by LLM trend detection
+            "total": N+M,
+            "errors": []    # list of error strings from failed sub-steps
+        }
+
+    Never raises — partial failures are captured in the "errors" list so the
+    caller can always return a structured response.
     """
     logger.info("watcher_scan START tenant=%s", tenant_id)
 
-    from services.agency_profile import get_agency_profile
-    profile = await get_agency_profile(db, tenant_id)
+    errors: list[str] = []
+    a = 0
+    b = 0
 
-    a = await _level_a_scan(db, tenant_id, profile)
-    b = await _level_b_scan(db, tenant_id)
+    # Load agency profile (used by Level A thresholds)
+    profile: dict = {}
+    try:
+        from services.agency_profile import get_agency_profile
+        profile = await get_agency_profile(db, tenant_id)
+    except Exception as exc:
+        err = f"profile load failed: {exc}"
+        logger.warning("watcher_scan %s tenant=%s", err, tenant_id)
+        errors.append(err)
+        try:
+            await db.rollback()
+        except Exception:
+            pass
+
+    # ── Level A: threshold rules ───────────────────────────────────────────────
+    try:
+        a = await _level_a_scan(db, tenant_id, profile)
+    except Exception as exc:
+        err = f"level_a crashed: {exc}"
+        logger.exception("watcher_scan %s tenant=%s", err, tenant_id)
+        errors.append(err)
+        try:
+            await db.rollback()
+        except Exception:
+            pass
+
+    # ── Level B: LLM trend detection ──────────────────────────────────────────
+    try:
+        b, b_err = await _level_b_scan(db, tenant_id)
+        if b_err:
+            errors.append(f"level_b: {b_err}")
+    except Exception as exc:
+        err = f"level_b crashed: {exc}"
+        logger.exception("watcher_scan %s tenant=%s", err, tenant_id)
+        errors.append(err)
+        try:
+            await db.rollback()
+        except Exception:
+            pass
 
     total = a + b
     logger.info(
-        "watcher_scan DONE tenant=%s level_a=%s level_b=%s total=%s",
-        tenant_id, a, b, total,
+        "watcher_scan DONE tenant=%s level_a=%s level_b=%s total=%s errors=%s",
+        tenant_id, a, b, total, errors,
     )
-    return {"level_a": a, "level_b": b, "total": total}
+    return {"level_a": a, "level_b": b, "total": total, "errors": errors}
 
 
 # ── PUBLIC: watcher_review ─────────────────────────────────────────────────────

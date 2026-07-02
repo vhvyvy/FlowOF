@@ -284,8 +284,9 @@ async def trigger_watcher_scan(
     from services.agent_watcher import watcher_scan
     result = await watcher_scan(db, tenant.id)
     logger.info(
-        "manual scan-now tenant=%s level_a=%s level_b=%s total=%s",
-        tenant.id, result.get("level_a"), result.get("level_b"), result.get("total"),
+        "manual scan-now tenant=%s level_a=%s level_b=%s total=%s errors=%s",
+        tenant.id, result.get("level_a"), result.get("level_b"),
+        result.get("total"), result.get("errors"),
     )
     return result
 

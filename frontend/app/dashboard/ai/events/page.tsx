@@ -263,28 +263,34 @@ function EventCard({ ev }: { ev: AgentEvent }) {
 
 // ── Scan-now button ────────────────────────────────────────────────────────
 
+interface ScanResult {
+  level_a: number
+  level_b: number
+  total: number
+  errors?: string[]
+}
+
 function ActionButtons() {
   const qc = useQueryClient()
   const [scanning, setScanning]         = useState(false)
   const [reviewing, setReviewing]       = useState(false)
-  const [scanResult, setScanResult]     = useState<{ level_a: number; level_b: number; total: number } | null>(null)
+  const [scanResult, setScanResult]     = useState<ScanResult | null>(null)
   const [reviewResult, setReviewResult] = useState<{ checked: number; updated: number } | null>(null)
-  const [scanError, setScanError]       = useState(false)
+  const [scanError, setScanError]       = useState<string | null>(null)
   const [reviewError, setReviewError]   = useState(false)
 
   async function handleScan() {
     setScanning(true)
     setScanResult(null)
-    setScanError(false)
+    setScanError(null)
     try {
-      const res = await api.post<{ level_a: number; level_b: number; total: number }>(
-        '/api/v1/agent-events/scan-now'
-      )
+      const res = await api.post<ScanResult>('/api/v1/agent-events/scan-now')
       setScanResult(res.data)
       qc.invalidateQueries({ queryKey: ['agent-events'] })
       qc.invalidateQueries({ queryKey: ['agent-events-insights'] })
-    } catch {
-      setScanError(true)
+    } catch (err: unknown) {
+      const msg = (err as { response?: { data?: { detail?: string } } })?.response?.data?.detail
+      setScanError(msg || 'Ошибка скана')
     } finally {
       setScanning(false)
     }
@@ -313,13 +319,26 @@ function ActionButtons() {
     <div className="flex items-center gap-2 flex-wrap justify-end">
       {/* Scan result / error inline */}
       {!scanning && scanResult && (
-        <span className={`text-xs ${scanResult.total > 0 ? 'text-violet-400' : 'text-slate-500'}`}>
-          {scanResult.total === 0
+        <span
+          className={`text-xs max-w-xs truncate ${
+            (scanResult.errors?.length ?? 0) > 0
+              ? 'text-amber-400'
+              : scanResult.total > 0
+              ? 'text-violet-400'
+              : 'text-slate-500'
+          }`}
+          title={scanResult.errors?.join('; ')}
+        >
+          {scanResult.total === 0 && !(scanResult.errors?.length)
             ? '✓ Новых проблем нет'
-            : `+${scanResult.total} событий (прав: ${scanResult.level_a}, тренды: ${scanResult.level_b})`}
+            : scanResult.total === 0 && (scanResult.errors?.length ?? 0) > 0
+            ? `⚠ Создано: 0, ошибок: ${scanResult.errors!.length}`
+            : `Создано: ${scanResult.total} (А:${scanResult.level_a} Б:${scanResult.level_b})${
+                (scanResult.errors?.length ?? 0) > 0 ? ` ⚠ ${scanResult.errors!.length} ош.` : ''
+              }`}
         </span>
       )}
-      {!scanning && scanError && <span className="text-xs text-red-400">Ошибка скана</span>}
+      {!scanning && scanError && <span className="text-xs text-red-400">{scanError}</span>}
 
       {/* Review result */}
       {!reviewing && reviewResult && (
