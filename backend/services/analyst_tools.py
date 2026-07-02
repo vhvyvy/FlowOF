@@ -28,6 +28,68 @@ def _month_range(year: int, month: int) -> tuple[date, date]:
     return date(year, month, 1), date(year, month, last)
 
 
+def _norm_chatter_name(raw: str) -> str:
+    """Canonical form used for matching: strip whitespace, strip leading '@', lowercase.
+    Mirrors the logic in schema_patch._norm_name / catalog_resolver.
+    """
+    return raw.strip().lstrip('@').strip().lower()
+
+
+# SQL expression that normalises a stored name the same way.
+# Usage: WHERE _SQL_NORM_NAME_EXPR('some_col') = :norm_name
+_SQL_NORM_CHATTER = "LOWER(TRIM(LEADING '@' FROM TRIM(COALESCE({col}, ''))))"
+
+
+async def resolve_chatter_for_tools(
+    db: AsyncSession,
+    tenant_id: int,
+    chatter_name: str,
+) -> tuple[int | None, str | None]:
+    """Return (chatter_id, canonical_display_name) for a name string.
+
+    Matching is tolerant of leading '@', case, and surrounding whitespace.
+    Returns (None, None) if no matching chatter is found at all.
+    First tries the chatters catalog, then falls back to transaction text field.
+    """
+    norm = _norm_chatter_name(chatter_name)
+
+    # 1. Try catalog lookup
+    cat_row = (await db.execute(
+        text(
+            f"""
+            SELECT id, name FROM chatters
+            WHERE tenant_id = :tid
+              AND {_SQL_NORM_CHATTER.format(col='name')} = :norm
+            ORDER BY active DESC NULLS LAST, id
+            LIMIT 1
+            """
+        ),
+        {"tid": tenant_id, "norm": norm},
+    )).fetchone()
+
+    if cat_row:
+        return int(cat_row[0]), str(cat_row[1])
+
+    # 2. Fallback: check transaction text column (legacy rows without FK)
+    tx_row = (await db.execute(
+        text(
+            f"""
+            SELECT DISTINCT t.chatter
+            FROM transactions t
+            WHERE t.tenant_id = :tid
+              AND {_SQL_NORM_CHATTER.format(col='t.chatter')} = :norm
+            LIMIT 1
+            """
+        ),
+        {"tid": tenant_id, "norm": norm},
+    )).fetchone()
+
+    if tx_row:
+        return None, str(tx_row[0])   # chatter_id unknown, but name found
+
+    return None, None
+
+
 def _prev_month(year: int, month: int) -> tuple[int, int]:
     return (year - 1, 12) if month == 1 else (year, month - 1)
 
@@ -178,23 +240,66 @@ async def get_chatter_detail(
     chatter_name: str,
     months_back: int = 6,
 ) -> dict:
-    """Month-by-month revenue history for a specific chatter."""
-    # Determine the date cutoff
-    today = date.today()
-    if today.month - months_back > 0:
-        cutoff_year, cutoff_month = today.year, today.month - months_back
-    else:
-        back = months_back - today.month
-        cutoff_year  = today.year - 1 - (back // 12)
-        cutoff_month = 12 - (back % 12)
-        if cutoff_month <= 0:
-            cutoff_year  -= 1
-            cutoff_month += 12
-    cutoff = date(cutoff_year, cutoff_month, 1)
+    """Month-by-month revenue history for a specific chatter.
 
-    rows = (await db.execute(
-        text(
-            """
+    Matching is tolerant of '@' prefix, case, and whitespace.
+    Falls back to full history if the chatter has no activity in the
+    requested window but does exist elsewhere in the database.
+    """
+    # ── Resolve chatter (tolerant name matching) ─────────────────────────────
+    chatter_id, canonical_name = await resolve_chatter_for_tools(db, tenant_id, chatter_name)
+
+    if chatter_id is None and canonical_name is None:
+        return {"chatter": chatter_name, "found": False, "history": []}
+
+    display_name = canonical_name or chatter_name
+
+    # ── Build WHERE predicate using resolved identity ─────────────────────────
+    # Match by chatter_id (FK) if available, AND/OR by normalised text fields.
+    norm = _norm_chatter_name(chatter_name)
+    id_clause = ""
+    params: dict[str, Any] = {"tid": tenant_id, "norm": norm}
+
+    if chatter_id is not None:
+        id_clause = "OR t.chatter_id = :cid"
+        params["cid"] = chatter_id
+
+    name_match_sql = f"""(
+        {_SQL_NORM_CHATTER.format(col='COALESCE(c.name, t.chatter)')} = :norm
+        {id_clause}
+    )"""
+
+    # ── Cutoff date ───────────────────────────────────────────────────────────
+    def _months_ago(n: int) -> date:
+        today = date.today()
+        m = today.month - n
+        y = today.year
+        while m <= 0:
+            m += 12
+            y -= 1
+        return date(y, m, 1)
+
+    cutoff = _months_ago(months_back)
+
+    # ── Query ─────────────────────────────────────────────────────────────────
+    base_sql = f"""
+        SELECT
+            TO_CHAR(DATE_TRUNC('month', t.date), 'YYYY-MM') AS month,
+            SUM(t.amount)  AS revenue,
+            COUNT(t.id)    AS tx_count
+        FROM transactions t
+        LEFT JOIN chatters c ON c.id = t.chatter_id AND c.tenant_id = t.tenant_id
+        WHERE t.tenant_id = :tid
+          AND {name_match_sql}
+          AND t.date >= :cutoff
+        GROUP BY 1
+        ORDER BY 1 DESC
+    """
+    rows = (await db.execute(text(base_sql), {**params, "cutoff": cutoff})).fetchall()
+
+    # If nothing found within window, expand to full history (chatter may be inactive)
+    if not rows:
+        all_sql = f"""
             SELECT
                 TO_CHAR(DATE_TRUNC('month', t.date), 'YYYY-MM') AS month,
                 SUM(t.amount)  AS revenue,
@@ -202,20 +307,16 @@ async def get_chatter_detail(
             FROM transactions t
             LEFT JOIN chatters c ON c.id = t.chatter_id AND c.tenant_id = t.tenant_id
             WHERE t.tenant_id = :tid
-              AND t.date >= :cutoff
-              AND (
-                  LOWER(COALESCE(c.name, t.chatter, '')) = LOWER(:name)
-                  OR LOWER(t.chatter) = LOWER(:name)
-              )
+              AND {name_match_sql}
             GROUP BY 1
             ORDER BY 1 DESC
-            """
-        ),
-        {"tid": tenant_id, "cutoff": cutoff, "name": chatter_name},
-    )).fetchall()
+            LIMIT 36
+        """
+        rows = (await db.execute(text(all_sql), params)).fetchall()
 
     if not rows:
-        return {"chatter": chatter_name, "found": False, "history": []}
+        return {"chatter": display_name, "found": False, "history": [],
+                "note": f"Чаттер '{display_name}' найден в справочнике, но транзакций нет."}
 
     history = [
         {
@@ -232,12 +333,12 @@ async def get_chatter_detail(
         trend = "рост" if revenues[0] > revenues[-1] else "снижение"
 
     return {
-        "chatter":  chatter_name,
-        "found":    True,
-        "months_shown": len(history),
+        "chatter":             display_name,
+        "found":               True,
+        "months_shown":        len(history),
         "avg_monthly_revenue": avg,
-        "trend":    trend,
-        "history":  history,
+        "trend":               trend,
+        "history":             history,
     }
 
 
