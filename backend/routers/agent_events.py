@@ -290,6 +290,24 @@ async def trigger_watcher_scan(
     return result
 
 
+@router.post("/review-now")
+async def trigger_watcher_review(
+    _: Any = Depends(require_owner),
+    tenant: Tenant = Depends(get_current_tenant),
+    db: AsyncSession = Depends(get_db),
+):
+    """Immediately run event review for all overdue events (manual trigger).
+    Returns how many events were checked and updated.
+    """
+    from services.agent_watcher import watcher_review
+    result = await watcher_review(db, tenant.id)
+    logger.info(
+        "manual review-now tenant=%s checked=%s updated=%s",
+        tenant.id, result.get("checked"), result.get("updated"),
+    )
+    return result
+
+
 @router.get("/insights", response_model=list[AgentEventOut])
 async def get_agent_insights(
     limit: int = Query(3, ge=1, le=10),

@@ -263,61 +263,97 @@ function EventCard({ ev }: { ev: AgentEvent }) {
 
 // ── Scan-now button ────────────────────────────────────────────────────────
 
-function ScanNowButton() {
+function ActionButtons() {
   const qc = useQueryClient()
-  const [scanning, setScanning] = useState(false)
-  const [result, setResult] = useState<{ level_a: number; level_b: number; total: number } | null>(null)
-  const [error, setError] = useState(false)
+  const [scanning, setScanning]         = useState(false)
+  const [reviewing, setReviewing]       = useState(false)
+  const [scanResult, setScanResult]     = useState<{ level_a: number; level_b: number; total: number } | null>(null)
+  const [reviewResult, setReviewResult] = useState<{ checked: number; updated: number } | null>(null)
+  const [scanError, setScanError]       = useState(false)
+  const [reviewError, setReviewError]   = useState(false)
 
   async function handleScan() {
     setScanning(true)
-    setResult(null)
-    setError(false)
+    setScanResult(null)
+    setScanError(false)
     try {
       const res = await api.post<{ level_a: number; level_b: number; total: number }>(
         '/api/v1/agent-events/scan-now'
       )
-      setResult(res.data)
+      setScanResult(res.data)
       qc.invalidateQueries({ queryKey: ['agent-events'] })
       qc.invalidateQueries({ queryKey: ['agent-events-insights'] })
     } catch {
-      setError(true)
+      setScanError(true)
     } finally {
       setScanning(false)
     }
   }
 
+  async function handleReview() {
+    setReviewing(true)
+    setReviewResult(null)
+    setReviewError(false)
+    try {
+      const res = await api.post<{ checked: number; updated: number }>(
+        '/api/v1/agent-events/review-now'
+      )
+      setReviewResult(res.data)
+      qc.invalidateQueries({ queryKey: ['agent-events'] })
+    } catch {
+      setReviewError(true)
+    } finally {
+      setReviewing(false)
+    }
+  }
+
+  const busy = scanning || reviewing
+
   return (
-    <div className="flex items-center gap-3 flex-wrap justify-end">
+    <div className="flex items-center gap-2 flex-wrap justify-end">
+      {/* Scan result / error inline */}
+      {!scanning && scanResult && (
+        <span className={`text-xs ${scanResult.total > 0 ? 'text-violet-400' : 'text-slate-500'}`}>
+          {scanResult.total === 0
+            ? '✓ Новых проблем нет'
+            : `+${scanResult.total} событий (прав: ${scanResult.level_a}, тренды: ${scanResult.level_b})`}
+        </span>
+      )}
+      {!scanning && scanError && <span className="text-xs text-red-400">Ошибка скана</span>}
+
+      {/* Review result */}
+      {!reviewing && reviewResult && (
+        <span className="text-xs text-slate-500">
+          {reviewResult.updated === 0
+            ? '✓ Проверено: изменений нет'
+            : `Проверено ${reviewResult.checked}, обновлено ${reviewResult.updated}`}
+        </span>
+      )}
+      {!reviewing && reviewError && <span className="text-xs text-red-400">Ошибка проверки</span>}
+
+      {/* Review-now button */}
       <button
-        onClick={handleScan}
-        disabled={scanning}
-        className="flex items-center gap-2 px-4 py-2 text-sm font-semibold rounded-xl bg-violet-600 hover:bg-violet-500 disabled:opacity-60 text-white shadow-sm transition-colors"
+        onClick={handleReview}
+        disabled={busy}
+        title="Проверить события с истёкшей датой (watcher_review)"
+        className="flex items-center gap-1.5 px-3 py-1.5 text-sm font-medium rounded-lg border border-slate-600/50 bg-slate-800/60 hover:bg-slate-700 text-slate-300 disabled:opacity-50 transition-colors"
       >
-        {scanning ? (
-          <Loader2 className="h-4 w-4 animate-spin shrink-0" />
-        ) : (
-          <ScanSearch className="h-4 w-4 shrink-0" />
-        )}
-        {scanning ? 'Мозг осматривает агентство…' : 'Осмотреть агентство сейчас'}
+        {reviewing ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <RefreshCw className="h-3.5 w-3.5" />}
+        {reviewing ? 'Проверяю…' : 'Проверить события'}
       </button>
 
-      {scanning && (
-        <span className="text-xs text-slate-500 animate-pulse">
-          Анализирую тренды, займёт 10–20 сек…
-        </span>
-      )}
+      {/* Scan-now button (primary) */}
+      <button
+        onClick={handleScan}
+        disabled={busy}
+        className="flex items-center gap-1.5 px-4 py-2 text-sm font-semibold rounded-xl bg-violet-600 hover:bg-violet-500 disabled:opacity-60 text-white shadow-sm transition-colors"
+      >
+        {scanning ? <Loader2 className="h-4 w-4 animate-spin shrink-0" /> : <ScanSearch className="h-4 w-4 shrink-0" />}
+        {scanning ? 'Осматриваю…' : 'Осмотреть агентство'}
+      </button>
 
-      {!scanning && result && (
-        <span className={`text-xs font-medium ${result.total > 0 ? 'text-violet-400' : 'text-slate-400'}`}>
-          {result.total === 0
-            ? '✓ Новых проблем не найдено'
-            : `Создано событий: ${result.total} (правила: ${result.level_a}, тренды: ${result.level_b})`}
-        </span>
-      )}
-
-      {!scanning && error && (
-        <span className="text-xs text-red-400">Ошибка при сканировании</span>
+      {(scanning || reviewing) && (
+        <span className="text-xs text-slate-500 animate-pulse">~10–20 сек…</span>
       )}
     </div>
   )
@@ -514,8 +550,8 @@ export default function AgentEventsPage() {
         </Link>
       </div>
 
-      {/* Tab bar + Scan button on same row */}
-      <div className="flex items-center justify-between gap-2 px-6 pt-4 pb-0">
+      {/* Sticky toolbar: tabs (left) + action buttons (right) */}
+      <div className="sticky top-0 z-20 flex items-center justify-between gap-2 px-6 py-3 bg-slate-900 border-b border-slate-700/50">
         <div className="flex gap-1">
           {TABS.map(({ id, label, icon: Icon }) => (
             <button
@@ -532,9 +568,7 @@ export default function AgentEventsPage() {
             </button>
           ))}
         </div>
-
-        {/* Scan-now button — always visible, right of tabs */}
-        <ScanNowButton />
+        <ActionButtons />
       </div>
 
       {/* Content */}

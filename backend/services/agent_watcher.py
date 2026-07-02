@@ -22,7 +22,23 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 logger = logging.getLogger("flowof.agent_watcher")
 
+# ── Name normalisation (mirrors analyst_tools._norm_chatter_name) ─────────────
+
+def _norm_ref(ref: str | None) -> str:
+    """Canonical entity_ref: strip whitespace + leading '@', lowercase."""
+    if not ref:
+        return ""
+    return ref.strip().lstrip("@").strip().lower()
+
+# SQL expression that applies the same normalisation to a stored column.
+_SQL_NORM = "LOWER(TRIM(LEADING '@' FROM TRIM(COALESCE({col},''))))"
+
 # ── Anti-spam helpers ─────────────────────────────────────────────────────────
+
+# All non-final statuses — an event in any of these means the entity is
+# already being tracked.
+_OPEN_STATUSES_TUPLE = "('proposed','accepted','in_progress','review_due')"
+
 
 async def _has_open_event(
     db: AsyncSession,
@@ -30,22 +46,26 @@ async def _has_open_event(
     entity_type: str | None,
     entity_ref: str | None,
 ) -> bool:
-    """Return True if there is already an open (non-closed, non-dismissed) event
-    for this (tenant, entity_type, entity_ref) combination."""
+    """Return True if there is already an open event for this entity.
+
+    'Open' = any non-final status: proposed, accepted, in_progress, review_due.
+    entity_ref is normalised: '@Vyach3slav' and 'Vyach3slav' are the same.
+    """
     if not entity_ref:
         return False
+    norm = _norm_ref(entity_ref)
     row = (await db.execute(
         text(
-            """
+            f"""
             SELECT 1 FROM agent_events
             WHERE tenant_id = :tid
               AND LOWER(COALESCE(entity_type,'')) = LOWER(COALESCE(:etype,''))
-              AND LOWER(COALESCE(entity_ref,''))  = LOWER(:eref)
-              AND status NOT IN ('closed_success','closed_failed','dismissed')
+              AND {_SQL_NORM.format(col='entity_ref')} = :norm
+              AND status IN {_OPEN_STATUSES_TUPLE}
             LIMIT 1
             """
         ),
-        {"tid": tenant_id, "etype": entity_type or "", "eref": entity_ref},
+        {"tid": tenant_id, "etype": entity_type or "", "norm": norm},
     )).fetchone()
     return row is not None
 
@@ -60,20 +80,21 @@ async def _recently_dismissed(
     """Return True if this entity was dismissed within the last `days` days."""
     if not entity_ref:
         return False
+    norm = _norm_ref(entity_ref)
     cutoff = datetime.utcnow() - timedelta(days=days)
     row = (await db.execute(
         text(
-            """
+            f"""
             SELECT 1 FROM agent_events
             WHERE tenant_id = :tid
               AND LOWER(COALESCE(entity_type,'')) = LOWER(COALESCE(:etype,''))
-              AND LOWER(COALESCE(entity_ref,''))  = LOWER(:eref)
+              AND {_SQL_NORM.format(col='entity_ref')} = :norm
               AND status = 'dismissed'
               AND closed_at >= :cutoff
             LIMIT 1
             """
         ),
-        {"tid": tenant_id, "etype": entity_type or "", "eref": entity_ref, "cutoff": cutoff},
+        {"tid": tenant_id, "etype": entity_type or "", "norm": norm, "cutoff": cutoff},
     )).fetchone()
     return row is not None
 
