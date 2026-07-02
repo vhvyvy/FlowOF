@@ -445,3 +445,197 @@ async def catalog_duplicates(
         "chatters":       {"duplicate_count": len(chatters_dupes),  "groups": chatters_dupes},
         "shifts_catalog": {"duplicate_count": len(shifts_dupes),    "groups": shifts_dupes},
     }
+
+
+# ── One-time chatter duplicate merge ─────────────────────────────────────────
+
+# Tables that may hold a chatter_id FK referencing chatters.id.
+# Extend this list if new FK tables appear.
+_CHATTER_FK_TABLES: list[tuple[str, str]] = [
+    ("transactions",       "chatter_id"),
+    ("chatter_mmr",        "chatter_id"),
+    ("chatter_adjustments","chatter_id"),
+    ("chatter_invites",    "chatter_id"),
+    ("mmr_events",         "chatter_id"),
+    ("chatter_kpi",        "chatter_id"),
+    ("chatter_kpi_mt",     "chatter_id"),
+    ("users",              "chatter_id"),
+    ("scripts",            "chatter_id"),
+    ("script_folders",     "chatter_id"),
+    ("season_results",     "chatter_id"),
+    ("chatter_onlymonster_mapping", "chatter_id"),
+]
+
+
+@router.post("/merge-chatter-duplicate")
+async def merge_chatter_duplicate(
+    tenant_id: int = Query(...),
+    keep_id: int = Query(..., description="ID записи-победителя (оставляем)"),
+    drop_id: int = Query(..., description="ID дубля (удаляем после перевески)"),
+    secret: str | None = Query(None),
+    db: AsyncSession = Depends(get_db),
+    x_admin_secret: str | None = Header(None, alias="X-Admin-Secret"),
+):
+    """
+    Одноразовое слияние двух записей в таблице chatters.
+    Все шаги выполняются в единой транзакции; при любой ошибке — rollback.
+    Только для использования через admin-secret.
+    """
+    if not ADMIN_SECRET or (x_admin_secret != ADMIN_SECRET and secret != ADMIN_SECRET):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Forbidden")
+
+    log: list[str] = []
+
+    # ── Шаг 1: предварительные проверки ──────────────────────────────────────
+    r_keep = await db.execute(
+        text("SELECT id, active FROM chatters WHERE id = :id AND tenant_id = :tid"),
+        {"id": keep_id, "tid": tenant_id},
+    )
+    keep_row = r_keep.mappings().one_or_none()
+    if keep_row is None:
+        raise HTTPException(400, f"keep_id={keep_id} не найден в chatters для tenant_id={tenant_id}")
+    if not keep_row["active"]:
+        raise HTTPException(400, f"keep_id={keep_id} существует, но active=false — остановлено")
+
+    r_drop = await db.execute(
+        text("SELECT id, active FROM chatters WHERE id = :id AND tenant_id = :tid"),
+        {"id": drop_id, "tid": tenant_id},
+    )
+    drop_row = r_drop.mappings().one_or_none()
+    if drop_row is None:
+        raise HTTPException(400, f"drop_id={drop_id} не найден в chatters для tenant_id={tenant_id}")
+
+    log.append(f"[CHECK] keep_id={keep_id} active={keep_row['active']}  |  drop_id={drop_id} active={drop_row['active']}")
+
+    # Считаем транзакции ДО перевески
+    r_tx_keep = await db.execute(
+        text("SELECT COUNT(*) FROM transactions WHERE chatter_id=:cid AND tenant_id=:tid"),
+        {"cid": keep_id, "tid": tenant_id},
+    )
+    r_tx_drop = await db.execute(
+        text("SELECT COUNT(*) FROM transactions WHERE chatter_id=:cid AND tenant_id=:tid"),
+        {"cid": drop_id, "tid": tenant_id},
+    )
+    tx_keep_before = r_tx_keep.scalar()
+    tx_drop_before = r_tx_drop.scalar()
+    log.append(f"[BEFORE] transactions: keep_id={keep_id} → {tx_keep_before}  |  drop_id={drop_id} → {tx_drop_before}")
+
+    # ── Шаги 2–4: перевешиваем все FK-таблицы ────────────────────────────────
+    tables_affected: list[dict] = []
+    unknown_refs: list[str] = []
+
+    for table, col in _CHATTER_FK_TABLES:
+        # Проверяем, существует ли таблица + столбец (устойчиво к отсутствующим таблицам)
+        exists_q = await db.execute(
+            text(
+                """
+                SELECT EXISTS (
+                    SELECT 1 FROM information_schema.columns
+                    WHERE table_name = :tbl AND column_name = :col
+                )
+                """
+            ),
+            {"tbl": table, "col": col},
+        )
+        if not exists_q.scalar():
+            continue  # таблица или колонка не существует в этой схеме
+
+        cnt_q = await db.execute(
+            text(f"SELECT COUNT(*) FROM {table} WHERE {col} = :drop_id"),
+            {"drop_id": drop_id},
+        )
+        cnt_before = cnt_q.scalar()
+        if cnt_before == 0:
+            continue  # нечего перевешивать
+
+        # tenant_id-колонка у части таблиц есть, у части нет — UPDATE без неё безопасен
+        upd = await db.execute(
+            text(f"UPDATE {table} SET {col} = :keep_id WHERE {col} = :drop_id"),
+            {"keep_id": keep_id, "drop_id": drop_id},
+        )
+        moved = upd.rowcount
+        tables_affected.append({"table": table, "column": col, "rows_moved": moved})
+        log.append(f"[UPDATE] {table}.{col}: {cnt_before} → keep_id={keep_id}  (rowcount={moved})")
+
+    # ── Шаг 3: проверяем, что транзакций на drop_id больше нет ──────────────
+    r_tx_drop_after = await db.execute(
+        text("SELECT COUNT(*) FROM transactions WHERE chatter_id=:cid AND tenant_id=:tid"),
+        {"cid": drop_id, "tid": tenant_id},
+    )
+    tx_drop_after = r_tx_drop_after.scalar()
+    if tx_drop_after != 0:
+        raise HTTPException(
+            500,
+            f"После UPDATE в transactions всё ещё {tx_drop_after} строк с chatter_id={drop_id} — rollback",
+        )
+    log.append(f"[CHECK] transactions после UPDATE: drop_id={drop_id} → {tx_drop_after} ✓")
+
+    # ── Шаг 4b: проверяем через information_schema, нет ли других FK ─────────
+    other_fk_q = await db.execute(
+        text(
+            """
+            SELECT kcu.table_name, kcu.column_name
+            FROM information_schema.key_column_usage kcu
+            JOIN information_schema.referential_constraints rc
+              ON kcu.constraint_name = rc.constraint_name
+            JOIN information_schema.key_column_usage pk
+              ON rc.unique_constraint_name = pk.constraint_name
+             AND pk.ordinal_position = kcu.position_in_unique_constraint
+            WHERE pk.table_name = 'chatters'
+              AND pk.column_name = 'id'
+            """
+        )
+    )
+    all_fk_tables = {(r[0], r[1]) for r in other_fk_q.all()}
+    known_set = {(t, c) for t, c in _CHATTER_FK_TABLES}
+    for tbl, col in sorted(all_fk_tables - known_set):
+        cnt_q = await db.execute(
+            text(f"SELECT COUNT(*) FROM {tbl} WHERE {col} = :drop_id"),
+            {"drop_id": drop_id},
+        )
+        residual = cnt_q.scalar()
+        if residual > 0:
+            unknown_refs.append(f"{tbl}.{col} → {residual} строк")
+
+    if unknown_refs:
+        raise HTTPException(
+            409,
+            {
+                "error": "Найдены неожиданные ссылки на drop_id — остановлено перед DELETE",
+                "unknown_refs": unknown_refs,
+                "log": log,
+            },
+        )
+
+    # ── Шаг 5: DELETE дубля ──────────────────────────────────────────────────
+    del_q = await db.execute(
+        text("DELETE FROM chatters WHERE id = :id AND tenant_id = :tid"),
+        {"id": drop_id, "tid": tenant_id},
+    )
+    if del_q.rowcount != 1:
+        raise HTTPException(500, f"DELETE chatters id={drop_id} вернул rowcount={del_q.rowcount}")
+    log.append(f"[DELETE] chatters id={drop_id} удалён (rowcount={del_q.rowcount})")
+
+    # ── Шаг 6: commit ────────────────────────────────────────────────────────
+    await db.commit()
+    log.append("[COMMIT] ✓")
+
+    # Итоговое число транзакций на keep_id
+    r_tx_keep_after = await db.execute(
+        text("SELECT COUNT(*) FROM transactions WHERE chatter_id=:cid AND tenant_id=:tid"),
+        {"cid": keep_id, "tid": tenant_id},
+    )
+    tx_keep_after = r_tx_keep_after.scalar()
+
+    return {
+        "status": "ok",
+        "summary": {
+            "tenant_id":        tenant_id,
+            "kept_id":          keep_id,
+            "deleted_id":       drop_id,
+            "tx_moved":         tx_drop_before,
+            "tx_on_kept_after": tx_keep_after,
+            "tables_affected":  tables_affected,
+        },
+        "log": log,
+    }
