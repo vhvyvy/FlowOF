@@ -555,9 +555,205 @@ async def find_anomalies(
     return anomalies
 
 
+# ── WRITE tools — agent memory layer (agent_events table) ────────────────────
+
+_OPEN_STATUSES = ("proposed", "accepted", "in_progress", "review_due")
+_CLOSED_STATUSES = ("closed_success", "closed_failed", "dismissed")
+_ALL_STATUSES = _OPEN_STATUSES + _CLOSED_STATUSES
+
+
+async def create_event(
+    db: AsyncSession,
+    tenant_id: int,
+    *,
+    title: str,
+    description: str = "",
+    entity_type: str | None = None,
+    entity_ref: str | None = None,
+    trigger_metric: str | None = None,
+    trigger_value_before: float | None = None,
+    review_in_days: int | None = None,
+    source: str = "chat",
+    priority: str = "normal",
+) -> dict:
+    """Create an agent event (memory entry).
+
+    Hybrid rule:
+      source='chat'    → status='proposed'  (needs owner confirmation)
+      source='watcher' → status='accepted'  (auto-created by anomaly detection)
+      source='user'    → status='accepted'  (owner initiated)
+    """
+    from models import AgentEvent
+
+    status = "proposed" if source == "chat" else "accepted"
+    review_date = None
+    if review_in_days:
+        review_date = date.today() + timedelta(days=int(review_in_days))
+
+    ev = AgentEvent(
+        tenant_id=tenant_id,
+        title=title.strip(),
+        description=description.strip() or None,
+        entity_type=entity_type,
+        entity_ref=entity_ref,
+        trigger_metric=trigger_metric,
+        trigger_value_before=trigger_value_before,
+        status=status,
+        source=source,
+        created_by="agent",
+        priority=priority,
+        review_date=review_date,
+    )
+    db.add(ev)
+    await db.flush()  # get id without committing whole session
+    await db.commit()
+    logger.info("agent create_event id=%s title=%r tenant=%s", ev.id, title[:60], tenant_id)
+    return {
+        "created": True,
+        "event_id": ev.id,
+        "status": status,
+        "title": ev.title,
+        "review_date": review_date.isoformat() if review_date else None,
+    }
+
+
+async def get_open_events(
+    db: AsyncSession,
+    tenant_id: int,
+    *,
+    entity_ref: str | None = None,
+) -> list[dict]:
+    """Return all non-closed events for this tenant (optionally filtered by entity)."""
+    from sqlalchemy import text as _text
+
+    params: dict[str, Any] = {"tid": tenant_id}
+    extra = ""
+    if entity_ref:
+        extra = " AND LOWER(entity_ref) = LOWER(:eref)"
+        params["eref"] = entity_ref
+
+    rows = (await db.execute(
+        _text(
+            f"""
+            SELECT id, title, description, entity_type, entity_ref,
+                   trigger_metric, trigger_value_before,
+                   status, source, priority, created_at, review_date
+            FROM agent_events
+            WHERE tenant_id = :tid
+              AND status NOT IN ('closed_success','closed_failed','dismissed')
+              {extra}
+            ORDER BY
+                CASE priority WHEN 'high' THEN 0 WHEN 'normal' THEN 1 ELSE 2 END,
+                created_at DESC
+            LIMIT 50
+            """
+        ),
+        params,
+    )).fetchall()
+
+    return [
+        {
+            "id":                   r[0],
+            "title":                r[1],
+            "description":          r[2],
+            "entity_type":          r[3],
+            "entity_ref":           r[4],
+            "trigger_metric":       r[5],
+            "trigger_value_before": float(r[6]) if r[6] is not None else None,
+            "status":               r[7],
+            "source":               r[8],
+            "priority":             r[9],
+            "created_at":           r[10].isoformat() if r[10] else None,
+            "review_date":          r[11].isoformat() if r[11] else None,
+        }
+        for r in rows
+    ]
+
+
+async def update_event_status(
+    db: AsyncSession,
+    tenant_id: int,
+    *,
+    event_id: int,
+    new_status: str,
+    note: str = "",
+) -> dict:
+    """Update the status of an agent event. Optionally append a note to description."""
+    from sqlalchemy import text as _text
+
+    if new_status not in _ALL_STATUSES:
+        return {"error": f"Неверный статус '{new_status}'. Допустимые: {', '.join(_ALL_STATUSES)}"}
+
+    # Verify ownership
+    row = (await db.execute(
+        _text("SELECT id, status FROM agent_events WHERE id=:eid AND tenant_id=:tid"),
+        {"eid": event_id, "tid": tenant_id},
+    )).fetchone()
+    if row is None:
+        return {"error": f"Событие id={event_id} не найдено"}
+
+    params: dict[str, Any] = {"eid": event_id, "tid": tenant_id, "status": new_status}
+    note_sql = ""
+    if note:
+        note_sql = ", description = COALESCE(description,'') || E'\\n[' || NOW()::text || '] ' || :note"
+        params["note"] = note.strip()
+
+    await db.execute(
+        _text(f"UPDATE agent_events SET status=:status {note_sql} WHERE id=:eid AND tenant_id=:tid"),
+        params,
+    )
+    await db.commit()
+    return {"updated": True, "event_id": event_id, "new_status": new_status}
+
+
+async def close_event(
+    db: AsyncSession,
+    tenant_id: int,
+    *,
+    event_id: int,
+    outcome: str,
+    outcome_value_after: float | None = None,
+) -> dict:
+    """Close an event with a final outcome (success or failed based on outcome text)."""
+    from sqlalchemy import text as _text
+
+    row = (await db.execute(
+        _text("SELECT id FROM agent_events WHERE id=:eid AND tenant_id=:tid"),
+        {"eid": event_id, "tid": tenant_id},
+    )).fetchone()
+    if row is None:
+        return {"error": f"Событие id={event_id} не найдено"}
+
+    # Determine success/failure from outcome keyword hints
+    outcome_lower = outcome.lower()
+    status = "closed_success" if any(
+        w in outcome_lower for w in ("улучш", "вырос", "испрви", "решен", "достиг", "выполн", "success", "+")
+    ) else "closed_failed"
+
+    params: dict[str, Any] = {
+        "eid": event_id, "tid": tenant_id,
+        "status": status, "outcome": outcome.strip(),
+    }
+    val_sql = ""
+    if outcome_value_after is not None:
+        val_sql = ", outcome_value_after=:oval"
+        params["oval"] = outcome_value_after
+
+    await db.execute(
+        _text(
+            f"UPDATE agent_events SET status=:status, outcome=:outcome, "
+            f"closed_at=NOW() {val_sql} WHERE id=:eid AND tenant_id=:tid"
+        ),
+        params,
+    )
+    await db.commit()
+    return {"closed": True, "event_id": event_id, "status": status}
+
+
 # ── Tool registry (name → async callable) ────────────────────────────────────
 
 TOOL_REGISTRY: dict[str, Any] = {
+    # READ
     "get_agency_summary":           get_agency_summary,
     "get_monthly_trend":            get_monthly_trend,
     "get_top_chatters":             get_top_chatters,
@@ -567,6 +763,11 @@ TOOL_REGISTRY: dict[str, Any] = {
     "get_shift_breakdown":          get_shift_breakdown,
     "query_transactions_flexible":  query_transactions_flexible,
     "find_anomalies":               find_anomalies,
+    # WRITE (agent memory layer only — not production data)
+    "create_event":                 create_event,
+    "get_open_events":              get_open_events,
+    "update_event_status":          update_event_status,
+    "close_event":                  close_event,
 }
 
 # ── Anthropic tool descriptions (input_schema NEVER contains tenant_id) ──────
@@ -731,6 +932,85 @@ TOOL_DESCRIPTIONS: list[dict] = [
                 "month": {"type": "integer"},
             },
             "required": ["year", "month"],
+        },
+    },
+    # ── WRITE tools (memory layer) ────────────────────────────────────────────
+    {
+        "name": "create_event",
+        "description": (
+            "Создать событие в памяти агента — зафиксировать аномалию, дать задачу, поставить точку для отслеживания. "
+            "Правило гибрида: жёсткую объективную аномалию (данные из инструментов) → создавай сам (source='watcher'). "
+            "Субъективный вывод из разговора → НЕ создавай сам, только предлагай (source='chat' → статус proposed). "
+            "Всегда проверяй get_open_events перед созданием — не плоди дубли по одному entity."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "title":                 {"type": "string", "description": "Краткое название задачи/наблюдения"},
+                "description":           {"type": "string", "description": "Детальный контекст"},
+                "entity_type":           {"type": "string", "enum": ["chatter", "model", "shift", "agency"], "description": "Тип сущности"},
+                "entity_ref":            {"type": "string", "description": "Имя/ID сущности (чаттер, модель и т.д.)"},
+                "trigger_metric":        {"type": "string", "description": "Метрика-триггер: rpc, revenue_mom, open_rate и т.п."},
+                "trigger_value_before":  {"type": "number", "description": "Значение метрики на момент создания"},
+                "review_in_days":        {"type": "integer", "description": "Через сколько дней проверить (для review_date)"},
+                "source":                {"type": "string", "enum": ["chat", "watcher", "user"], "description": "Источник события"},
+                "priority":              {"type": "string", "enum": ["high", "normal", "low"]},
+            },
+            "required": ["title", "source"],
+        },
+    },
+    {
+        "name": "get_open_events",
+        "description": (
+            "Получить список открытых событий в памяти агента (не закрытых и не отклонённых). "
+            "Вызывай в начале ответа, чтобы сверить — есть ли уже открытые дела по теме вопроса. "
+            "Если entity_ref указан — фильтрует по сущности (чаттер/модель)."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "entity_ref": {"type": "string", "description": "Имя чаттера или модели для фильтрации (необязательно)"},
+            },
+            "required": [],
+        },
+    },
+    {
+        "name": "update_event_status",
+        "description": (
+            "Обновить статус существующего события. "
+            "Переходы: proposed→accepted (принято), accepted→in_progress (взято в работу), "
+            "любой→dismissed (закрыто как неактуальное). "
+            "Можно добавить заметку."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "event_id":   {"type": "integer", "description": "ID события"},
+                "new_status": {
+                    "type": "string",
+                    "enum": ["proposed", "accepted", "in_progress", "review_due",
+                             "closed_success", "closed_failed", "dismissed"],
+                },
+                "note": {"type": "string", "description": "Необязательная заметка"},
+            },
+            "required": ["event_id", "new_status"],
+        },
+    },
+    {
+        "name": "close_event",
+        "description": (
+            "Закрыть событие с итогом. "
+            "outcome — текст что произошло. "
+            "outcome_value_after — значение метрики после (для сравнения с trigger_value_before)."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "event_id":           {"type": "integer"},
+                "outcome":            {"type": "string", "description": "Текст итога"},
+                "outcome_value_after":{"type": "number", "description": "Значение метрики после (необязательно)"},
+            },
+            "required": ["event_id", "outcome"],
         },
     },
 ]

@@ -106,25 +106,50 @@ class LLMAnalyst:
         question: str,
         max_iterations: int = 8,
         context_hint: str = "",
-    ) -> str:
-        """Run an agentic tool-use loop: Claude calls read tools, gets real data, answers.
+    ) -> dict[str, Any]:
+        """Run an agentic tool-use loop: Claude calls read/write tools, answers.
+
+        Returns dict with keys:
+          answer          (str)   — final text response
+          proposed_events (list)  — structured event suggestions (NOT auto-created)
 
         Invariants:
-          - tenant_id is injected by the server for every tool call; the model never sees it.
-          - Tools are read-only and fully parametrised (no run_sql).
-          - Loop is capped at max_iterations to prevent runaway token spend.
-          - A failing tool returns its error as a tool_result so Claude can adapt.
+          - tenant_id injected by server for every tool call; model never sees it.
+          - Loop capped at max_iterations.
+          - Failed tool → db.rollback() + error as tool_result (no crash, no poison).
         """
         if not self.api_key:
             raise ValueError("ANTHROPIC_API_KEY not configured")
 
         from anthropic import AsyncAnthropic
-        from services.analyst_tools import TOOL_DESCRIPTIONS, TOOL_REGISTRY
+        from services.analyst_tools import TOOL_DESCRIPTIONS, TOOL_REGISTRY, get_open_events
 
+        # ── Load open events for memory context ───────────────────────────────
+        open_events_context = ""
+        try:
+            open_events = await get_open_events(db, tenant_id)
+            if open_events:
+                lines = ["ОТКРЫТЫЕ СОБЫТИЯ (память агента):"]
+                for ev in open_events[:10]:
+                    ref = f" [{ev['entity_ref']}]" if ev.get("entity_ref") else ""
+                    lines.append(
+                        f"  #{ev['id']} [{ev['priority']}] {ev['title']}{ref} "
+                        f"— статус: {ev['status']}"
+                        + (f", проверить: {ev['review_date']}" if ev.get("review_date") else "")
+                    )
+                open_events_context = "\n".join(lines)
+        except Exception as e:
+            logger.debug("agentic: could not load open events: %s", e)
+            try:
+                await db.rollback()
+            except Exception:
+                pass
+
+        # ── System prompt (spec section 1.2 + 2.4 extensions) ─────────────────
         system = (
             "Ты AI-аналитик OnlyFans-агентства — второй мозг владельца. "
-            "У тебя есть инструменты для доступа к реальным данным агентства.\n\n"
-            "ПРАВИЛА:\n"
+            "У тебя есть инструменты для доступа к реальным данным и слой памяти (события).\n\n"
+            "ПРАВИЛА АНАЛИЗА:\n"
             "1. Не отвечай наугад — вызывай инструменты и получай реальные цифры.\n"
             "2. Веди расследование: увидел аномалию → копай глубже "
             "(сравни периоды, посмотри разбивку, проверь KPI).\n"
@@ -133,14 +158,25 @@ class LLMAnalyst:
             "4. Только реальные цифры из инструментов. "
             "Нет данных → скажи прямо «таких данных нет», не выдумывай.\n"
             "5. Отвечай на русском, конкретно.\n"
-            "6. tenant_id ты не знаешь и не запрашиваешь — сервер сам передаёт его в инструменты."
+            "6. tenant_id ты не знаешь и не запрашиваешь — сервер сам передаёт его в инструменты.\n\n"
+            "ПРАВИЛА ПАМЯТИ (события):\n"
+            "7. Перед ответом сверяйся с открытыми событиями: если вопрос касается сущности "
+            "с открытым событием — отвечай с учётом его истории и статуса.\n"
+            "8. Жёсткую объективную аномалию (данные из инструментов, чёткий порог) → "
+            "можешь зафиксировать событием сам через create_event(source='watcher').\n"
+            "9. Субъективный вывод, интерпретацию — НЕ создавай без спроса. "
+            "Предлагай владельцу через proposed_events в ответе (не вызывай create_event).\n"
+            "10. Не создавай дубли: проверь get_open_events по entity_ref перед create_event."
         )
         if context_hint:
             system += f"\n\nКонтекст сессии: {context_hint}"
+        if open_events_context:
+            system += f"\n\n{open_events_context}"
 
         client = AsyncAnthropic(api_key=self.api_key)
         messages: list[dict[str, Any]] = [{"role": "user", "content": question}]
         iterations = 0
+        final_text = ""
 
         while iterations < max_iterations:
             iterations += 1
@@ -153,15 +189,14 @@ class LLMAnalyst:
                 messages=messages,
             )
 
-            # Append assistant turn
             messages.append({"role": "assistant", "content": resp.content})
 
             if resp.stop_reason != "tool_use":
-                # Model is done — extract text
                 for block in resp.content:
                     if hasattr(block, "text"):
-                        return block.text
-                return ""
+                        final_text = block.text
+                        break
+                break
 
             # ── Handle tool calls ─────────────────────────────────────────────
             tool_results: list[dict[str, Any]] = []
@@ -184,17 +219,11 @@ class LLMAnalyst:
                     is_error = True
                 else:
                     try:
-                        # Server injects db + tenant_id; model only provides **params
                         result = await fn(db, tenant_id, **tool_args)
                         result_content = json.dumps(result, ensure_ascii=False, default=str)
                         is_error = False
                     except Exception as exc:
-                        logger.warning(
-                            "agentic tool error tool=%s: %s", tool_name, exc
-                        )
-                        # Roll back the aborted transaction so subsequent tool calls
-                        # in the same session are not poisoned by the failed query.
-                        # Tools are read-only (no commits), so rollback is always safe.
+                        logger.warning("agentic tool error tool=%s: %s", tool_name, exc)
                         try:
                             await db.rollback()
                         except Exception:
@@ -214,20 +243,62 @@ class LLMAnalyst:
 
             messages.append({"role": "user", "content": tool_results})
 
-        # max_iterations exhausted — ask for a final answer with what was gathered
-        logger.warning("agentic: max_iterations=%s reached for tenant=%s", max_iterations, tenant_id)
-        resp = await client.messages.create(
-            model=self.analyst_model,
-            max_tokens=1000,
-            system=system + "\n\nДан лимит итераций. Дай финальный ответ на основе собранных данных.",
-            tools=TOOL_DESCRIPTIONS,  # type: ignore[arg-type]
-            tool_choice={"type": "auto"},
-            messages=messages,
-        )
-        for block in resp.content:
-            if hasattr(block, "text"):
-                return block.text
-        return "Превышен лимит итераций анализа."
+        else:
+            # max_iterations exhausted
+            logger.warning("agentic: max_iterations=%s reached tenant=%s", max_iterations, tenant_id)
+            try:
+                resp = await client.messages.create(
+                    model=self.analyst_model,
+                    max_tokens=800,
+                    system=system,
+                    messages=messages + [{
+                        "role": "user",
+                        "content": "Лимит итераций. Дай финальный ответ по собранным данным."
+                    }],
+                )
+                for block in resp.content:
+                    if hasattr(block, "text"):
+                        final_text = block.text
+                        break
+            except Exception:
+                final_text = "Превышен лимит итераций анализа."
+
+        # ── Extract proposed_events (lightweight structured call) ─────────────
+        proposed_events: list[dict[str, Any]] = []
+        if final_text:
+            try:
+                ext_resp = await client.messages.create(
+                    model=self.analyst_model,
+                    max_tokens=800,
+                    system=(
+                        "Проанализируй ответ аналитика и извлеки список РЕКОМЕНДУЕМЫХ ДЕЙСТВИЙ "
+                        "которые владелец мог бы превратить в задачи для отслеживания. "
+                        "Верни СТРОГО JSON-массив (без markdown), каждый элемент:\n"
+                        '{"title":"...","description":"...","entity_type":"chatter|model|shift|agency|null",'
+                        '"entity_ref":"имя или null","trigger_metric":"метрика или null",'
+                        '"trigger_value_before":число_или_null,"suggested_review_days":число_или_null,'
+                        '"priority":"high|normal|low"}\n'
+                        "Только реальные рекомендации из ответа. Если рекомендаций нет — верни []."
+                    ),
+                    messages=[{
+                        "role": "user",
+                        "content": f"Ответ аналитика:\n{final_text}"
+                    }],
+                )
+                raw = ext_resp.content[0].text.strip() if ext_resp.content else "[]"
+                # Strip markdown fence if present
+                if raw.startswith("```"):
+                    raw = raw.split("```")[1]
+                    if raw.startswith("json"):
+                        raw = raw[4:]
+                    raw = raw.strip()
+                parsed = json.loads(raw)
+                if isinstance(parsed, list):
+                    proposed_events = parsed
+            except Exception as e:
+                logger.debug("agentic: proposed_events extraction failed: %s", e)
+
+        return {"answer": final_text, "proposed_events": proposed_events}
 
     async def answer_question(self, snapshot_text: str, question: str) -> str:
         if not self.api_key:

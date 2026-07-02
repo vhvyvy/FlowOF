@@ -19,8 +19,20 @@ class AnalyzeRequest(BaseModel):
     year: int
 
 
+class ProposedEvent(BaseModel):
+    title:                str
+    description:          str | None = None
+    entity_type:          str | None = None
+    entity_ref:           str | None = None
+    trigger_metric:       str | None = None
+    trigger_value_before: float | None = None
+    suggested_review_days: int | None = None
+    priority:             str = "normal"
+
+
 class AnalyzeResponse(BaseModel):
-    answer: str
+    answer:          str
+    proposed_events: list[ProposedEvent] = []
 
 
 @router.post("/analyze", response_model=AnalyzeResponse)
@@ -43,13 +55,23 @@ async def analyze(
             "При ответе на вопросы без явного периода используй этот месяц как дефолтный."
         )
         analyst = LLMAnalyst()
-        answer  = await analyst.answer_question_agentic(
+        result  = await analyst.answer_question_agentic(
             db=db,
             tenant_id=tenant.id,
             question=body.question,
             context_hint=context_hint,
         )
-        return AnalyzeResponse(answer=answer)
+        # Coerce proposed_events — tolerate extra fields from LLM
+        proposed = []
+        for ev in result.get("proposed_events") or []:
+            try:
+                proposed.append(ProposedEvent(**{
+                    k: v for k, v in ev.items()
+                    if k in ProposedEvent.model_fields
+                }))
+            except Exception:
+                pass
+        return AnalyzeResponse(answer=result.get("answer", ""), proposed_events=proposed)
 
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))

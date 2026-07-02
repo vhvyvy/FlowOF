@@ -547,6 +547,33 @@ _PATCHES: list[tuple[str, bool]] = [
         False,
     ),
     ("CREATE INDEX IF NOT EXISTS idx_scripts_user_folder ON scripts(user_id, folder_id)", False),
+    # ── Agent events (memory layer, Этап 2) ───────────────────────────────────
+    (
+        """CREATE TABLE IF NOT EXISTS agent_events (
+            id                   SERIAL PRIMARY KEY,
+            tenant_id            INTEGER NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+            title                TEXT NOT NULL,
+            description          TEXT,
+            entity_type          VARCHAR(64),
+            entity_ref           VARCHAR(255),
+            trigger_metric       VARCHAR(64),
+            trigger_value_before NUMERIC(14, 4),
+            status               VARCHAR(32) NOT NULL DEFAULT 'proposed',
+            source               VARCHAR(32) NOT NULL DEFAULT 'chat',
+            created_by           VARCHAR(32) NOT NULL DEFAULT 'agent',
+            priority             VARCHAR(16) NOT NULL DEFAULT 'normal',
+            created_at           TIMESTAMP NOT NULL DEFAULT NOW(),
+            review_date          DATE,
+            closed_at            TIMESTAMP,
+            outcome              TEXT,
+            outcome_value_after  NUMERIC(14, 4),
+            related_chat_id      VARCHAR(128)
+        )""",
+        False,
+    ),
+    ("CREATE INDEX IF NOT EXISTS ix_agent_events_tenant_status ON agent_events (tenant_id, status)", False),
+    ("CREATE INDEX IF NOT EXISTS ix_agent_events_tenant_review ON agent_events (tenant_id, review_date)", False),
+    ("CREATE INDEX IF NOT EXISTS ix_agent_events_tenant_entity ON agent_events (tenant_id, entity_type, entity_ref)", False),
 ]
 
 # Catalog tables that should have UNIQUE(tenant_id, name).

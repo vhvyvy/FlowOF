@@ -303,6 +303,34 @@ class Event(Base):
     description = Column(Text, nullable=True)
 
 
+class AgentEvent(Base):
+    """Agent memory layer — events with lifecycle tracking.
+
+    Lifecycle: proposed → accepted → in_progress → review_due
+               → closed_success / closed_failed / dismissed
+    """
+    __tablename__ = "agent_events"
+
+    id                   = Column(Integer, primary_key=True, autoincrement=True)
+    tenant_id            = Column(Integer, ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False, index=True)
+    title                = Column(Text, nullable=False)
+    description          = Column(Text, nullable=True)
+    entity_type          = Column(String(64), nullable=True)   # 'chatter'/'model'/'shift'/'agency'
+    entity_ref           = Column(String(255), nullable=True)  # chatter name / model name / etc.
+    trigger_metric       = Column(String(64), nullable=True)   # 'rpc', 'revenue_mom', ...
+    trigger_value_before = Column(Numeric(14, 4), nullable=True)
+    status               = Column(String(32), nullable=False, default="proposed")
+    source               = Column(String(32), nullable=False, default="chat")   # 'watcher'/'chat'/'user'
+    created_by           = Column(String(32), nullable=False, default="agent")  # 'agent'/'owner'
+    priority             = Column(String(16), nullable=False, default="normal") # 'high'/'normal'/'low'
+    created_at           = Column(DateTime, nullable=False, default=datetime.utcnow)
+    review_date          = Column(Date, nullable=True)
+    closed_at            = Column(DateTime, nullable=True)
+    outcome              = Column(Text, nullable=True)
+    outcome_value_after  = Column(Numeric(14, 4), nullable=True)
+    related_chat_id      = Column(String(128), nullable=True)
+
+
 class AppSetting(Base):
     __tablename__ = "app_settings_mt"
 
