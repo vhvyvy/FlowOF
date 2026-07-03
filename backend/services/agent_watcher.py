@@ -634,7 +634,7 @@ async def _level_b_scan(db: AsyncSession, tenant_id: int) -> tuple[int, str | No
             try:
                 resp = await client.messages.create(
                     model=analyst_model,
-                    max_tokens=2000,
+                    max_tokens=2048,
                     system=system,
                     tools=watcher_tools,  # type: ignore[arg-type]
                     messages=messages,

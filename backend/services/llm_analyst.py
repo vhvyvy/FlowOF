@@ -66,7 +66,7 @@ class LLMAnalyst:
         client = AsyncAnthropic(api_key=self.api_key)
         resp = await client.messages.create(
             model=report_model,
-            max_tokens=1500,
+            max_tokens=4096,
             system=system,
             messages=[{"role": "user", "content": user_content}],
         )
@@ -210,7 +210,7 @@ class LLMAnalyst:
 
             resp = await client.messages.create(
                 model=self.analyst_model,
-                max_tokens=2000,
+                max_tokens=4096,
                 system=system,
                 tools=TOOL_DESCRIPTIONS,  # type: ignore[arg-type]
                 messages=messages,
@@ -276,7 +276,7 @@ class LLMAnalyst:
             try:
                 resp = await client.messages.create(
                     model=self.analyst_model,
-                    max_tokens=800,
+                    max_tokens=4096,
                     system=system,
                     messages=messages + [{
                         "role": "user",
@@ -336,7 +336,7 @@ class LLMAnalyst:
         client = AsyncAnthropic(api_key=self.api_key)
         resp = await client.messages.create(
             model=self.analyst_model,
-            max_tokens=1000,
+            max_tokens=4096,
             system=SYSTEM_PROMPT,
             messages=[
                 {
