@@ -14,11 +14,138 @@ import {
   Check,
   Brain,
 } from 'lucide-react'
+import ReactMarkdown from 'react-markdown'
+import remarkGfm from 'remark-gfm'
+import type { Components } from 'react-markdown'
 import api from '@/lib/api'
 import { useMonthStore } from '@/lib/hooks/useMonth'
 import { formatMonth } from '@/lib/utils'
 import { useCreateAgentEvent } from '@/lib/hooks/useAgentEvents'
 import type { ProposedEvent } from '@/lib/hooks/useAgentEvents'
+
+// ── Shared label helpers (reused in proposed-event cards) ──────────────────
+
+const METRIC_LABELS: Record<string, string> = {
+  open_rate:      'Open Rate',
+  ppv_open_rate:  'Open Rate',
+  rpc:            'RPC',
+  revenue:        'Выручка',
+  revenue_mom_pct:'Падение выручки',
+  chats_count:    'Чатов',
+  top3_revenue_pct:'Концентрация топ-3',
+}
+export function fmtMetric(m?: string | null): string {
+  if (!m) return ''
+  return METRIC_LABELS[m] ?? m.replace(/_/g, ' ')
+}
+
+const ENTITY_REF_LABELS: Record<string, string> = {
+  systemic_low_open_rate:  'Системная проблема (OR)',
+  systemic_low_rpc:        'Системная проблема (RPC)',
+  concentration_risk:      'Концентрация моделей',
+  watcher_overflow_summary:'Прочие наблюдения',
+}
+export function fmtEntityRef(ref?: string | null): string {
+  if (!ref) return ''
+  return ENTITY_REF_LABELS[ref] ?? ref
+}
+
+// ── Markdown renderer — dark-theme, GFM tables ─────────────────────────────
+
+const MD_COMPONENTS: Components = {
+  // Wrap tables for horizontal scroll
+  table: ({ children }) => (
+    <div className="overflow-x-auto my-3 rounded-lg border border-slate-600/40">
+      <table className="w-full border-collapse text-sm">
+        {children}
+      </table>
+    </div>
+  ),
+  thead: ({ children }) => (
+    <thead className="bg-slate-700/60">{children}</thead>
+  ),
+  tbody: ({ children }) => (
+    <tbody>{children}</tbody>
+  ),
+  tr: ({ children }) => (
+    <tr className="border-b border-slate-700/40 even:bg-slate-800/30 hover:bg-slate-700/20 transition-colors">
+      {children}
+    </tr>
+  ),
+  th: ({ children }) => (
+    <th className="px-3 py-2 text-left text-xs font-semibold text-slate-200 border-r border-slate-600/30 last:border-r-0 whitespace-nowrap">
+      {children}
+    </th>
+  ),
+  td: ({ children }) => (
+    <td className="px-3 py-2 text-sm text-slate-300 border-r border-slate-700/30 last:border-r-0 tabular-nums">
+      {children}
+    </td>
+  ),
+  // Headings — moderate size, no giant H1
+  h1: ({ children }) => (
+    <h1 className="text-base font-bold text-slate-100 mt-4 mb-2 pb-1 border-b border-slate-700/50">
+      {children}
+    </h1>
+  ),
+  h2: ({ children }) => (
+    <h2 className="text-sm font-bold text-slate-100 mt-4 mb-2">{children}</h2>
+  ),
+  h3: ({ children }) => (
+    <h3 className="text-sm font-semibold text-slate-200 mt-3 mb-1">{children}</h3>
+  ),
+  // Lists
+  ul: ({ children }) => (
+    <ul className="list-disc list-outside space-y-0.5 text-slate-300 my-2 pl-5">{children}</ul>
+  ),
+  ol: ({ children }) => (
+    <ol className="list-decimal list-outside space-y-0.5 text-slate-300 my-2 pl-5">{children}</ol>
+  ),
+  li: ({ children }) => (
+    <li className="text-sm leading-relaxed">{children}</li>
+  ),
+  // Inline
+  strong: ({ children }) => (
+    <strong className="font-semibold text-slate-100">{children}</strong>
+  ),
+  em: ({ children }) => (
+    <em className="italic text-slate-300">{children}</em>
+  ),
+  code: ({ children, className }) => {
+    const isBlock = className?.startsWith('language-')
+    return isBlock ? (
+      <code className={`block bg-slate-900/60 text-emerald-300 px-3 py-2 rounded-md text-xs font-mono my-2 overflow-x-auto ${className ?? ''}`}>
+        {children}
+      </code>
+    ) : (
+      <code className="bg-slate-700/60 text-indigo-300 px-1.5 py-0.5 rounded text-xs font-mono">
+        {children}
+      </code>
+    )
+  },
+  p: ({ children }) => (
+    <p className="leading-relaxed text-slate-200 my-1.5 text-sm">{children}</p>
+  ),
+  hr: () => <hr className="my-3 border-slate-700/60" />,
+  blockquote: ({ children }) => (
+    <blockquote className="border-l-2 border-indigo-500/40 pl-3 text-slate-400 my-2 italic">
+      {children}
+    </blockquote>
+  ),
+  a: ({ href, children }) => (
+    <a href={href} className="text-indigo-400 hover:text-indigo-300 underline underline-offset-2" target="_blank" rel="noreferrer">
+      {children}
+    </a>
+  ),
+}
+
+function MarkdownContent({ text }: { text: string }) {
+  return (
+    <ReactMarkdown remarkPlugins={[remarkGfm]} components={MD_COMPONENTS}>
+      {text}
+    </ReactMarkdown>
+  )
+}
 
 const QUICK_PROMPTS = [
   'Сделай анализ выручки за этот месяц',
@@ -98,12 +225,12 @@ function ProposedEventCard({
         <div className="flex items-center flex-wrap gap-2 mt-2">
           {ev.entity_ref && (
             <span className="text-xs bg-slate-700/60 text-slate-300 border border-slate-600/30 rounded-md px-2 py-0.5">
-              {ev.entity_ref}
+              {fmtEntityRef(ev.entity_ref)}
             </span>
           )}
           {ev.trigger_metric && (
             <span className="text-xs bg-slate-700/40 text-slate-400 rounded-md px-2 py-0.5">
-              {ev.trigger_metric}
+              {fmtMetric(ev.trigger_metric)}
               {ev.trigger_value_before != null ? ` = ${ev.trigger_value_before}` : ''}
             </span>
           )}
@@ -251,15 +378,15 @@ export default function AiPage() {
           {messages.map((msg, i) => (
             <div key={i} className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}>
               <div className="w-full max-w-2xl space-y-3">
-                <div
-                  className={`rounded-2xl px-5 py-3 text-sm ${
-                    msg.role === 'user'
-                      ? 'ml-auto w-fit bg-indigo-600 text-white'
-                      : 'bg-slate-800/80 border border-slate-700/50 text-slate-200'
-                  }`}
-                >
-                  <p className="whitespace-pre-wrap leading-relaxed">{msg.content}</p>
-                </div>
+                {msg.role === 'user' ? (
+                  <div className="ml-auto w-fit max-w-xl rounded-2xl px-5 py-3 bg-indigo-600 text-white">
+                    <p className="text-sm leading-relaxed">{msg.content}</p>
+                  </div>
+                ) : (
+                  <div className="rounded-2xl px-5 py-4 bg-slate-800/80 border border-slate-700/50">
+                    <MarkdownContent text={msg.content} />
+                  </div>
+                )}
 
                 {/* Proposed events block */}
                 {msg.role === 'assistant' &&
@@ -285,10 +412,12 @@ export default function AiPage() {
           ))}
 
           {loading && (
-            <div className="flex justify-start">
-              <div className="bg-slate-800/80 border border-slate-700/50 rounded-2xl px-5 py-3 flex items-center gap-2.5">
-                <Loader2 className="h-4 w-4 animate-spin text-indigo-400 shrink-0" />
-                <span className="text-sm text-slate-400">Анализирую данные агентства…</span>
+            <div className="flex justify-center py-3">
+              <div className="bg-slate-800/80 border border-slate-700/50 rounded-2xl px-6 py-3 flex items-center gap-3">
+                <div className="relative h-5 w-5 shrink-0">
+                  <Loader2 className="absolute inset-0 h-5 w-5 animate-spin text-indigo-500" />
+                </div>
+                <span className="text-sm text-slate-400 animate-pulse">Анализирую данные агентства…</span>
               </div>
             </div>
           )}

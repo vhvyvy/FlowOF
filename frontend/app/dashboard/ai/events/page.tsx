@@ -28,6 +28,35 @@ import {
   type AgentEvent,
 } from '@/lib/hooks/useAgentEvents'
 
+// ── Label helpers ──────────────────────────────────────────────────────────
+
+const METRIC_LABELS: Record<string, string> = {
+  open_rate:       'Open Rate',
+  ppv_open_rate:   'Open Rate',
+  rpc:             'RPC',
+  revenue:         'Выручка',
+  revenue_mom_pct: 'Падение выручки',
+  chats_count:     'Чатов',
+  top3_revenue_pct:'Концентрация топ-3',
+}
+
+const ENTITY_REF_LABELS: Record<string, string> = {
+  systemic_low_open_rate:  'Системная проблема (OR)',
+  systemic_low_rpc:        'Системная проблема (RPC)',
+  concentration_risk:      'Концентрация моделей',
+  watcher_overflow_summary:'Прочие наблюдения',
+}
+
+function fmtMetric(m?: string | null): string {
+  if (!m) return ''
+  return METRIC_LABELS[m] ?? m.replace(/_/g, ' ')
+}
+
+function fmtEntityRef(ref?: string | null): string {
+  if (!ref) return ''
+  return ENTITY_REF_LABELS[ref] ?? ref
+}
+
 // ── Status config ──────────────────────────────────────────────────────────
 
 const STATUS_META: Record<
@@ -98,37 +127,41 @@ function BeforeAfterBlock({ ev }: { ev: AgentEvent }) {
   const after  = ev.outcome_value_after
   if (before == null && after == null) return null
 
-  const diff = before != null && after != null ? after - before : null
+  const diff     = before != null && after != null ? after - before : null
   const improved = diff != null && diff > 0
   const worsened = diff != null && diff < 0
 
   return (
-    <div className="mt-2 pl-11 flex items-center gap-2 flex-wrap">
-      <span className="text-xs text-slate-500">{ev.trigger_metric}:</span>
-      {before != null && (
-        <span className="text-xs font-mono text-slate-400">{before.toFixed(2)}</span>
-      )}
-      {after != null && (
-        <>
-          <ArrowRight className="h-3 w-3 text-slate-600" />
-          <span className={`text-xs font-mono font-semibold ${
+    <div className="mt-2 pl-11">
+      <div className="inline-flex items-center gap-2 bg-slate-900/40 border border-slate-700/40 rounded-lg px-3 py-1.5 flex-wrap">
+        {ev.trigger_metric && (
+          <span className="text-xs text-slate-500 font-medium">{fmtMetric(ev.trigger_metric)}</span>
+        )}
+        {before != null && (
+          <span className="text-xs font-mono text-slate-400 tabular-nums">{before.toFixed(2)}</span>
+        )}
+        {before != null && after != null && (
+          <ArrowRight className="h-3 w-3 text-slate-600 shrink-0" />
+        )}
+        {after != null && (
+          <span className={`text-xs font-mono font-semibold tabular-nums ${
             improved ? 'text-emerald-400' : worsened ? 'text-red-400' : 'text-slate-300'
           }`}>
             {after.toFixed(2)}
           </span>
-          {diff != null && (
-            <span className={`text-xs px-1.5 py-0.5 rounded-md ${
-              improved
-                ? 'bg-emerald-500/10 text-emerald-400'
-                : worsened
-                ? 'bg-red-500/10 text-red-400'
-                : 'bg-slate-700/40 text-slate-400'
-            }`}>
-              {improved ? '↑ улучшилось' : worsened ? '↓ ухудшилось' : '→ без изменений'}
-            </span>
-          )}
-        </>
-      )}
+        )}
+        {diff != null && (
+          <span className={`text-xs px-1.5 py-0.5 rounded ${
+            improved
+              ? 'bg-emerald-500/10 text-emerald-400'
+              : worsened
+              ? 'bg-red-500/10 text-red-400'
+              : 'bg-slate-700/40 text-slate-400'
+          }`}>
+            {improved ? '↑ улучшилось' : worsened ? '↓ ухудшилось' : '— без изменений'}
+          </span>
+        )}
+      </div>
     </div>
   )
 }
@@ -178,16 +211,20 @@ function EventCard({ ev }: { ev: AgentEvent }) {
 
       {/* Meta tags */}
       <div className="flex flex-wrap gap-2 mt-3 pl-11">
-        {ev.entity_ref && (
+        {ev.entity_ref && ev.entity_type !== 'agency' && (
           <span className="text-xs bg-slate-700/60 text-slate-300 border border-slate-600/30 rounded-md px-2 py-0.5">
-            {ev.entity_type && <span className="text-slate-500 mr-1">{ev.entity_type}:</span>}
-            {ev.entity_ref}
+            {fmtEntityRef(ev.entity_ref)}
+          </span>
+        )}
+        {ev.entity_ref && ev.entity_type === 'agency' && ENTITY_REF_LABELS[ev.entity_ref] && (
+          <span className="text-xs bg-slate-800/60 text-slate-400 border border-slate-600/20 rounded-md px-2 py-0.5 italic">
+            {ENTITY_REF_LABELS[ev.entity_ref]}
           </span>
         )}
         {ev.trigger_metric && (
           <span className="text-xs bg-slate-700/40 text-slate-400 rounded-md px-2 py-0.5">
-            {ev.trigger_metric}
-            {ev.trigger_value_before != null ? ` = ${ev.trigger_value_before}` : ''}
+            {fmtMetric(ev.trigger_metric)}
+            {ev.trigger_value_before != null ? `: ${Number(ev.trigger_value_before).toFixed(1)}` : ''}
           </span>
         )}
         {ev.review_date && (
