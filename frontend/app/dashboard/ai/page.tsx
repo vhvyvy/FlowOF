@@ -53,10 +53,17 @@ export function fmtEntityRef(ref?: string | null): string {
 // ── Markdown renderer — dark-theme, GFM tables ─────────────────────────────
 
 const MD_COMPONENTS: Components = {
-  // Wrap tables for horizontal scroll
+  // Wrap tables for horizontal scroll — table grows to max-content so it
+  // never squishes columns; the div provides the scroll track.
   table: ({ children }) => (
-    <div className="overflow-x-auto my-3 rounded-lg border border-slate-600/40">
-      <table className="w-full border-collapse text-sm">
+    <div
+      className="overflow-x-auto my-3 rounded-lg border border-slate-600/40"
+      style={{ WebkitOverflowScrolling: 'touch' }}
+    >
+      <table
+        className="border-collapse text-sm"
+        style={{ width: 'max-content', minWidth: '100%' }}
+      >
         {children}
       </table>
     </div>
@@ -73,12 +80,12 @@ const MD_COMPONENTS: Components = {
     </tr>
   ),
   th: ({ children }) => (
-    <th className="px-3 py-2 text-left text-xs font-semibold text-slate-200 border-r border-slate-600/30 last:border-r-0 whitespace-nowrap">
+    <th className="px-4 py-2 text-left text-xs font-semibold text-slate-200 border-r border-slate-600/30 last:border-r-0 whitespace-nowrap">
       {children}
     </th>
   ),
   td: ({ children }) => (
-    <td className="px-3 py-2 text-sm text-slate-300 border-r border-slate-700/30 last:border-r-0 tabular-nums">
+    <td className="px-4 py-2 text-sm text-slate-300 border-r border-slate-700/30 last:border-r-0 tabular-nums whitespace-nowrap">
       {children}
     </td>
   ),
@@ -349,9 +356,10 @@ export default function AiPage() {
         </Link>
       </div>
 
-      <div className="flex-1 flex flex-col p-6 overflow-hidden">
-        {/* Messages area */}
-        <div className="flex-1 overflow-y-auto space-y-4 mb-4">
+      <div className="flex-1 flex flex-col p-6 min-h-0">
+        {/* Messages area — overflow-x must stay visible so the table's own
+            overflow-x-auto scroll track works; vertical scrolling via overflow-y-auto */}
+        <div className="flex-1 overflow-y-auto overflow-x-hidden space-y-4 mb-4">
           {messages.length === 0 && (
             <div className="flex flex-col items-center justify-center h-full text-center">
               <div className="w-14 h-14 rounded-2xl bg-indigo-500/15 flex items-center justify-center mb-4">
@@ -377,13 +385,14 @@ export default function AiPage() {
 
           {messages.map((msg, i) => (
             <div key={i} className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}>
-              <div className="w-full max-w-2xl space-y-3">
+              {/* Assistant bubbles take full width so wide tables have room to scroll */}
+              <div className={`space-y-3 ${msg.role === 'user' ? 'max-w-xl' : 'w-full'}`}>
                 {msg.role === 'user' ? (
-                  <div className="ml-auto w-fit max-w-xl rounded-2xl px-5 py-3 bg-indigo-600 text-white">
+                  <div className="ml-auto w-fit rounded-2xl px-5 py-3 bg-indigo-600 text-white">
                     <p className="text-sm leading-relaxed">{msg.content}</p>
                   </div>
                 ) : (
-                  <div className="rounded-2xl px-5 py-4 bg-slate-800/80 border border-slate-700/50">
+                  <div className="rounded-2xl px-5 py-4 bg-slate-800/80 border border-slate-700/50 min-w-0">
                     <MarkdownContent text={msg.content} />
                   </div>
                 )}
