@@ -309,6 +309,36 @@ async def trigger_watcher_review(
     return result
 
 
+@router.post("/dismiss-watcher")
+async def dismiss_watcher_events(
+    _: Any = Depends(require_owner),
+    tenant: Tenant = Depends(get_current_tenant),
+    db: AsyncSession = Depends(get_db),
+):
+    """Bulk-dismiss all open watcher-sourced events for the current tenant.
+
+    Sets status='dismissed' on every event where source='watcher' and
+    status is in the open set. Returns {"dismissed": N}.
+    """
+    result = await db.execute(
+        text(
+            """
+            UPDATE agent_events
+               SET status = 'dismissed'
+             WHERE tenant_id = :tid
+               AND source    = 'watcher'
+               AND status   IN ('proposed','accepted','in_progress','review_due')
+            RETURNING id
+            """
+        ),
+        {"tid": tenant.id},
+    )
+    dismissed = len(result.fetchall())
+    await db.commit()
+    logger.info("bulk dismiss-watcher tenant=%s dismissed=%s", tenant.id, dismissed)
+    return {"dismissed": dismissed}
+
+
 @router.get("/insights", response_model=list[AgentEventOut])
 async def get_agent_insights(
     limit: int = Query(3, ge=1, le=10),

@@ -18,6 +18,7 @@ import {
   ScanSearch,
   Loader2,
   Bot,
+  Trash2,
 } from 'lucide-react'
 import api from '@/lib/api'
 import { useQueryClient } from '@tanstack/react-query'
@@ -272,12 +273,15 @@ interface ScanResult {
 
 function ActionButtons() {
   const qc = useQueryClient()
-  const [scanning, setScanning]         = useState(false)
-  const [reviewing, setReviewing]       = useState(false)
-  const [scanResult, setScanResult]     = useState<ScanResult | null>(null)
-  const [reviewResult, setReviewResult] = useState<{ checked: number; updated: number } | null>(null)
-  const [scanError, setScanError]       = useState<string | null>(null)
-  const [reviewError, setReviewError]   = useState(false)
+  const [scanning, setScanning]           = useState(false)
+  const [reviewing, setReviewing]         = useState(false)
+  const [dismissing, setDismissing]       = useState(false)
+  const [scanResult, setScanResult]       = useState<ScanResult | null>(null)
+  const [reviewResult, setReviewResult]   = useState<{ checked: number; updated: number } | null>(null)
+  const [dismissResult, setDismissResult] = useState<{ dismissed: number } | null>(null)
+  const [scanError, setScanError]         = useState<string | null>(null)
+  const [reviewError, setReviewError]     = useState(false)
+  const [confirmDismiss, setConfirmDismiss] = useState(false)
 
   async function handleScan() {
     setScanning(true)
@@ -313,11 +317,32 @@ function ActionButtons() {
     }
   }
 
-  const busy = scanning || reviewing
+  async function handleDismissWatcher() {
+    if (!confirmDismiss) {
+      setConfirmDismiss(true)
+      setTimeout(() => setConfirmDismiss(false), 4000) // auto-cancel after 4s
+      return
+    }
+    setDismissing(true)
+    setDismissResult(null)
+    setConfirmDismiss(false)
+    try {
+      const res = await api.post<{ dismissed: number }>('/api/v1/agent-events/dismiss-watcher')
+      setDismissResult(res.data)
+      qc.invalidateQueries({ queryKey: ['agent-events'] })
+      qc.invalidateQueries({ queryKey: ['agent-events-insights'] })
+    } catch {
+      // silently ignore
+    } finally {
+      setDismissing(false)
+    }
+  }
+
+  const busy = scanning || reviewing || dismissing
 
   return (
     <div className="flex items-center gap-2 flex-wrap justify-end">
-      {/* Scan result / error inline */}
+      {/* Inline results */}
       {!scanning && scanResult && (
         <span
           className={`text-xs max-w-xs truncate ${
@@ -339,8 +364,6 @@ function ActionButtons() {
         </span>
       )}
       {!scanning && scanError && <span className="text-xs text-red-400">{scanError}</span>}
-
-      {/* Review result */}
       {!reviewing && reviewResult && (
         <span className="text-xs text-slate-500">
           {reviewResult.updated === 0
@@ -349,8 +372,38 @@ function ActionButtons() {
         </span>
       )}
       {!reviewing && reviewError && <span className="text-xs text-red-400">Ошибка проверки</span>}
+      {!dismissing && dismissResult && (
+        <span className="text-xs text-slate-500">
+          Отклонено {dismissResult.dismissed} watcher-событий
+        </span>
+      )}
 
-      {/* Review-now button */}
+      {/* Bulk-dismiss watcher events (two-tap confirm) */}
+      <button
+        onClick={handleDismissWatcher}
+        disabled={busy}
+        title={
+          confirmDismiss
+            ? 'Нажми ещё раз для подтверждения — отклонит ВСЕ открытые watcher-события'
+            : 'Отклонить все открытые события от watcher'
+        }
+        className={`flex items-center gap-1.5 px-3 py-1.5 text-sm font-medium rounded-lg border transition-colors disabled:opacity-50 ${
+          confirmDismiss
+            ? 'border-red-500/60 bg-red-900/30 text-red-300 hover:bg-red-900/50'
+            : 'border-slate-600/50 bg-slate-800/60 hover:bg-slate-700 text-slate-400'
+        }`}
+      >
+        {dismissing
+          ? <Loader2 className="h-3.5 w-3.5 animate-spin" />
+          : <Trash2 className="h-3.5 w-3.5" />}
+        {dismissing
+          ? 'Удаляю…'
+          : confirmDismiss
+          ? 'Подтвердить очистку'
+          : 'Очистить watcher'}
+      </button>
+
+      {/* Review-now */}
       <button
         onClick={handleReview}
         disabled={busy}
@@ -361,7 +414,7 @@ function ActionButtons() {
         {reviewing ? 'Проверяю…' : 'Проверить события'}
       </button>
 
-      {/* Scan-now button (primary) */}
+      {/* Scan-now (primary) */}
       <button
         onClick={handleScan}
         disabled={busy}

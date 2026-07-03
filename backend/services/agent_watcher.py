@@ -23,6 +23,19 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 logger = logging.getLogger("flowof.agent_watcher")
 
+# ── Level A calibration constants ─────────────────────────────────────────────
+#
+# Open Rate fires only if:
+#   orate < or_critical * _OR_HARD_FACTOR   (hard solo breach)
+#   OR orate < or_critical AND chatter also has rpc < rpc_critical (combo)
+_OR_HARD_FACTOR = 0.75   # e.g., threshold=20% → hard breach if < 15%
+
+# If >=_GROUP_MIN chatters share the same metric problem → merge into one event
+_GROUP_MIN = 3
+
+# Hard cap: never create more than this many events per scan run
+_MAX_EVENTS_PER_SCAN = 5
+
 # ── Name normalisation (mirrors analyst_tools._norm_chatter_name) ─────────────
 
 def _norm_ref(ref: str | None) -> str:
@@ -164,6 +177,71 @@ def _last_completed_month() -> tuple[int, int]:
     return today.year, today.month - 1
 
 
+# ── Level A candidate helpers ──────────────────────────────────────────────────
+
+def _make_candidate(
+    *,
+    severity: float,
+    metric: str,
+    entity_type: str,
+    entity_ref: str | None,
+    title: str,
+    description: str,
+    trigger_metric: str,
+    trigger_value_before: float | None,
+    priority: str,
+    review_in_days: int,
+) -> dict[str, Any]:
+    return {
+        "severity": severity,
+        "metric": metric,
+        "entity_type": entity_type,
+        "entity_ref": entity_ref,
+        "title": title,
+        "description": description,
+        "trigger_metric": trigger_metric,
+        "trigger_value_before": trigger_value_before,
+        "priority": priority,
+        "review_in_days": review_in_days,
+    }
+
+
+def _build_group_event(
+    bucket: list[dict[str, Any]],
+    *,
+    label: str,
+    metric_name: str,
+    entity_ref_key: str,
+    unit: str,
+    year: int,
+    month: int,
+) -> dict[str, Any]:
+    """Merge N individual candidates into one agency-level systemic event."""
+    bucket_sorted = sorted(bucket, key=lambda x: x["severity"], reverse=True)
+    chatters_str = ", ".join(
+        f"{c['entity_ref']} ({c['trigger_value_before']:.1f}{unit})"
+        for c in bucket_sorted
+    )
+    avg_sev = sum(c["severity"] for c in bucket_sorted) / len(bucket_sorted)
+    return _make_candidate(
+        severity=avg_sev * 1.3,   # systemic issues score higher
+        metric=metric_name,
+        entity_type="agency",
+        entity_ref=entity_ref_key,
+        title=f"Системная проблема: {label} ниже нормы у {len(bucket_sorted)} чаттеров",
+        description=(
+            f"У {len(bucket_sorted)} чаттеров {label} ниже критического порога. "
+            f"Список: {chatters_str}. "
+            f"Период: {year}-{month:02d}. "
+            f"Требует командного разбора."
+        ),
+        trigger_metric=metric_name,
+        trigger_value_before=float(bucket_sorted[0]["trigger_value_before"] or 0),
+        priority="high",
+        review_in_days=14,
+    )
+
+
 # ── LEVEL A — threshold rules (no LLM) ───────────────────────────────────────
 
 async def _level_a_scan(
@@ -171,13 +249,40 @@ async def _level_a_scan(
     tenant_id: int,
     profile: dict[str, Any],
 ) -> int:
-    """Detect hard threshold breaches using find_anomalies + agency_profile thresholds."""
-    from services.analyst_tools import find_anomalies
+    """Detect hard threshold breaches.
+
+    Calibration (tighter than naive threshold comparison):
+    - Open Rate: fires only if orate < or_critical * _OR_HARD_FACTOR  (hard solo breach)
+                 OR orate < or_critical AND rpc < rpc_critical         (double problem)
+    - RPC: fires only if rpc < rpc_critical (real breach, not around-threshold noise)
+    - Revenue drop: >=40% MoM drop (unchanged)
+    Grouping: if >=_GROUP_MIN chatters share the same metric issue → one agency event.
+    Cap: at most _MAX_EVENTS_PER_SCAN events created per run.
+    """
+    from services.analyst_tools import find_anomalies, get_chatter_kpi_tool
 
     year, month = _last_completed_month()
     rpc_critical = float(profile.get("rpc_critical") or 0.15)
     or_critical  = float(profile.get("open_rate_critical") or 20.0)
+    or_hard_ceil = or_critical * _OR_HARD_FACTOR  # e.g. 15% when threshold=20%
 
+    # ── Fetch KPI rows ─────────────────────────────────────────────────────────
+    kpi_by_chatter: dict[str, dict] = {}
+    try:
+        rows = await get_chatter_kpi_tool(db, tenant_id, year=year, month=month)
+        for r in rows:
+            name = r.get("chatter", "")
+            if name:
+                kpi_by_chatter[name] = r
+    except Exception as exc:
+        logger.warning("watcher level_a kpi fetch error tenant=%s: %s", tenant_id, exc)
+        try:
+            await db.rollback()
+        except Exception:
+            pass
+
+    # ── Fetch anomalies ────────────────────────────────────────────────────────
+    anomalies: list[dict] = []
     try:
         anomalies = await find_anomalies(db, tenant_id, year=year, month=month)
     except Exception as exc:
@@ -186,111 +291,191 @@ async def _level_a_scan(
             await db.rollback()
         except Exception:
             pass
-        return 0
 
-    created = 0
+    # Chatters flagged by find_anomalies as low_rpc — used for combo detection
+    low_rpc_chatters: set[str] = set()
+    for a in anomalies:
+        if a.get("type") == "low_rpc":
+            rpc = float(a.get("rpc", 0) or 0)
+            if rpc < rpc_critical:
+                low_rpc_chatters.add(_norm_ref(a.get("chatter", "")))
+
+    # ── Build candidate buckets ────────────────────────────────────────────────
+    #
+    # or_candidates  — qualifying OR violations (hard breach or combo)
+    # rpc_candidates — qualifying RPC violations
+    # other_candidates — revenue drops, concentration risk (always individual)
+
+    or_candidates:    list[dict[str, Any]] = []
+    rpc_candidates:   list[dict[str, Any]] = []
+    other_candidates: list[dict[str, Any]] = []
+
+    # Revenue drops + concentration risk (from find_anomalies)
     for a in anomalies:
         atype = a.get("type", "")
 
         if atype == "revenue_drop":
             chatter = a.get("chatter", "")
-            pct     = abs(float(a.get("drop_pct", 0)))
+            pct = abs(float(a.get("drop_pct", 0)))
             if pct < 40:
-                continue  # only hard breaches
-            ok = await _safe_create_event(
-                db, tenant_id,
-                title=f"Падение выручки чаттера {chatter} на {pct:.0f}%",
-                description=(
-                    f"Выручка {chatter} упала на {pct:.0f}% по сравнению с прошлым месяцем. "
-                    f"Текущий период: {year}-{month:02d}."
-                ),
+                continue
+            other_candidates.append(_make_candidate(
+                severity=min(pct, 100),
+                metric="revenue_drop",
                 entity_type="chatter",
                 entity_ref=chatter,
+                title=f"Падение выручки {chatter} на {pct:.0f}%",
+                description=(
+                    f"Выручка {chatter} упала на {pct:.0f}% относительно прошлого месяца. "
+                    f"Период: {year}-{month:02d}."
+                ),
                 trigger_metric="revenue_mom_pct",
                 trigger_value_before=float(a.get("prev_revenue", 0) or 0),
                 priority="high",
                 review_in_days=7,
-            )
-            if ok:
-                created += 1
+            ))
 
         elif atype == "low_rpc":
             chatter = a.get("chatter", "")
-            rpc     = float(a.get("rpc", 0) or 0)
+            rpc = float(a.get("rpc", 0) or 0)
             if rpc >= rpc_critical:
-                continue  # not below critical threshold
-            ok = await _safe_create_event(
-                db, tenant_id,
-                title=f"Низкий RPC чаттера {chatter}: ${rpc:.2f}",
-                description=(
-                    f"RPC {chatter} = ${rpc:.2f} — ниже критического порога ${rpc_critical:.2f}. "
-                    f"Период: {year}-{month:02d}."
-                ),
+                continue
+            severity = (rpc_critical - rpc) / max(rpc_critical, 0.001) * 100
+            rpc_candidates.append(_make_candidate(
+                severity=severity,
+                metric="rpc",
                 entity_type="chatter",
                 entity_ref=chatter,
+                title=f"Низкий RPC {chatter}: ${rpc:.2f}",
+                description=(
+                    f"RPC {chatter} = ${rpc:.2f} — ниже порога ${rpc_critical:.2f}. "
+                    f"Период: {year}-{month:02d}."
+                ),
                 trigger_metric="rpc",
                 trigger_value_before=rpc,
                 priority="high" if rpc < rpc_critical * 0.5 else "normal",
                 review_in_days=14,
-            )
-            if ok:
-                created += 1
+            ))
 
         elif atype == "concentration_risk":
             top_pct = float(a.get("top3_pct", 0) or 0)
             if top_pct < 80:
                 continue
-            ok = await _safe_create_event(
-                db, tenant_id,
-                title=f"Риск концентрации: топ-3 модели = {top_pct:.0f}% выручки",
-                description=(
-                    f"Топ-3 модели дают {top_pct:.0f}% всей выручки агентства. "
-                    f"Период: {year}-{month:02d}. Диверсифицировать источники дохода."
-                ),
+            other_candidates.append(_make_candidate(
+                severity=top_pct - 80,
+                metric="concentration_risk",
                 entity_type="agency",
                 entity_ref="concentration_risk",
+                title=f"Риск концентрации: топ-3 модели = {top_pct:.0f}% выручки",
+                description=(
+                    f"Топ-3 модели дают {top_pct:.0f}% выручки агентства. "
+                    f"Период: {year}-{month:02d}. Нужна диверсификация."
+                ),
                 trigger_metric="top3_revenue_pct",
                 trigger_value_before=top_pct,
                 priority="normal",
                 review_in_days=30,
-            )
-            if ok:
-                created += 1
+            ))
 
-    # ── Low Open Rate check (direct KPI query, not in find_anomalies) ─────────
-    try:
-        from services.analyst_tools import get_chatter_kpi_tool
-        kpi_rows = await get_chatter_kpi_tool(db, tenant_id, year=year, month=month)
-        for row in kpi_rows:
-            orate = row.get("ppv_open_rate")
-            if orate is None:
-                continue
-            orate = float(orate)
-            if orate >= or_critical:
-                continue
-            chatter = row.get("chatter", "")
+    # Open Rate violations (from KPI rows) — tighter filter
+    for chatter, row in kpi_by_chatter.items():
+        orate = row.get("ppv_open_rate")
+        if orate is None:
+            continue
+        orate = float(orate)
+        if orate >= or_critical:
+            continue  # above threshold entirely
+
+        is_hard_breach = orate < or_hard_ceil
+        has_low_rpc    = _norm_ref(chatter) in low_rpc_chatters
+
+        if not is_hard_breach and not has_low_rpc:
+            # Mild solo breach (e.g. 19.6% vs 20% threshold) — not worth an event
+            continue
+
+        severity = (or_critical - orate) / max(or_critical, 0.001) * 100
+        if has_low_rpc:
+            severity *= 1.5  # combo problems rank higher
+
+        if has_low_rpc and not is_hard_breach:
+            title = f"Двойная проблема {chatter}: OR {orate:.1f}% + низкий RPC"
+            desc  = (
+                f"Open Rate {chatter} = {orate:.1f}% (порог {or_critical:.0f}%) "
+                f"в сочетании с низким RPC. Двойная проблема. Период: {year}-{month:02d}."
+            )
+        else:
+            title = f"Низкий Open Rate {chatter}: {orate:.1f}%"
+            desc  = (
+                f"Open Rate {chatter} = {orate:.1f}% — значительно ниже порога "
+                f"{or_critical:.0f}% (треб. ≥ {or_hard_ceil:.0f}%). "
+                f"Период: {year}-{month:02d}."
+            )
+
+        or_candidates.append(_make_candidate(
+            severity=severity,
+            metric="open_rate",
+            entity_type="chatter",
+            entity_ref=chatter,
+            title=title,
+            description=desc,
+            trigger_metric="open_rate",
+            trigger_value_before=orate,
+            priority="high" if is_hard_breach else "normal",
+            review_in_days=14,
+        ))
+
+    # ── Grouping: merge buckets of >=_GROUP_MIN into one agency event ──────────
+    final_candidates: list[dict[str, Any]] = list(other_candidates)
+
+    for bucket, label, metric_name, ref_key, unit in [
+        (or_candidates,  "Open Rate", "open_rate", "systemic_low_open_rate",  "%"),
+        (rpc_candidates, "RPC",       "rpc",        "systemic_low_rpc",       "$"),
+    ]:
+        if len(bucket) >= _GROUP_MIN:
+            final_candidates.append(_build_group_event(
+                bucket,
+                label=label,
+                metric_name=metric_name,
+                entity_ref_key=ref_key,
+                unit=unit,
+                year=year,
+                month=month,
+            ))
+        else:
+            final_candidates.extend(bucket)
+
+    # ── Sort by severity descending; hard cap ─────────────────────────────────
+    final_candidates.sort(key=lambda x: x["severity"], reverse=True)
+    top      = final_candidates[:_MAX_EVENTS_PER_SCAN]
+    overflow = final_candidates[_MAX_EVENTS_PER_SCAN:]
+
+    # ── Create events ──────────────────────────────────────────────────────────
+    created = 0
+    for c in top:
+        try:
             ok = await _safe_create_event(
                 db, tenant_id,
-                title=f"Низкий Open Rate {chatter}: {orate:.1f}%",
-                description=(
-                    f"Open Rate {chatter} = {orate:.1f}% — ниже критического порога "
-                    f"{or_critical:.0f}%. Период: {year}-{month:02d}."
-                ),
-                entity_type="chatter",
-                entity_ref=chatter,
-                trigger_metric="open_rate",
-                trigger_value_before=orate,
-                priority="high" if orate < or_critical * 0.7 else "normal",
-                review_in_days=14,
+                title=c["title"],
+                description=c["description"],
+                entity_type=c["entity_type"],
+                entity_ref=c["entity_ref"],
+                trigger_metric=c["trigger_metric"],
+                trigger_value_before=c["trigger_value_before"],
+                priority=c["priority"],
+                review_in_days=c["review_in_days"],
             )
             if ok:
                 created += 1
-    except Exception as exc:
-        logger.warning("watcher level_a kpi error tenant=%s: %s", tenant_id, exc)
-        try:
-            await db.rollback()
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.warning("watcher level_a create event error: %s", exc)
+
+    # If anything was cut by the cap — log a summary but don't spam more events
+    if overflow:
+        titles = "; ".join(c["title"] for c in overflow[:5])
+        logger.info(
+            "watcher level_a overflow tenant=%s: %d findings not created (cap=%d): %s",
+            tenant_id, len(overflow), _MAX_EVENTS_PER_SCAN, titles,
+        )
 
     return created
 
