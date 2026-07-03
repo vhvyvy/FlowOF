@@ -1,8 +1,7 @@
 'use client'
 
-import { useState } from 'react'
+import { useState, useEffect, useRef } from 'react'
 import Link from 'next/link'
-import { usePathname } from 'next/navigation'
 import { Header } from '@/components/layout/Header'
 import { Button } from '@/components/ui/button'
 import {
@@ -13,6 +12,7 @@ import {
   Plus,
   Check,
   Brain,
+  RotateCcw,
 } from 'lucide-react'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
@@ -22,6 +22,28 @@ import { useMonthStore } from '@/lib/hooks/useMonth'
 import { formatMonth } from '@/lib/utils'
 import { useCreateAgentEvent } from '@/lib/hooks/useAgentEvents'
 import type { ProposedEvent } from '@/lib/hooks/useAgentEvents'
+
+// ── Session helpers ─────────────────────────────────────────────────────────
+
+const SESSION_KEY = 'ai_chat_session_id'
+
+function newSessionId(): string {
+  return crypto.randomUUID()
+}
+
+function readStoredSessionId(): string {
+  try {
+    return localStorage.getItem(SESSION_KEY) || ''
+  } catch {
+    return ''
+  }
+}
+
+function writeStoredSessionId(id: string) {
+  try {
+    localStorage.setItem(SESSION_KEY, id)
+  } catch { /* ignore SSR or private-mode */ }
+}
 
 // ── Shared label helpers (reused in proposed-event cards) ──────────────────
 
@@ -286,24 +308,81 @@ function ProposedEventCard({
 
 // ── Main page ──────────────────────────────────────────────────────────────
 
+interface AnalyzeApiResponse {
+  answer: string
+  proposed_events?: ProposedEvent[]
+  session_id: string
+}
+
+interface HistoryApiResponse {
+  session_id: string
+  messages: Array<{ role: string; content: string }>
+}
+
 export default function AiPage() {
   const { month, year } = useMonthStore()
-  const [messages, setMessages] = useState<Message[]>([])
-  const [input, setInput] = useState('')
-  const [loading, setLoading] = useState(false)
+  const [messages, setMessages]     = useState<Message[]>([])
+  const [input, setInput]           = useState('')
+  const [loading, setLoading]       = useState(false)
+  const [historyLoading, setHistoryLoading] = useState(true)
+  const [sessionId, setSessionId]   = useState<string>('')
+  const bottomRef = useRef<HTMLDivElement>(null)
 
+  // ── Restore / init session from localStorage ──────────────────────────────
+  useEffect(() => {
+    const stored = readStoredSessionId()
+    const sid = stored || newSessionId()
+    setSessionId(sid)
+    if (!stored) {
+      writeStoredSessionId(sid)
+      setHistoryLoading(false)
+      return
+    }
+    // Load existing history from server
+    api.get<HistoryApiResponse>(`/api/v1/ai/history?session_id=${sid}`)
+      .then((res) => {
+        const msgs: Message[] = res.data.messages.map((m) => ({
+          role: m.role as 'user' | 'assistant',
+          content: m.content,
+        }))
+        setMessages(msgs)
+      })
+      .catch(() => { /* first session or network error — start fresh */ })
+      .finally(() => setHistoryLoading(false))
+  }, [])
+
+  // Auto-scroll to bottom on new messages
+  useEffect(() => {
+    bottomRef.current?.scrollIntoView({ behavior: 'smooth' })
+  }, [messages, loading])
+
+  // ── New chat ───────────────────────────────────────────────────────────────
+  function startNewChat() {
+    const sid = newSessionId()
+    writeStoredSessionId(sid)
+    setSessionId(sid)
+    setMessages([])
+    setInput('')
+  }
+
+  // ── Send message ──────────────────────────────────────────────────────────
   async function sendMessage(text: string) {
-    if (!text.trim()) return
+    if (!text.trim() || loading) return
     const userMsg: Message = { role: 'user', content: text }
     setMessages((prev) => [...prev, userMsg])
     setInput('')
     setLoading(true)
 
     try {
-      const res = await api.post<{ answer: string; proposed_events?: ProposedEvent[] }>(
+      const res = await api.post<AnalyzeApiResponse>(
         '/api/v1/ai/analyze',
-        { question: text, month, year },
+        { question: text, month, year, session_id: sessionId || undefined },
       )
+      // Server may return a new session_id (e.g. when we sent undefined)
+      if (res.data.session_id && res.data.session_id !== sessionId) {
+        setSessionId(res.data.session_id)
+        writeStoredSessionId(res.data.session_id)
+      }
       setMessages((prev) => [
         ...prev,
         {
@@ -327,13 +406,26 @@ export default function AiPage() {
       <Header
         title="AI Аналитик"
         actions={
-          <Link
-            href="/dashboard/ai/events"
-            className="flex items-center gap-1.5 px-3 py-1.5 bg-slate-700/60 hover:bg-slate-700 border border-slate-600/50 text-slate-300 text-sm rounded-lg transition-colors"
-          >
-            <Brain className="h-4 w-4" />
-            События мозга
-          </Link>
+          <div className="flex items-center gap-2">
+            {messages.length > 0 && (
+              <button
+                onClick={startNewChat}
+                disabled={loading}
+                title="Начать новый чат (текущий сохранится)"
+                className="flex items-center gap-1.5 px-3 py-1.5 bg-slate-700/60 hover:bg-slate-700 border border-slate-600/50 text-slate-400 hover:text-slate-200 text-sm rounded-lg transition-colors disabled:opacity-50"
+              >
+                <RotateCcw className="h-3.5 w-3.5" />
+                Новый чат
+              </button>
+            )}
+            <Link
+              href="/dashboard/ai/events"
+              className="flex items-center gap-1.5 px-3 py-1.5 bg-slate-700/60 hover:bg-slate-700 border border-slate-600/50 text-slate-300 text-sm rounded-lg transition-colors"
+            >
+              <Brain className="h-4 w-4" />
+              События мозга
+            </Link>
+          </div>
         }
       />
 
@@ -360,7 +452,12 @@ export default function AiPage() {
         {/* Messages area — overflow-x must stay visible so the table's own
             overflow-x-auto scroll track works; vertical scrolling via overflow-y-auto */}
         <div className="flex-1 overflow-y-auto overflow-x-hidden space-y-4 mb-4">
-          {messages.length === 0 && (
+          {historyLoading && (
+            <div className="flex justify-center items-center h-full">
+              <Loader2 className="h-5 w-5 animate-spin text-slate-500" />
+            </div>
+          )}
+          {!historyLoading && messages.length === 0 && (
             <div className="flex flex-col items-center justify-center h-full text-center">
               <div className="w-14 h-14 rounded-2xl bg-indigo-500/15 flex items-center justify-center mb-4">
                 <Sparkles className="h-7 w-7 text-indigo-400" />
@@ -430,6 +527,8 @@ export default function AiPage() {
               </div>
             </div>
           )}
+          {/* Scroll anchor */}
+          <div ref={bottomRef} />
         </div>
 
         {/* Input */}
@@ -445,12 +544,12 @@ export default function AiPage() {
               }
             }}
             placeholder="Задайте вопрос..."
-            disabled={loading}
+            disabled={loading || historyLoading}
             className="flex-1 h-11 rounded-xl border border-slate-600 bg-slate-800 px-4 text-sm text-slate-100 placeholder:text-slate-500 focus:outline-none focus:ring-2 focus:ring-indigo-500 disabled:opacity-50"
           />
           <Button
             onClick={() => sendMessage(input)}
-            disabled={loading || !input.trim()}
+            disabled={loading || historyLoading || !input.trim()}
             size="icon"
             className="h-11 w-11"
           >

@@ -591,6 +591,23 @@ _PATCHES: list[tuple[str, bool]] = [
         )""",
         False,
     ),
+    # ── AI chat session history ──────────────────────────────────────────────
+    (
+        """CREATE TABLE IF NOT EXISTS ai_chat_messages (
+            id         SERIAL PRIMARY KEY,
+            tenant_id  INTEGER NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+            session_id VARCHAR(64) NOT NULL,
+            role       VARCHAR(20) NOT NULL CHECK (role IN ('user','assistant')),
+            content    TEXT NOT NULL,
+            created_at TIMESTAMP NOT NULL DEFAULT NOW()
+        )""",
+        False,
+    ),
+    (
+        """CREATE INDEX IF NOT EXISTS idx_ai_chat_messages_session
+           ON ai_chat_messages (tenant_id, session_id, created_at)""",
+        False,
+    ),
 ]
 
 # Catalog tables that should have UNIQUE(tenant_id, name).

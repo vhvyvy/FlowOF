@@ -106,8 +106,16 @@ class LLMAnalyst:
         question: str,
         max_iterations: int = 8,
         context_hint: str = "",
+        chat_history: list[dict[str, str]] | None = None,
     ) -> dict[str, Any]:
         """Run an agentic tool-use loop: Claude calls read/write tools, answers.
+
+        Args:
+            chat_history: Prior clean exchanges for this session in Anthropic format:
+                [{"role": "user", "content": "..."}, {"role": "assistant", "content": "..."}, ...]
+                Only plain text turns (no tool_use/tool_result blocks) are passed here —
+                those are internal to a single invocation. Capped at the last 20 turns
+                (10 exchanges) by the caller.
 
         Returns dict with keys:
           answer          (str)   — final text response
@@ -201,7 +209,11 @@ class LLMAnalyst:
             system += f"\n\n{open_events_context}"
 
         client = AsyncAnthropic(api_key=self.api_key)
-        messages: list[dict[str, Any]] = [{"role": "user", "content": question}]
+        # Build messages: prior clean exchanges + current question.
+        # tool_use/tool_result turns are local to each invocation and are NOT
+        # stored in the persistent history — they would bloat the context fast.
+        history: list[dict[str, Any]] = list(chat_history or [])
+        messages: list[dict[str, Any]] = history + [{"role": "user", "content": question}]
         iterations = 0
         final_text = ""
 
