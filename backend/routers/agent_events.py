@@ -10,6 +10,7 @@ from datetime import date, datetime, timedelta
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -281,14 +282,28 @@ async def trigger_watcher_scan(
     """Immediately run a watcher scan for the current tenant (manual trigger).
     Returns how many events were created at each level.
     """
-    from services.agent_watcher import watcher_scan
-    result = await watcher_scan(db, tenant.id)
-    logger.info(
-        "manual scan-now tenant=%s level_a=%s level_b=%s total=%s errors=%s",
-        tenant.id, result.get("level_a"), result.get("level_b"),
-        result.get("total"), result.get("errors"),
-    )
-    return result
+    try:
+        from services.agent_watcher import watcher_scan
+        result = await watcher_scan(db, tenant.id)
+        logger.info(
+            "manual scan-now tenant=%s level_a=%s level_b=%s total=%s errors=%s",
+            tenant.id, result.get("level_a"), result.get("level_b"),
+            result.get("total"), result.get("errors"),
+        )
+        return result
+    except BaseException as exc:
+        # Should never reach here — watcher_scan is designed to never raise.
+        # This final net ensures we always return 200 so the frontend can show the error.
+        err_msg = f"{type(exc).__name__}: {exc}"
+        logger.exception("scan-now endpoint unhandled exception tenant=%s: %s", tenant.id, err_msg)
+        try:
+            await db.rollback()
+        except Exception:
+            pass
+        return JSONResponse(
+            status_code=200,
+            content={"level_a": 0, "level_b": 0, "total": 0, "errors": [err_msg]},
+        )
 
 
 @router.post("/review-now")
