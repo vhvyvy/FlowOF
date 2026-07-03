@@ -159,7 +159,12 @@ async def get_monthly_trend(
     db: AsyncSession,
     tenant_id: int,
 ) -> list[dict]:
-    """Full month-by-month revenue / expenses / profit series (all history)."""
+    """Full month-by-month revenue / expenses / profit series (all history).
+
+    Uses explicit CAST(0 AS NUMERIC) in the UNION ALL to avoid PostgreSQL
+    type-resolution errors when mixing a NUMERIC amount column with a plain
+    integer literal '0'.
+    """
     rows = (await db.execute(
         text(
             """
@@ -168,11 +173,17 @@ async def get_monthly_trend(
                 COALESCE(SUM(rev), 0)                       AS revenue,
                 COALESCE(SUM(exp), 0)                       AS expenses
             FROM (
-                SELECT DATE_TRUNC('month', date) AS d, amount AS rev, 0 AS exp
-                FROM transactions WHERE tenant_id = :tid AND date IS NOT NULL
+                SELECT DATE_TRUNC('month', date)   AS d,
+                       COALESCE(amount, 0::numeric) AS rev,
+                       0::numeric                   AS exp
+                FROM transactions
+                WHERE tenant_id = :tid AND date IS NOT NULL
                 UNION ALL
-                SELECT DATE_TRUNC('month', date) AS d, 0 AS rev, amount AS exp
-                FROM expenses WHERE tenant_id = :tid AND date IS NOT NULL
+                SELECT DATE_TRUNC('month', date)   AS d,
+                       0::numeric                   AS rev,
+                       COALESCE(amount, 0::numeric) AS exp
+                FROM expenses
+                WHERE tenant_id = :tid AND date IS NOT NULL
             ) x
             GROUP BY 1
             ORDER BY 1

@@ -282,12 +282,17 @@ async def trigger_watcher_scan(
     """Immediately run a watcher scan for the current tenant (manual trigger).
     Returns how many events were created at each level.
     """
+    # Save tenant_id to a plain int BEFORE the scan. After watcher_scan runs,
+    # db may have committed or rolled back, expiring all ORM objects attached to
+    # the session. Accessing tenant.id afterwards would trigger a lazy async
+    # reload → MissingGreenlet error.
+    tid = tenant.id
     try:
         from services.agent_watcher import watcher_scan
-        result = await watcher_scan(db, tenant.id)
+        result = await watcher_scan(db, tid)
         logger.info(
             "manual scan-now tenant=%s level_a=%s level_b=%s total=%s errors=%s",
-            tenant.id, result.get("level_a"), result.get("level_b"),
+            tid, result.get("level_a"), result.get("level_b"),
             result.get("total"), result.get("errors"),
         )
         return result
@@ -295,7 +300,7 @@ async def trigger_watcher_scan(
         # Should never reach here — watcher_scan is designed to never raise.
         # This final net ensures we always return 200 so the frontend can show the error.
         err_msg = f"{type(exc).__name__}: {exc}"
-        logger.exception("scan-now endpoint unhandled exception tenant=%s: %s", tenant.id, err_msg)
+        logger.exception("scan-now endpoint unhandled exception tenant=%s: %s", tid, err_msg)
         try:
             await db.rollback()
         except Exception:

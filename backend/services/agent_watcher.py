@@ -481,6 +481,7 @@ async def _level_a_scan(
                 logger.warning("watcher level_a create event error: %s", exc)
                 try:
                     await db.rollback()
+                    db.expire_all()
                 except Exception:
                     pass
 
@@ -497,6 +498,7 @@ async def _level_a_scan(
         )
         try:
             await db.rollback()
+            db.expire_all()
         except Exception:
             pass
 
@@ -684,6 +686,7 @@ async def _level_b_scan(db: AsyncSession, tenant_id: int) -> tuple[int, str | No
                     logger.warning("watcher level_b tool=%s error: %s", block.name, exc)
                     try:
                         await db.rollback()
+                        db.expire_all()   # purge stale ORM state so next query starts fresh
                     except Exception:
                         pass
                     tool_results.append({
@@ -758,6 +761,7 @@ async def watcher_scan(db: AsyncSession, tenant_id: int) -> dict:
         errors.append(err)
         try:
             await db.rollback()
+            db.expire_all()
         except Exception:
             pass
 
@@ -770,6 +774,7 @@ async def watcher_scan(db: AsyncSession, tenant_id: int) -> dict:
         errors.append(err)
         try:
             await db.rollback()
+            db.expire_all()
         except Exception:
             pass
 
@@ -784,6 +789,7 @@ async def watcher_scan(db: AsyncSession, tenant_id: int) -> dict:
         errors.append(err)
         try:
             await db.rollback()
+            db.expire_all()
         except Exception:
             pass
 
