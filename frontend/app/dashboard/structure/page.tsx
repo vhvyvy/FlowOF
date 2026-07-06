@@ -4,6 +4,7 @@ import { Header } from '@/components/layout/Header'
 import { Skeleton } from '@/components/ui/skeleton'
 import { useStructure } from '@/lib/hooks/useStructure'
 import { useMonthStore } from '@/lib/hooks/useMonth'
+import { useTeamStore } from '@/lib/hooks/useTeam'
 import { formatCurrency } from '@/lib/utils'
 import type { ModelShare, ChatterShare, EconomicBreakdown } from '@/types'
 import { useMemo, useEffect, useRef, useState } from 'react'
@@ -366,7 +367,8 @@ function ModelTable({ models }: { models: ModelShare[] }) {
 
 export default function StructurePage() {
   const { month, year } = useMonthStore()
-  const { data, isLoading, error } = useStructure(month, year)
+  const { teamId } = useTeamStore()
+  const { data, isLoading, error } = useStructure(month, year, teamId)
 
   return (
     <div className="flex flex-col h-full">

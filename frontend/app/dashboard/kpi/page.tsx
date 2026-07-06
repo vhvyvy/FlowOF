@@ -6,6 +6,7 @@ import { Header } from '@/components/layout/Header'
 import { MetricCard, MetricCardSkeleton } from '@/components/metrics/MetricCard'
 import { Skeleton } from '@/components/ui/skeleton'
 import { useMonthStore } from '@/lib/hooks/useMonth'
+import { useTeamStore } from '@/lib/hooks/useTeam'
 import { formatCurrency } from '@/lib/utils'
 import api from '@/lib/api'
 import type { KpiRow, KpiResponse, KpiMappingOut, KpiSyncResult } from '@/types'
@@ -408,12 +409,15 @@ function KpiTable({ rows }: { rows: KpiRow[] }) {
 
 export default function KpiPage() {
   const { month, year } = useMonthStore()
+  const { teamId } = useTeamStore()
   const qc = useQueryClient()
   const fileRef = useRef<HTMLInputElement>(null)
 
+  const teamParam = typeof teamId === 'number' ? `&team_id=${teamId}` : ''
+
   const { data, isLoading, error } = useQuery<KpiResponse>({
-    queryKey: ['kpi', month, year],
-    queryFn: () => api.get<KpiResponse>(`/api/v1/kpi?month=${month}&year=${year}`).then(r => r.data),
+    queryKey: ['kpi', month, year, teamId],
+    queryFn: () => api.get<KpiResponse>(`/api/v1/kpi?month=${month}&year=${year}${teamParam}`).then(r => r.data),
     enabled: month > 0 && year > 0,
   })
 
@@ -463,7 +467,7 @@ export default function KpiPage() {
     onSuccess: (res) => {
       setSyncMsg(res.message)
       setSyncError(null)
-      qc.invalidateQueries({ queryKey: ['kpi', month, year] })
+      qc.invalidateQueries({ queryKey: ['kpi', month, year, teamId] })
     },
     onError: (e: any) => {
       setSyncError(e?.response?.data?.detail ?? 'Ошибка загрузки файла')

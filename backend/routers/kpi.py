@@ -20,6 +20,7 @@ from schemas import (
 )
 from services.kpi_service import get_chatter_kpi
 from services.onlymonster import fetch_chatter_metrics
+from team_helpers import list_teams, team_transaction_clause
 
 logger = logging.getLogger("flowof.kpi")
 router = APIRouter(prefix="/api/v1", tags=["kpi"])
@@ -29,6 +30,7 @@ router = APIRouter(prefix="/api/v1", tags=["kpi"])
 async def get_kpi(
     month: int = Query(..., ge=1, le=12),
     year: int = Query(..., ge=2020),
+    team_id: int | None = Query(None, description="Filter to one team"),
     tenant: Tenant = Depends(get_current_tenant),
     db: AsyncSession = Depends(get_db),
 ):
@@ -36,8 +38,17 @@ async def get_kpi(
         settings = await load_settings(db, tenant.id)
         use_retention = settings.get("use_retention", "1") == "1"
 
+        # ── Resolve team filter ────────────────────────────────────────────
+        teams = await list_teams(db, tenant.id)
+        default_team_id = teams[0].id if teams else None
+        team_filter = None
+        if team_id is not None:
+            selected = next((t for t in teams if t.id == team_id), None)
+            if selected is not None:
+                team_filter = team_transaction_clause(selected.id, default_team_id)
+
         rows, total_revenue, total_txns, avg_rpc = await get_chatter_kpi(
-            db, tenant.id, year, month, use_retention=use_retention
+            db, tenant.id, year, month, use_retention=use_retention, team_filter=team_filter
         )
 
         return KpiResponse(

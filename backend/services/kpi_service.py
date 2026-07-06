@@ -207,21 +207,25 @@ async def chatter_txn_stats(
     tenant_id: int,
     year: int,
     month: int,
+    team_filter=None,
 ) -> dict[str, dict]:
     """Returns {chatter_name: {revenue, transactions}} for a given month."""
     start, end = _month_range(year, month)
+    conds = [
+        Transaction.tenant_id == tenant_id,
+        Transaction.date      >= start,
+        Transaction.date      <= end,
+        Transaction.chatter.isnot(None),
+    ]
+    if team_filter is not None:
+        conds.append(team_filter)
     result = await db.execute(
         select(
             Transaction.chatter,
             func.sum(Transaction.amount).label("rev"),
             func.count(Transaction.id).label("txn_count"),
         )
-        .where(and_(
-            Transaction.tenant_id == tenant_id,
-            Transaction.date      >= start,
-            Transaction.date      <= end,
-            Transaction.chatter.isnot(None),
-        ))
+        .where(and_(*conds))
         .group_by(Transaction.chatter)
     )
     return {
@@ -238,13 +242,26 @@ async def get_chatter_kpi(
     year: int,
     month: int,
     use_retention: bool = True,
+    team_filter=None,
 ) -> tuple[list[KpiRow], float, int, float | None]:
     """Build the full KPI rows for a month, including MoM deltas.
+
+    Args:
+        team_filter: Optional SQLAlchemy clause from team_transaction_clause().
+                     When supplied, only transactions matching that clause are counted.
 
     Returns:
         (rows, total_revenue, total_txns, avg_rpc)
     """
     start, end = _month_range(year, month)
+
+    base_conds = [
+        Transaction.tenant_id == tenant_id,
+        Transaction.date      >= start,
+        Transaction.date      <= end,
+    ]
+    if team_filter is not None:
+        base_conds.append(team_filter)
 
     # ── Current month: revenue per chatter ────────────────────────────────────
     chatter_result = await db.execute(
@@ -253,12 +270,7 @@ async def get_chatter_kpi(
             func.sum(Transaction.amount).label("revenue"),
             func.count(Transaction.id).label("txn_count"),
         )
-        .where(and_(
-            Transaction.tenant_id == tenant_id,
-            Transaction.date      >= start,
-            Transaction.date      <= end,
-            Transaction.chatter.isnot(None),
-        ))
+        .where(and_(*base_conds, Transaction.chatter.isnot(None)))
         .group_by(Transaction.chatter)
         .order_by(func.sum(Transaction.amount).desc())
     )
@@ -269,12 +281,7 @@ async def get_chatter_kpi(
     # ── Payout per chatter (plan-tier based) ──────────────────────────────────
     chatter_model_result = await db.execute(
         select(Transaction.chatter, Transaction.model, func.sum(Transaction.amount).label("rev"))
-        .where(and_(
-            Transaction.tenant_id == tenant_id,
-            Transaction.date      >= start,
-            Transaction.date      <= end,
-            Transaction.chatter.isnot(None),
-        ))
+        .where(and_(*base_conds, Transaction.chatter.isnot(None)))
         .group_by(Transaction.chatter, Transaction.model)
     )
     chatter_model_rows = chatter_model_result.all()
@@ -288,11 +295,7 @@ async def get_chatter_kpi(
 
     model_rev_result = await db.execute(
         select(Transaction.model, func.sum(Transaction.amount).label("rev"))
-        .where(and_(
-            Transaction.tenant_id == tenant_id,
-            Transaction.date      >= start,
-            Transaction.date      <= end,
-        ))
+        .where(and_(*base_conds))
         .group_by(Transaction.model)
     )
     model_total_rev = {r.model: float(r.rev or 0) for r in model_rev_result.all()}
@@ -312,7 +315,7 @@ async def get_chatter_kpi(
     prev_month = month - 1 if month > 1 else 12
     prev_year  = year      if month > 1 else year - 1
     prev_kpi   = await load_kpi_data(db, tenant_id, prev_year, prev_month)
-    prev_stats = await chatter_txn_stats(db, tenant_id, prev_year, prev_month)
+    prev_stats = await chatter_txn_stats(db, tenant_id, prev_year, prev_month, team_filter=team_filter)
     prev_total = sum(v["revenue"] for v in prev_stats.values())
 
     # ── Build rows ────────────────────────────────────────────────────────────

@@ -11,6 +11,7 @@ from dependencies import get_current_tenant
 from models import Tenant, Transaction, Plan, Expense
 from schemas import StructureResponse, ModelShare, ChatterShare, ChatterInModel, EconomicBreakdown
 from economics import load_settings, compute_economics
+from team_helpers import list_teams, team_transaction_clause
 
 logger = logging.getLogger("flowof.structure")
 router = APIRouter(prefix="/api/v1", tags=["structure"])
@@ -25,6 +26,7 @@ def _month_range(year: int, month: int):
 async def get_structure(
     month: int = Query(..., ge=1, le=12),
     year: int = Query(..., ge=2020),
+    team_id: int | None = Query(None, description="Filter to one team"),
     tenant: Tenant = Depends(get_current_tenant),
     db: AsyncSession = Depends(get_db),
 ):
@@ -32,10 +34,27 @@ async def get_structure(
         start, end = _month_range(year, month)
         settings = await load_settings(db, tenant.id)
 
+        # ── Resolve team filter ────────────────────────────────────────────
+        teams = await list_teams(db, tenant.id)
+        default_team_id = teams[0].id if teams else None
+        team_filter = None
+        if team_id is not None:
+            selected = next((t for t in teams if t.id == team_id), None)
+            if selected is not None:
+                team_filter = team_transaction_clause(selected.id, default_team_id)
+
+        base_conds = [
+            Transaction.tenant_id == tenant.id,
+            Transaction.date >= start,
+            Transaction.date <= end,
+        ]
+        if team_filter is not None:
+            base_conds.append(team_filter)
+
         # Revenue by model
         model_result = await db.execute(
             select(Transaction.model, func.sum(Transaction.amount).label("revenue"))
-            .where(and_(Transaction.tenant_id == tenant.id, Transaction.date >= start, Transaction.date <= end))
+            .where(and_(*base_conds))
             .group_by(Transaction.model)
             .order_by(func.sum(Transaction.amount).desc())
         )
@@ -49,12 +68,7 @@ async def get_structure(
                 Transaction.chatter,
                 func.sum(Transaction.amount).label("revenue"),
             )
-            .where(and_(
-                Transaction.tenant_id == tenant.id,
-                Transaction.date >= start,
-                Transaction.date <= end,
-                Transaction.chatter.isnot(None),
-            ))
+            .where(and_(*base_conds, Transaction.chatter.isnot(None)))
             .group_by(Transaction.model, Transaction.chatter)
             .order_by(Transaction.model, func.sum(Transaction.amount).desc())
         )
@@ -98,12 +112,7 @@ async def get_structure(
                 func.sum(Transaction.amount).label("revenue"),
                 func.count(Transaction.id).label("txn_count"),
             )
-            .where(and_(
-                Transaction.tenant_id == tenant.id,
-                Transaction.date >= start,
-                Transaction.date <= end,
-                Transaction.chatter.isnot(None),
-            ))
+            .where(and_(*base_conds, Transaction.chatter.isnot(None)))
             .group_by(Transaction.chatter)
             .order_by(func.sum(Transaction.amount).desc())
         )

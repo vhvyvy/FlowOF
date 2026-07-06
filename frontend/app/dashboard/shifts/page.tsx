@@ -5,6 +5,7 @@ import { Header } from '@/components/layout/Header'
 import { MetricCard, MetricCardSkeleton } from '@/components/metrics/MetricCard'
 import { Skeleton } from '@/components/ui/skeleton'
 import { useMonthStore } from '@/lib/hooks/useMonth'
+import { useTeamStore } from '@/lib/hooks/useTeam'
 import { formatCurrency } from '@/lib/utils'
 import api from '@/lib/api'
 import { Users, DollarSign, Calendar, TrendingUp, Percent } from 'lucide-react'
@@ -248,10 +249,13 @@ function ProductivityTable({ shifts }: { shifts: ShiftRow[] }) {
 
 export default function ShiftsPage() {
   const { month, year } = useMonthStore()
+  const { teamId } = useTeamStore()
+
+  const teamParam = typeof teamId === 'number' ? `&team_id=${teamId}` : ''
 
   const { data, isLoading, error } = useQuery<ShiftsResponse>({
-    queryKey: ['shifts', month, year],
-    queryFn: () => api.get<ShiftsResponse>(`/api/v1/shifts?month=${month}&year=${year}`).then(r => r.data),
+    queryKey: ['shifts', month, year, teamId],
+    queryFn: () => api.get<ShiftsResponse>(`/api/v1/shifts?month=${month}&year=${year}${teamParam}`).then(r => r.data),
     enabled: month > 0 && year > 0,
   })
 

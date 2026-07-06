@@ -4,6 +4,7 @@ import { useState, useEffect } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import api, { formatApiError } from '@/lib/api'
 import { useMonthStore } from '@/lib/hooks/useMonth'
+import { useTeamStore } from '@/lib/hooks/useTeam'
 import { Header } from '@/components/layout/Header'
 import { Skeleton } from '@/components/ui/skeleton'
 import { Save, RefreshCw, CheckCircle2, AlertCircle } from 'lucide-react'
@@ -74,6 +75,7 @@ function fmt(n: number) {
 
 export default function PlansPage() {
   const { month, year } = useMonthStore()
+  const { teamId } = useTeamStore()
   const qc = useQueryClient()
 
   const [edits, setEdits] = useState<Record<string, number>>({})
@@ -82,13 +84,15 @@ export default function PlansPage() {
   const [saveError, setSaveError] = useState(false)
   const [saveErrorText, setSaveErrorText] = useState('')
 
+  const teamParam = typeof teamId === 'number' ? `&team_id=${teamId}` : ''
+
   const { data, isLoading, error } = useQuery<PlansResponse>({
-    queryKey: ['plans', month, year],
-    queryFn: () => api.get(`/api/v1/plans?month=${month}&year=${year}`).then((r) => r.data),
+    queryKey: ['plans', month, year, teamId],
+    queryFn: () => api.get(`/api/v1/plans?month=${month}&year=${year}${teamParam}`).then((r) => r.data),
   })
 
-  // Reset edits when month/year changes
-  useEffect(() => { setEdits({}) }, [month, year])
+  // Reset edits when month/year/team changes
+  useEffect(() => { setEdits({}) }, [month, year, teamId])
 
   const getPlanValue = (model: string, dbAmount: number) =>
     edits[model] !== undefined ? edits[model] : dbAmount
@@ -102,7 +106,7 @@ export default function PlansPage() {
         api.put(`/api/v1/plans/${year}/${month}`, { model, plan_amount })
       )
       await Promise.all(promises)
-      qc.invalidateQueries({ queryKey: ['plans', month, year] })
+      qc.invalidateQueries({ queryKey: ['plans', month, year, teamId] })
       qc.invalidateQueries({ queryKey: ['chatters'] })
       qc.invalidateQueries({ queryKey: ['finance'] })
       qc.invalidateQueries({ queryKey: ['overview'] })

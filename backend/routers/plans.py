@@ -10,6 +10,7 @@ from database import get_db
 from dependencies import get_current_tenant
 from models import Tenant, Plan, Transaction
 from schemas import PlanUpsert, PlanOut, PlansResponse
+from team_helpers import list_teams, team_transaction_clause
 
 logger = logging.getLogger("flowof.plans")
 router = APIRouter(prefix="/api/v1", tags=["plans"])
@@ -24,11 +25,21 @@ def _month_range(year: int, month: int):
 async def get_plans(
     month: int = Query(..., ge=1, le=12),
     year: int = Query(..., ge=2020),
+    team_id: int | None = Query(None, description="Filter to one team"),
     tenant: Tenant = Depends(get_current_tenant),
     db: AsyncSession = Depends(get_db),
 ):
     try:
         start, end = _month_range(year, month)
+
+        # ── Resolve team filter ────────────────────────────────────────────
+        teams = await list_teams(db, tenant.id)
+        default_team_id = teams[0].id if teams else None
+        team_filter = None
+        if team_id is not None:
+            selected = next((t for t in teams if t.id == team_id), None)
+            if selected is not None:
+                team_filter = team_transaction_clause(selected.id, default_team_id)
 
         # Plans from DB
         plan_result = await db.execute(
@@ -42,16 +53,17 @@ async def get_plans(
         )
         db_plans = {p.model: float(p.plan_amount) for p in plan_result.scalars().all()}
 
-        # Actual revenue by model
+        # Actual revenue by model (team-filtered)
+        rev_conds = [
+            Transaction.tenant_id == tenant.id,
+            Transaction.date >= start,
+            Transaction.date <= end,
+        ]
+        if team_filter is not None:
+            rev_conds.append(team_filter)
         rev_result = await db.execute(
             select(Transaction.model, func.sum(Transaction.amount).label("rev"))
-            .where(
-                and_(
-                    Transaction.tenant_id == tenant.id,
-                    Transaction.date >= start,
-                    Transaction.date <= end,
-                )
-            )
+            .where(and_(*rev_conds))
             .group_by(Transaction.model)
         )
         actuals = {r.model: float(r.rev or 0) for r in rev_result.all()}
