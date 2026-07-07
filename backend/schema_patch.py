@@ -591,6 +591,32 @@ _PATCHES: list[tuple[str, bool]] = [
         )""",
         False,
     ),
+    # ── Daily Onlymonster KPI snapshots ─────────────────────────────────────
+    (
+        """CREATE TABLE IF NOT EXISTS chatter_kpi_daily (
+            id            SERIAL PRIMARY KEY,
+            tenant_id     INTEGER NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+            chatter       VARCHAR(255) NOT NULL,
+            om_user_id    VARCHAR(64),
+            date          DATE NOT NULL,
+            ppv_open_rate NUMERIC(10, 2),
+            apv           NUMERIC(10, 4),
+            total_chats   INTEGER,
+            source        VARCHAR(20) NOT NULL DEFAULT 'api',
+            created_at    TIMESTAMP NOT NULL DEFAULT NOW()
+        )""",
+        False,
+    ),
+    (
+        """CREATE UNIQUE INDEX IF NOT EXISTS uq_chatter_kpi_daily_tcdate
+           ON chatter_kpi_daily (tenant_id, chatter, date)""",
+        False,
+    ),
+    (
+        """CREATE INDEX IF NOT EXISTS idx_chatter_kpi_daily_tenant_date
+           ON chatter_kpi_daily (tenant_id, date)""",
+        False,
+    ),
     # ── AI chat session history ──────────────────────────────────────────────
     (
         """CREATE TABLE IF NOT EXISTS ai_chat_messages (

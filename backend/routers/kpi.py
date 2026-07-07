@@ -331,3 +331,110 @@ async def delete_mapping(
     await db.delete(m)
     await db.commit()
     return {"ok": True}
+
+
+# ── Daily KPI endpoints ────────────────────────────────────────────────────────
+
+from datetime import date as _date
+
+
+@router.post("/kpi/daily/collect")
+async def collect_kpi_daily(
+    date: _date = Query(..., description="Target date (YYYY-MM-DD)"),
+    tenant: Tenant = Depends(get_current_tenant),
+    db: AsyncSession = Depends(get_db),
+):
+    """Manually collect Onlymonster KPI for a specific date → chatter_kpi_daily."""
+    if not tenant.onlymonster_key:
+        raise HTTPException(
+            status_code=400,
+            detail="Onlymonster API-ключ не настроен. Добавьте его в настройки тенанта.",
+        )
+    try:
+        from services.kpi_daily import collect_daily_kpi
+        result = await collect_daily_kpi(db, tenant.id, date)
+        if result.get("error"):
+            raise HTTPException(status_code=502, detail=result["error"])
+        return result
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error("kpi daily collect error tenant=%d: %s", tenant.id, e, exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/kpi/daily/backfill")
+async def backfill_kpi_daily(
+    date_from: _date = Query(..., description="Start date (YYYY-MM-DD)"),
+    date_to: _date   = Query(..., description="End date (YYYY-MM-DD)"),
+    tenant: Tenant = Depends(get_current_tenant),
+    db: AsyncSession = Depends(get_db),
+):
+    """Backfill daily Onlymonster KPI for a date range (max 180 days)."""
+    if not tenant.onlymonster_key:
+        raise HTTPException(
+            status_code=400,
+            detail="Onlymonster API-ключ не настроен. Добавьте его в настройки тенанта.",
+        )
+    try:
+        from services.kpi_daily import backfill_daily_kpi
+        result = await backfill_daily_kpi(db, tenant.id, date_from, date_to)
+        return result
+    except Exception as e:
+        logger.error("kpi daily backfill error tenant=%d: %s", tenant.id, e, exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/kpi/daily")
+async def get_kpi_daily(
+    date_from: _date       = Query(..., description="Start date (YYYY-MM-DD)"),
+    date_to: _date         = Query(..., description="End date (YYYY-MM-DD)"),
+    chatter: str | None    = Query(None, description="Filter by chatter name (optional)"),
+    tenant: Tenant         = Depends(get_current_tenant),
+    db: AsyncSession       = Depends(get_db),
+):
+    """Read daily KPI rows from chatter_kpi_daily for inspection / future use."""
+    from sqlalchemy import text as _text
+    try:
+        params: dict = {"tid": tenant.id, "df": date_from, "dt": date_to}
+        chatter_clause = ""
+        if chatter:
+            chatter_clause = "AND chatter ILIKE :chatter"
+            params["chatter"] = f"%{chatter}%"
+
+        rows = (await db.execute(
+            _text(
+                f"""
+                SELECT chatter, om_user_id, date, ppv_open_rate, apv, total_chats, source
+                FROM chatter_kpi_daily
+                WHERE tenant_id = :tid
+                  AND date >= :df
+                  AND date <= :dt
+                  {chatter_clause}
+                ORDER BY date DESC, chatter ASC
+                LIMIT 5000
+                """
+            ),
+            params,
+        )).mappings().all()
+
+        return {
+            "date_from": str(date_from),
+            "date_to":   str(date_to),
+            "count":     len(rows),
+            "rows": [
+                {
+                    "chatter":       r["chatter"],
+                    "om_user_id":    r["om_user_id"],
+                    "date":          str(r["date"]),
+                    "ppv_open_rate": float(r["ppv_open_rate"]) if r["ppv_open_rate"] is not None else None,
+                    "apv":           float(r["apv"]) if r["apv"] is not None else None,
+                    "total_chats":   r["total_chats"],
+                    "source":        r["source"],
+                }
+                for r in rows
+            ],
+        }
+    except Exception as e:
+        logger.error("kpi daily get error tenant=%d: %s", tenant.id, e, exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))

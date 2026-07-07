@@ -104,6 +104,53 @@ def setup_scheduler() -> Any:
         except Exception as exc:
             logger.error("Season auto-close job error: %s", exc, exc_info=True)
 
+    # ── Daily KPI collection (optional, ENABLE_KPI_DAILY=1) ──────────────────
+    kpi_daily_enabled = os.getenv("ENABLE_KPI_DAILY", "").strip().lower() in ("1", "true", "yes")
+
+    if kpi_daily_enabled:
+        async def _kpi_daily_job() -> None:
+            """04:00 UTC: collect yesterday's Onlymonster KPI for all tenants with OM key."""
+            from datetime import date, timedelta
+            from services.kpi_daily import collect_daily_kpi
+
+            yesterday = date.today() - timedelta(days=1)
+
+            async with AsyncSessionLocal() as db:
+                r = await db.execute(
+                    select(Tenant)
+                    .where(
+                        Tenant.active.is_(True),
+                        Tenant.onlymonster_key.isnot(None),
+                        Tenant.onlymonster_key != "",
+                    )
+                )
+                tenants = list(r.scalars().all())
+
+            logger.info("kpi_daily job: %d tenants with OM key, date=%s", len(tenants), yesterday)
+            for t in tenants:
+                try:
+                    async with AsyncSessionLocal() as db:
+                        result = await collect_daily_kpi(db, t.id, yesterday)
+                        if result.get("error"):
+                            logger.warning(
+                                "kpi_daily job tenant=%s: %s", t.id, result["error"]
+                            )
+                        else:
+                            logger.info(
+                                "kpi_daily job tenant=%s date=%s written=%s",
+                                t.id, yesterday, result.get("records_written"),
+                            )
+                except Exception as exc:
+                    logger.warning("kpi_daily job error tenant=%s: %s", t.id, exc)
+
+        sched.add_job(
+            _kpi_daily_job,
+            "cron",
+            hour=4, minute=0,
+            id="kpi_daily_collect",
+            replace_existing=True,
+        )
+
     # ── Agent Watcher jobs (optional, AGENT_WATCHER_ENABLED=1) ────────────────
     watcher_enabled = os.getenv("AGENT_WATCHER_ENABLED", "").strip().lower() in ("1", "true", "yes")
 
@@ -186,11 +233,12 @@ def setup_scheduler() -> Any:
     )
     sched.start()
     _scheduler = sched
-    watcher_msg = " + Watcher scan 06:00 + Watcher review 07:00 UTC" if watcher_enabled else ""
+    kpi_daily_msg = " + KPI daily 04:00 UTC" if kpi_daily_enabled else ""
+    watcher_msg   = " + Watcher scan 06:00 + Watcher review 07:00 UTC" if watcher_enabled else ""
     logger.info(
         "APScheduler started: Notion sync every 24h, MMR daily 03:00 UTC, "
-        "Season close 23:55 UTC%s",
-        watcher_msg,
+        "Season close 23:55 UTC%s%s",
+        kpi_daily_msg, watcher_msg,
     )
     return sched
 
