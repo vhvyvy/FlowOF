@@ -4,6 +4,11 @@ from sqlalchemy import (
     Integer, Numeric, String, Text, UniqueConstraint, PrimaryKeyConstraint,
 )
 from sqlalchemy.dialects.postgresql import JSONB
+from services.enum_types import (
+    CASE_STAGE, CASE_PRIORITY, CASE_RESULT,
+    METRIC_TYPE, SNAPSHOT_TYPE, SNAPSHOT_SOURCE,
+    LEDGER_EVENT_TYPE, STAGE_CHANGED_BY, KPI_METRIC_TYPE,
+)
 
 from database import Base
 
@@ -462,10 +467,10 @@ class AdminCase(Base):
     tenant_id      = Column(Integer, ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False, index=True)
     admin_id       = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
     om_user_id     = Column(String(64), nullable=False)
-    metric_type    = Column(String(32), nullable=False)   # metric_type enum
-    stage          = Column(String(32), nullable=False, default="detected")   # case_stage enum
-    priority       = Column(String(16), nullable=False, default="normal")     # case_priority enum
-    result         = Column(String(32), nullable=True)                        # case_result enum
+    metric_type    = Column(METRIC_TYPE, nullable=False)
+    stage          = Column(CASE_STAGE, nullable=False, default="detected")
+    priority       = Column(CASE_PRIORITY, nullable=False, default="normal")
+    result         = Column(CASE_RESULT, nullable=True)
     opened_at      = Column(DateTime, nullable=False, default=datetime.utcnow)
     closed_at      = Column(DateTime, nullable=True)
     review_date    = Column(Date, nullable=True)
@@ -482,10 +487,10 @@ class CaseStageHistory(Base):
 
     id         = Column(Integer, primary_key=True, autoincrement=True)
     case_id    = Column(Integer, ForeignKey("admin_cases.id", ondelete="CASCADE"), nullable=False, index=True)
-    from_stage = Column(String(32), nullable=True)    # case_stage enum
-    to_stage   = Column(String(32), nullable=False)   # case_stage enum
+    from_stage = Column(CASE_STAGE, nullable=True)
+    to_stage   = Column(CASE_STAGE, nullable=False)
     changed_at = Column(DateTime, nullable=False, default=datetime.utcnow)
-    changed_by = Column(String(32), nullable=False)   # stage_changed_by enum
+    changed_by = Column(STAGE_CHANGED_BY, nullable=False)
     notes      = Column(Text, nullable=True)
 
 
@@ -495,11 +500,11 @@ class BaselineSnapshot(Base):
 
     id            = Column(Integer, primary_key=True, autoincrement=True)
     case_id       = Column(Integer, ForeignKey("admin_cases.id", ondelete="CASCADE"), nullable=False, index=True)
-    snapshot_type = Column(String(32), nullable=False)                       # snapshot_type enum
-    metric_type   = Column(String(32), nullable=False)                       # metric_type enum
+    snapshot_type = Column(SNAPSHOT_TYPE, nullable=False)
+    metric_type   = Column(METRIC_TYPE, nullable=False)
     metric_value  = Column(Numeric(14, 4), nullable=False)
     snapshot_date = Column(Date, nullable=False)
-    source        = Column(String(40), nullable=False, default="system_from_daily")  # snapshot_source enum
+    source        = Column(SNAPSHOT_SOURCE, nullable=False, default="system_from_daily")
     created_at    = Column(DateTime, nullable=False, default=datetime.utcnow)
 
 
@@ -511,7 +516,7 @@ class CaseLedger(Base):
     tenant_id  = Column(Integer, ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False, index=True)
     admin_id   = Column(Integer, ForeignKey("users.id"), nullable=False)
     case_id    = Column(Integer, ForeignKey("admin_cases.id", ondelete="SET NULL"), nullable=True)
-    event_type = Column(String(40), nullable=False)   # ledger_event_type enum
+    event_type = Column(LEDGER_EVENT_TYPE, nullable=False)
     points     = Column(Numeric(10, 2), nullable=False, default=0)
     notes      = Column(Text, nullable=True)
     created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
@@ -523,7 +528,7 @@ class KpiConfig(Base):
 
     id                        = Column(Integer, primary_key=True, autoincrement=True)
     tenant_id                 = Column(Integer, ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False)
-    metric_type               = Column(String(32), nullable=False)   # metric_type enum
+    metric_type               = Column(KPI_METRIC_TYPE, nullable=False)
     noise_threshold_pct       = Column(Numeric(8, 2), nullable=False, default=5)
     guardrail_metrics         = Column(JSONB, nullable=False, default=list)
     hold_days                 = Column(Integer, nullable=False, default=21)
