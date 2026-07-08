@@ -9,6 +9,7 @@ export interface TokenResponse {
   access_token: string
   token_type: string
   role?: string
+  is_admin?: boolean
 }
 
 export interface RegisterResponse {
