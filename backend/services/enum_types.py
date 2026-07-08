@@ -3,7 +3,8 @@ Shared SQLAlchemy PostgreSQL ENUM type objects.
 
 create_type=False — the actual PostgreSQL types are created by schema_patch.py;
 SQLAlchemy must NOT attempt to re-create them via CREATE TYPE, only reference them.
-Import these into models.py column definitions and anywhere you need explicit casts.
+
+Names here MUST match the enum names in schema_patch._ENUM_PATCHES exactly.
 """
 from sqlalchemy.dialects.postgresql import ENUM as PG_ENUM
 
@@ -16,7 +17,7 @@ CASE_PRIORITY = PG_ENUM(
     name="case_priority", create_type=False,
 )
 CASE_RESULT = PG_ENUM(
-    "success", "failed", "guardrail", "cancelled",
+    "success", "failed", "cancelled",
     name="case_result", create_type=False,
 )
 METRIC_TYPE = PG_ENUM(
@@ -40,7 +41,6 @@ STAGE_CHANGED_BY = PG_ENUM(
     "admin", "owner", "system",
     name="stage_changed_by", create_type=False,
 )
-KPI_METRIC_TYPE = PG_ENUM(
-    "ppv_open_rate", "rpc", "apv", "total_chats", "revenue",
-    name="kpi_metric_type", create_type=False,
-)
+
+# Alias — KpiConfig.metric_type uses the same DB enum as AdminCase.metric_type
+KPI_METRIC_TYPE = METRIC_TYPE
