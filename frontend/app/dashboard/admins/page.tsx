@@ -11,25 +11,12 @@ import {
   Trash2,
   Loader2,
   RefreshCcw,
+  X,
 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from '@/components/ui/select'
-import {
-  Dialog,
-  DialogContent,
-  DialogHeader,
-  DialogTitle,
-} from '@/components/ui/dialog'
 import { Badge } from '@/components/ui/badge'
-import { toast } from '@/components/ui/use-toast'
-import api, { resolveApiBaseURL } from '@/lib/api'
+import api from '@/lib/api'
 
 // ── Types ──────────────────────────────────────────────────────────────────
 
@@ -81,10 +68,16 @@ async function fetchShifts(): Promise<Shift[]> {
 export default function AdminsPage() {
   const qc = useQueryClient()
   const [inviteEmail, setInviteEmail] = useState('')
-  const [inviteShiftId, setInviteShiftId] = useState<string>('')
+  const [inviteShiftId, setInviteShiftId] = useState('')
   const [copiedToken, setCopiedToken] = useState<string | null>(null)
   const [modalUrl, setModalUrl] = useState<string | null>(null)
   const [revokeConfirm, setRevokeConfirm] = useState<number | null>(null)
+  const [toastMsg, setToastMsg] = useState<string | null>(null)
+
+  function showToast(msg: string) {
+    setToastMsg(msg)
+    setTimeout(() => setToastMsg(null), 3500)
+  }
 
   const { data: admins = [], isLoading: loadingAdmins } = useQuery({
     queryKey: ['admins-list'],
@@ -101,7 +94,6 @@ export default function AdminsPage() {
     queryFn: fetchShifts,
   })
 
-  // Create invite
   const createInvite = useMutation({
     mutationFn: async () => {
       if (!inviteShiftId) throw new Error('Выберите смену')
@@ -123,46 +115,49 @@ export default function AdminsPage() {
       const msg =
         (err as { response?: { data?: { detail?: string } } })?.response?.data?.detail ??
         'Ошибка создания инвайта'
-      toast({ title: msg, variant: 'destructive' })
+      showToast(msg)
     },
   })
 
-  // Revoke invite
   const deleteInvite = useMutation({
     mutationFn: (id: number) => api.delete(`/api/v1/admin-invites/${id}`),
     onSuccess: () => qc.invalidateQueries({ queryKey: ['admin-invites'] }),
-    onError: () => toast({ title: 'Ошибка при отзыве инвайта', variant: 'destructive' }),
+    onError: () => showToast('Ошибка при отзыве инвайта'),
   })
 
-  // Revoke admin access
   const revokeAdmin = useMutation({
     mutationFn: (userId: number) =>
       api.patch(`/api/v1/admin-invites/users/${userId}/revoke`),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ['admins-list'] })
-      toast({ title: 'Доступ администратора отозван' })
+      showToast('Доступ администратора отозван')
       setRevokeConfirm(null)
     },
-    onError: () => toast({ title: 'Ошибка при отзыве доступа', variant: 'destructive' }),
+    onError: () => showToast('Ошибка при отзыве доступа'),
   })
 
-  function copyUrl(url: string, token: string) {
+  function copyUrl(url: string, key: string) {
     navigator.clipboard.writeText(url).then(() => {
-      setCopiedToken(token)
+      setCopiedToken(key)
       setTimeout(() => setCopiedToken(null), 2000)
     })
   }
 
-  const isCreating = createInvite.isPending
-
   return (
     <div className="p-6 max-w-4xl mx-auto space-y-8">
+      {/* Toast */}
+      {toastMsg && (
+        <div className="fixed bottom-6 right-6 z-50 bg-slate-700 border border-slate-600 rounded-xl px-4 py-3 shadow-2xl text-sm text-slate-100 max-w-xs">
+          {toastMsg}
+        </div>
+      )}
+
       <div className="flex items-center gap-3">
         <ShieldCheck className="h-6 w-6 text-amber-400" />
         <h1 className="text-xl font-bold text-slate-100">Управление администраторами</h1>
       </div>
 
-      {/* ── Existing admins ─────────────────────────────────────────────── */}
+      {/* ── Existing admins ───────────────────────────────────────────────── */}
       <section>
         <h2 className="text-sm font-semibold text-slate-400 uppercase tracking-wider mb-3">
           Активные администраторы
@@ -249,7 +244,7 @@ export default function AdminsPage() {
         )}
       </section>
 
-      {/* ── Create invite ────────────────────────────────────────────────── */}
+      {/* ── Create invite ─────────────────────────────────────────────────── */}
       <section>
         <h2 className="text-sm font-semibold text-slate-400 uppercase tracking-wider mb-3">
           Пригласить администратора
@@ -266,18 +261,18 @@ export default function AdminsPage() {
                   <span className="text-sm text-slate-500">Загрузка смен…</span>
                 </div>
               ) : (
-                <Select value={inviteShiftId} onValueChange={setInviteShiftId}>
-                  <SelectTrigger className="bg-slate-700/50 border-slate-600">
-                    <SelectValue placeholder="Выберите смену" />
-                  </SelectTrigger>
-                  <SelectContent>
-                    {shifts.map((s) => (
-                      <SelectItem key={s.id} value={String(s.id)}>
-                        {s.name}
-                      </SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
+                <select
+                  value={inviteShiftId}
+                  onChange={(e) => setInviteShiftId(e.target.value)}
+                  className="w-full h-9 rounded-md bg-slate-700/50 border border-slate-600 text-slate-100 text-sm px-3 focus:outline-none focus:ring-2 focus:ring-amber-500/40"
+                >
+                  <option value="">Выберите смену</option>
+                  {shifts.map((s) => (
+                    <option key={s.id} value={String(s.id)}>
+                      {s.name}
+                    </option>
+                  ))}
+                </select>
               )}
             </div>
             <div>
@@ -295,10 +290,10 @@ export default function AdminsPage() {
           </div>
           <Button
             className="bg-amber-600 hover:bg-amber-500 text-white gap-2"
-            disabled={!inviteShiftId || isCreating}
+            disabled={!inviteShiftId || createInvite.isPending}
             onClick={() => createInvite.mutate()}
           >
-            {isCreating ? (
+            {createInvite.isPending ? (
               <Loader2 className="h-4 w-4 animate-spin" />
             ) : (
               <Plus className="h-4 w-4" />
@@ -308,7 +303,7 @@ export default function AdminsPage() {
         </div>
       </section>
 
-      {/* ── Active invites ───────────────────────────────────────────────── */}
+      {/* ── Active invites ────────────────────────────────────────────────── */}
       <section>
         <div className="flex items-center justify-between mb-3">
           <h2 className="text-sm font-semibold text-slate-400 uppercase tracking-wider">
@@ -388,16 +383,21 @@ export default function AdminsPage() {
         )}
       </section>
 
-      {/* ── Modal: show new join URL ─────────────────────────────────────── */}
-      <Dialog open={!!modalUrl} onOpenChange={(o) => !o && setModalUrl(null)}>
-        <DialogContent className="bg-slate-800 border-slate-700 max-w-sm">
-          <DialogHeader>
-            <DialogTitle className="text-slate-100">Инвайт создан</DialogTitle>
-          </DialogHeader>
-          <div className="space-y-4 pt-2">
+      {/* ── Modal: show new join URL ──────────────────────────────────────── */}
+      {modalUrl && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm">
+          <div className="bg-slate-800 border border-slate-700 rounded-2xl p-6 w-full max-w-sm shadow-2xl space-y-4">
+            <div className="flex items-center justify-between">
+              <h3 className="text-base font-semibold text-slate-100">Инвайт создан</h3>
+              <button
+                onClick={() => setModalUrl(null)}
+                className="text-slate-400 hover:text-slate-200 transition-colors"
+              >
+                <X className="h-5 w-5" />
+              </button>
+            </div>
             <p className="text-sm text-slate-400">
-              Отправьте эту ссылку будущему администратору.
-              Ссылка действует 14 дней.
+              Отправьте эту ссылку будущему администратору. Ссылка действует 14 дней.
             </p>
             <div className="bg-slate-700/60 border border-slate-600 rounded-lg px-3 py-2 break-all text-xs text-amber-300 font-mono">
               {modalUrl}
@@ -405,11 +405,7 @@ export default function AdminsPage() {
             <div className="flex gap-2">
               <Button
                 className="flex-1 bg-amber-600 hover:bg-amber-500 text-white gap-2"
-                onClick={() => {
-                  if (modalUrl) navigator.clipboard.writeText(modalUrl)
-                  setCopiedToken('modal')
-                  setTimeout(() => setCopiedToken(null), 2000)
-                }}
+                onClick={() => copyUrl(modalUrl, 'modal')}
               >
                 {copiedToken === 'modal' ? (
                   <Check className="h-4 w-4" />
@@ -427,8 +423,8 @@ export default function AdminsPage() {
               </Button>
             </div>
           </div>
-        </DialogContent>
-      </Dialog>
+        </div>
+      )}
     </div>
   )
 }
