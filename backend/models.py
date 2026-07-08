@@ -446,3 +446,108 @@ class Script(Base):
     copy_count = Column(Integer, default=0)
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
+# ── KPI Admin Cabinet (шаг 1.1) ───────────────────────────────────────────────
+# Enum columns are stored as String here so that SQLAlchemy create_all
+# does not conflict with the PostgreSQL-native enum types created by
+# schema_patch.  The PG enums are already enforced at the DB level.
+
+class AdminCase(Base):
+    """Кейс работы с чаттером (один открытый кейс per chatter×metric)."""
+    __tablename__ = "admin_cases"
+
+    id             = Column(Integer, primary_key=True, autoincrement=True)
+    tenant_id      = Column(Integer, ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False, index=True)
+    admin_id       = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
+    om_user_id     = Column(String(64), nullable=False)
+    metric_type    = Column(String(32), nullable=False)   # metric_type enum
+    stage          = Column(String(32), nullable=False, default="detected")   # case_stage enum
+    priority       = Column(String(16), nullable=False, default="normal")     # case_priority enum
+    result         = Column(String(32), nullable=True)                        # case_result enum
+    opened_at      = Column(DateTime, nullable=False, default=datetime.utcnow)
+    closed_at      = Column(DateTime, nullable=True)
+    review_date    = Column(Date, nullable=True)
+    baseline_value = Column(Numeric(14, 4), nullable=True)
+    target_value   = Column(Numeric(14, 4), nullable=True)
+    result_value   = Column(Numeric(14, 4), nullable=True)
+    notes          = Column(Text, nullable=True)
+    created_at     = Column(DateTime, nullable=False, default=datetime.utcnow)
+
+
+class CaseStageHistory(Base):
+    """Лог переходов стадий кейса."""
+    __tablename__ = "case_stage_history"
+
+    id         = Column(Integer, primary_key=True, autoincrement=True)
+    case_id    = Column(Integer, ForeignKey("admin_cases.id", ondelete="CASCADE"), nullable=False, index=True)
+    from_stage = Column(String(32), nullable=True)    # case_stage enum
+    to_stage   = Column(String(32), nullable=False)   # case_stage enum
+    changed_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+    changed_by = Column(String(32), nullable=False)   # stage_changed_by enum
+    notes      = Column(Text, nullable=True)
+
+
+class BaselineSnapshot(Base):
+    """Снапшот значения метрики (baseline / target / result) для кейса."""
+    __tablename__ = "baseline_snapshots"
+
+    id            = Column(Integer, primary_key=True, autoincrement=True)
+    case_id       = Column(Integer, ForeignKey("admin_cases.id", ondelete="CASCADE"), nullable=False, index=True)
+    snapshot_type = Column(String(32), nullable=False)                       # snapshot_type enum
+    metric_type   = Column(String(32), nullable=False)                       # metric_type enum
+    metric_value  = Column(Numeric(14, 4), nullable=False)
+    snapshot_date = Column(Date, nullable=False)
+    source        = Column(String(40), nullable=False, default="system_from_daily")  # snapshot_source enum
+    created_at    = Column(DateTime, nullable=False, default=datetime.utcnow)
+
+
+class CaseLedger(Base):
+    """Append-only журнал событий и очков по кейсам."""
+    __tablename__ = "case_ledger"
+
+    id         = Column(Integer, primary_key=True, autoincrement=True)
+    tenant_id  = Column(Integer, ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False, index=True)
+    admin_id   = Column(Integer, ForeignKey("users.id"), nullable=False)
+    case_id    = Column(Integer, ForeignKey("admin_cases.id", ondelete="SET NULL"), nullable=True)
+    event_type = Column(String(40), nullable=False)   # ledger_event_type enum
+    points     = Column(Numeric(10, 2), nullable=False, default=0)
+    notes      = Column(Text, nullable=True)
+    created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+
+
+class KpiConfig(Base):
+    """Настройки KPI-модуля для одной метрики одного тенанта."""
+    __tablename__ = "kpi_config"
+
+    id                        = Column(Integer, primary_key=True, autoincrement=True)
+    tenant_id                 = Column(Integer, ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False)
+    metric_type               = Column(String(32), nullable=False)   # metric_type enum
+    noise_threshold_pct       = Column(Numeric(8, 2), nullable=False, default=5)
+    guardrail_metrics         = Column(JSONB, nullable=False, default=list)
+    hold_days                 = Column(Integer, nullable=False, default=21)
+    detect_to_result_ratio_min = Column(Integer, nullable=False, default=15)
+    calibration_days          = Column(Integer, nullable=False, default=30)
+
+
+class AdminKpiSnapshot(Base):
+    """Месячный срез KPI-показателей администратора."""
+    __tablename__ = "admin_kpi_snapshot"
+
+    # Composite PK — no auto-increment id (mirrors the DDL)
+    tenant_id            = Column(Integer, ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False)
+    admin_id             = Column(Integer, ForeignKey("users.id"), nullable=False)
+    period_year          = Column(Integer, nullable=False)
+    period_month         = Column(Integer, nullable=False)
+    cases_opened         = Column(Integer, nullable=False, default=0)
+    cases_closed_success = Column(Integer, nullable=False, default=0)
+    cases_closed_failed  = Column(Integer, nullable=False, default=0)
+    cases_cancelled      = Column(Integer, nullable=False, default=0)
+    guardrail_hits       = Column(Integer, nullable=False, default=0)
+    total_points         = Column(Numeric(12, 2), nullable=False, default=0)
+    detect_result_ratio  = Column(Numeric(6, 2), nullable=True)
+    is_calibration       = Column(Boolean, nullable=False, default=False)
+
+    __table_args__ = (
+        PrimaryKeyConstraint("tenant_id", "admin_id", "period_year", "period_month"),
+    )
