@@ -791,6 +791,30 @@ _PATCHES: list[tuple[str, bool]] = [
            ON admin_kpi_snapshot (tenant_id, admin_id)""",
         False,
     ),
+
+    # ── admin_invites — инвайт-ссылки для регистрации администраторов ─────────
+    (
+        """CREATE TABLE IF NOT EXISTS admin_invites (
+            id                SERIAL PRIMARY KEY,
+            tenant_id         INTEGER NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+            token             VARCHAR(64) NOT NULL,
+            admin_shift_id    INTEGER NOT NULL REFERENCES shifts_catalog(id),
+            invited_email     VARCHAR(255),
+            used_by_user_id   INTEGER REFERENCES users(id),
+            created_at        TIMESTAMP NOT NULL DEFAULT NOW(),
+            used_at           TIMESTAMP,
+            expires_at        TIMESTAMP
+        )""",
+        False,
+    ),
+    (
+        "CREATE UNIQUE INDEX IF NOT EXISTS uq_admin_invites_token ON admin_invites (token)",
+        False,
+    ),
+    (
+        "CREATE INDEX IF NOT EXISTS idx_admin_invites_tenant ON admin_invites (tenant_id)",
+        False,
+    ),
 ]
 
 # Catalog tables that should have UNIQUE(tenant_id, name).

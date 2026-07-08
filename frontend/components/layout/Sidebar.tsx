@@ -22,6 +22,7 @@ import {
   UserCog,
   LineChart,
   Brain,
+  ShieldCheck,
 } from 'lucide-react'
 import { useState } from 'react'
 import { cn } from '@/lib/utils'
@@ -40,6 +41,7 @@ const NAV_ITEMS = [
   { href: '/dashboard/entries', label: 'Учёт', icon: NotebookPen },
   { href: '/dashboard/catalog', label: 'Справочники', icon: BookOpen },
   { href: '/dashboard/chatter-accounts', label: 'Аккаунты', icon: UserCog },
+  { href: '/dashboard/admins', label: 'Админы', icon: ShieldCheck },
   { href: '/dashboard/ranking', label: 'Рейтинг', icon: Trophy },
   { href: '/dashboard/reports', label: 'Отчёты', icon: LineChart },
   { href: '/dashboard/lab', label: 'Лаборатория', icon: FlaskConical },

@@ -145,6 +145,7 @@ class User(Base):
     full_name = Column(Text, nullable=True)
     chatter_id = Column(Integer, ForeignKey("chatters.id"), nullable=True)
     is_admin = Column(Boolean, default=False, nullable=False)
+    admin_shift_id = Column(Integer, ForeignKey("shifts_catalog.id"), nullable=True)
     active = Column(Boolean, default=True, nullable=False)
     avatar_base64 = Column(Text, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
