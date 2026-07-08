@@ -634,6 +634,228 @@ _PATCHES: list[tuple[str, bool]] = [
            ON ai_chat_messages (tenant_id, session_id, created_at)""",
         False,
     ),
+
+    # ═══════════════════════════════════════════════════════════════════════════
+    # KPI Admin Cabinet — шаг 1.1: схема БД
+    # ═══════════════════════════════════════════════════════════════════════════
+
+    # ── PostgreSQL enum types (idempotent via DO/EXCEPTION) ───────────────────
+    (
+        """DO $$ BEGIN
+    CREATE TYPE case_stage AS ENUM (
+        'detected','in_progress','hold','review_due','closed','cancelled'
+    );
+EXCEPTION WHEN duplicate_object THEN NULL;
+END $$""",
+        False,
+    ),
+    (
+        """DO $$ BEGIN
+    CREATE TYPE case_priority AS ENUM ('high','normal','low');
+EXCEPTION WHEN duplicate_object THEN NULL;
+END $$""",
+        False,
+    ),
+    (
+        """DO $$ BEGIN
+    CREATE TYPE case_result AS ENUM ('success','failed','cancelled');
+EXCEPTION WHEN duplicate_object THEN NULL;
+END $$""",
+        False,
+    ),
+    (
+        """DO $$ BEGIN
+    CREATE TYPE metric_type AS ENUM (
+        'ppv_open_rate','rpc','apv','total_chats','revenue'
+    );
+EXCEPTION WHEN duplicate_object THEN NULL;
+END $$""",
+        False,
+    ),
+    (
+        """DO $$ BEGIN
+    CREATE TYPE snapshot_type AS ENUM ('baseline','target','result');
+EXCEPTION WHEN duplicate_object THEN NULL;
+END $$""",
+        False,
+    ),
+    (
+        """DO $$ BEGIN
+    CREATE TYPE snapshot_source AS ENUM (
+        'system_from_daily','system_from_monthly','manual'
+    );
+EXCEPTION WHEN duplicate_object THEN NULL;
+END $$""",
+        False,
+    ),
+    (
+        """DO $$ BEGIN
+    CREATE TYPE ledger_event_type AS ENUM (
+        'case_opened','case_closed_success','case_closed_failed',
+        'case_cancelled','guardrail_triggered','baseline_frozen'
+    );
+EXCEPTION WHEN duplicate_object THEN NULL;
+END $$""",
+        False,
+    ),
+    (
+        """DO $$ BEGIN
+    CREATE TYPE stage_changed_by AS ENUM ('admin','owner','system');
+EXCEPTION WHEN duplicate_object THEN NULL;
+END $$""",
+        False,
+    ),
+
+    # ── users: admin_shift_id (nullable FK → shifts_catalog) ─────────────────
+    (
+        "ALTER TABLE users ADD COLUMN IF NOT EXISTS admin_shift_id INTEGER REFERENCES shifts_catalog(id)",
+        False,
+    ),
+
+    # ── admin_cases (3.1) ─────────────────────────────────────────────────────
+    (
+        """CREATE TABLE IF NOT EXISTS admin_cases (
+            id              SERIAL PRIMARY KEY,
+            tenant_id       INTEGER NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+            admin_id        INTEGER NOT NULL REFERENCES users(id),
+            om_user_id      VARCHAR(64) NOT NULL,
+            metric_type     metric_type NOT NULL,
+            stage           case_stage  NOT NULL DEFAULT 'detected',
+            priority        case_priority NOT NULL DEFAULT 'normal',
+            result          case_result,
+            opened_at       TIMESTAMP NOT NULL DEFAULT NOW(),
+            closed_at       TIMESTAMP,
+            review_date     DATE,
+            baseline_value  NUMERIC(14, 4),
+            target_value    NUMERIC(14, 4),
+            result_value    NUMERIC(14, 4),
+            notes           TEXT,
+            created_at      TIMESTAMP NOT NULL DEFAULT NOW()
+        )""",
+        False,
+    ),
+    # Partial unique index: only one open case per (chatter, metric) per tenant
+    (
+        """CREATE UNIQUE INDEX IF NOT EXISTS uq_admin_cases_open_chatter_metric
+           ON admin_cases (tenant_id, om_user_id, metric_type)
+           WHERE stage IN ('detected','in_progress','hold','review_due')""",
+        False,
+    ),
+    (
+        """CREATE INDEX IF NOT EXISTS idx_admin_cases_admin_stage
+           ON admin_cases (tenant_id, admin_id, stage)""",
+        False,
+    ),
+    (
+        """CREATE INDEX IF NOT EXISTS idx_admin_cases_chatter_metric
+           ON admin_cases (tenant_id, om_user_id, metric_type)""",
+        False,
+    ),
+    (
+        """CREATE INDEX IF NOT EXISTS idx_admin_cases_review_date
+           ON admin_cases (tenant_id, review_date)""",
+        False,
+    ),
+
+    # ── case_stage_history (3.3) ──────────────────────────────────────────────
+    (
+        """CREATE TABLE IF NOT EXISTS case_stage_history (
+            id          SERIAL PRIMARY KEY,
+            case_id     INTEGER NOT NULL REFERENCES admin_cases(id) ON DELETE CASCADE,
+            from_stage  case_stage,
+            to_stage    case_stage NOT NULL,
+            changed_at  TIMESTAMP NOT NULL DEFAULT NOW(),
+            changed_by  stage_changed_by NOT NULL,
+            notes       TEXT
+        )""",
+        False,
+    ),
+    (
+        """CREATE INDEX IF NOT EXISTS idx_case_stage_history_case
+           ON case_stage_history (case_id, changed_at)""",
+        False,
+    ),
+
+    # ── baseline_snapshots (3.4) ──────────────────────────────────────────────
+    (
+        """CREATE TABLE IF NOT EXISTS baseline_snapshots (
+            id              SERIAL PRIMARY KEY,
+            case_id         INTEGER NOT NULL REFERENCES admin_cases(id) ON DELETE CASCADE,
+            snapshot_type   snapshot_type   NOT NULL,
+            metric_type     metric_type     NOT NULL,
+            metric_value    NUMERIC(14, 4)  NOT NULL,
+            snapshot_date   DATE            NOT NULL,
+            source          snapshot_source NOT NULL DEFAULT 'system_from_daily',
+            created_at      TIMESTAMP NOT NULL DEFAULT NOW()
+        )""",
+        False,
+    ),
+    (
+        """CREATE INDEX IF NOT EXISTS idx_baseline_snapshots_case
+           ON baseline_snapshots (case_id, snapshot_type)""",
+        False,
+    ),
+
+    # ── case_ledger (3.5) append-only ─────────────────────────────────────────
+    (
+        """CREATE TABLE IF NOT EXISTS case_ledger (
+            id          SERIAL PRIMARY KEY,
+            tenant_id   INTEGER NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+            admin_id    INTEGER NOT NULL REFERENCES users(id),
+            case_id     INTEGER REFERENCES admin_cases(id) ON DELETE SET NULL,
+            event_type  ledger_event_type NOT NULL,
+            points      NUMERIC(10, 2)    NOT NULL DEFAULT 0,
+            notes       TEXT,
+            created_at  TIMESTAMP NOT NULL DEFAULT NOW()
+        )""",
+        False,
+    ),
+    (
+        """CREATE INDEX IF NOT EXISTS idx_case_ledger_admin
+           ON case_ledger (tenant_id, admin_id, created_at)""",
+        False,
+    ),
+
+    # ── kpi_config (3.6) ──────────────────────────────────────────────────────
+    (
+        """CREATE TABLE IF NOT EXISTS kpi_config (
+            id                          SERIAL PRIMARY KEY,
+            tenant_id                   INTEGER     NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+            metric_type                 metric_type NOT NULL,
+            noise_threshold_pct         NUMERIC(8, 2) NOT NULL DEFAULT 5,
+            guardrail_metrics           JSONB        NOT NULL DEFAULT '[]',
+            hold_days                   INTEGER      NOT NULL DEFAULT 21,
+            detect_to_result_ratio_min  INTEGER      NOT NULL DEFAULT 15,
+            calibration_days            INTEGER      NOT NULL DEFAULT 30,
+            UNIQUE (tenant_id, metric_type)
+        )""",
+        False,
+    ),
+
+    # ── admin_kpi_snapshot (3.7) monthly rollup per admin ────────────────────
+    (
+        """CREATE TABLE IF NOT EXISTS admin_kpi_snapshot (
+            tenant_id              INTEGER NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+            admin_id               INTEGER NOT NULL REFERENCES users(id),
+            period_year            INTEGER NOT NULL,
+            period_month           INTEGER NOT NULL,
+            cases_opened           INTEGER NOT NULL DEFAULT 0,
+            cases_closed_success   INTEGER NOT NULL DEFAULT 0,
+            cases_closed_failed    INTEGER NOT NULL DEFAULT 0,
+            cases_cancelled        INTEGER NOT NULL DEFAULT 0,
+            guardrail_hits         INTEGER NOT NULL DEFAULT 0,
+            total_points           NUMERIC(12, 2) NOT NULL DEFAULT 0,
+            detect_result_ratio    NUMERIC(6, 2),
+            is_calibration         BOOLEAN NOT NULL DEFAULT FALSE,
+            UNIQUE (tenant_id, admin_id, period_year, period_month)
+        )""",
+        False,
+    ),
+    (
+        """CREATE INDEX IF NOT EXISTS idx_admin_kpi_snapshot_admin
+           ON admin_kpi_snapshot (tenant_id, admin_id)""",
+        False,
+    ),
 ]
 
 # Catalog tables that should have UNIQUE(tenant_id, name).
@@ -891,3 +1113,90 @@ async def _backfill_tenant(db, tenant_id: int) -> int:
 
     await db.commit()
     return updated
+
+
+# ── KPI Config seed ────────────────────────────────────────────────────────────
+
+async def seed_default_kpi_config(db, tenant_id: int) -> int:
+    """Insert default kpi_config rows for all 5 standard metrics if not already present.
+
+    Must be called explicitly from the service layer on first access — NOT auto-called
+    at startup. Uses ON CONFLICT DO NOTHING so it is safe to call multiple times.
+
+    Returns:
+        Number of rows actually inserted (0 if all already existed).
+    """
+    import json as _json
+
+    _DEFAULTS = [
+        {
+            "metric_type":              "ppv_open_rate",
+            "noise_threshold_pct":      5,    # % — percentage metric, tight noise band
+            "guardrail_metrics":        ["revenue", "rpc"],
+            "hold_days":                21,
+            "detect_to_result_ratio_min": 15,
+            "calibration_days":         30,
+        },
+        {
+            "metric_type":              "rpc",
+            "noise_threshold_pct":      10,   # $ — monetary, wider noise band
+            "guardrail_metrics":        ["revenue"],
+            "hold_days":                21,
+            "detect_to_result_ratio_min": 15,
+            "calibration_days":         30,
+        },
+        {
+            "metric_type":              "apv",
+            "noise_threshold_pct":      10,
+            "guardrail_metrics":        [],
+            "hold_days":                21,
+            "detect_to_result_ratio_min": 15,
+            "calibration_days":         30,
+        },
+        {
+            "metric_type":              "total_chats",
+            "noise_threshold_pct":      5,    # count — tight band
+            "guardrail_metrics":        ["rpc", "apv"],
+            "hold_days":                21,
+            "detect_to_result_ratio_min": 15,
+            "calibration_days":         30,
+        },
+        {
+            "metric_type":              "revenue",
+            "noise_threshold_pct":      10,
+            "guardrail_metrics":        [],
+            "hold_days":                21,
+            "detect_to_result_ratio_min": 15,
+            "calibration_days":         30,
+        },
+    ]
+
+    created = 0
+    for d in _DEFAULTS:
+        result = await db.execute(
+            text(
+                """
+                INSERT INTO kpi_config
+                    (tenant_id, metric_type, noise_threshold_pct,
+                     guardrail_metrics, hold_days, detect_to_result_ratio_min, calibration_days)
+                VALUES
+                    (:tid, :mt::metric_type, :noise,
+                     :guardrail::jsonb, :hold_days, :ratio, :cal_days)
+                ON CONFLICT (tenant_id, metric_type) DO NOTHING
+                """
+            ),
+            {
+                "tid":       tenant_id,
+                "mt":        d["metric_type"],
+                "noise":     d["noise_threshold_pct"],
+                "guardrail": _json.dumps(d["guardrail_metrics"]),
+                "hold_days": d["hold_days"],
+                "ratio":     d["detect_to_result_ratio_min"],
+                "cal_days":  d["calibration_days"],
+            },
+        )
+        created += result.rowcount if result.rowcount > 0 else 0
+
+    await db.commit()
+    logger.info("seed_default_kpi_config: tenant=%s inserted=%s rows", tenant_id, created)
+    return created
