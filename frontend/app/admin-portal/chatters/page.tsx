@@ -14,10 +14,11 @@ import { cn } from '@/lib/utils'
 interface Chatter {
   om_user_id: string
   display_name: string
-  is_mapped: boolean
-  last_ppv_open_rate: number | null
-  last_apv: number | null
-  last_total_chats: number | null
+  month_open_rate: number | null
+  month_rpc: number | null
+  month_apv: number | null
+  month_chats: number | null
+  month_revenue: number | null
   has_open_case: boolean
   open_case_by_me: boolean
 }
@@ -36,9 +37,11 @@ const METRIC_OPTIONS: { value: MetricType; label: string }[] = [
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
 function fmtMetric(c: Chatter, metric: MetricType): string {
-  if (metric === 'ppv_open_rate') return c.last_ppv_open_rate != null ? `${c.last_ppv_open_rate}%` : '—'
-  if (metric === 'apv')           return c.last_apv           != null ? `$${c.last_apv}`           : '—'
-  if (metric === 'total_chats')   return c.last_total_chats   != null ? String(c.last_total_chats) : '—'
+  if (metric === 'ppv_open_rate') return c.month_open_rate != null ? `${c.month_open_rate.toFixed(1)}%` : '—'
+  if (metric === 'rpc')           return c.month_rpc        != null ? `$${c.month_rpc.toFixed(2)}`      : '—'
+  if (metric === 'apv')           return c.month_apv        != null ? `$${c.month_apv.toFixed(2)}`      : '—'
+  if (metric === 'total_chats')   return c.month_chats      != null ? String(c.month_chats)             : '—'
+  if (metric === 'revenue')       return c.month_revenue    != null ? `$${c.month_revenue.toFixed(0)}`  : '—'
   return '—'
 }
 
@@ -55,22 +58,25 @@ function CreateCaseModal({ chatter, onClose, onSuccess }: ModalProps) {
   const [diagnosis, setDiagnosis] = useState('')
   const [plan, setPlan]           = useState('')
   const [priority, setPriority]   = useState<Priority>('normal')
+  const [holdDays, setHoldDays]   = useState(21)
   const [loading, setLoading]     = useState(false)
   const [error, setError]         = useState<string | null>(null)
 
   async function submit(e: React.FormEvent) {
     e.preventDefault()
     if (!diagnosis.trim()) { setError('Укажите диагноз'); return }
+    if (holdDays < 1 || holdDays > 60) { setError('HOLD-период: от 1 до 60 дней'); return }
     setError(null)
     setLoading(true)
     try {
       const res = await api.post<{ id: number; baseline_value: number | null }>('/api/v1/admin-portal/cases', {
-        om_user_id: chatter.om_user_id,
+        om_user_id:           chatter.om_user_id,
         chatter_display_name: chatter.display_name,
-        metric_type: metric,
-        diagnosis_text: diagnosis,
-        action_plan: plan,
+        metric_type:          metric,
+        diagnosis_text:       diagnosis,
+        action_plan:          plan,
         priority,
+        hold_days:            holdDays,
       })
       onSuccess(res.data.id)
     } catch (err: unknown) {
@@ -88,7 +94,7 @@ function CreateCaseModal({ chatter, onClose, onSuccess }: ModalProps) {
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm">
-      <div className="bg-slate-900 border border-slate-700/60 rounded-2xl shadow-2xl w-full max-w-lg">
+      <div className="bg-slate-900 border border-slate-700/60 rounded-2xl shadow-2xl w-full max-w-lg max-h-[90vh] overflow-y-auto">
         {/* Header */}
         <div className="flex items-center justify-between px-6 py-4 border-b border-slate-700/50">
           <div>
@@ -116,7 +122,7 @@ function CreateCaseModal({ chatter, onClose, onSuccess }: ModalProps) {
               </select>
               {currentVal !== '—' && (
                 <span className="text-sm font-semibold text-amber-300 shrink-0">
-                  Сейчас: {currentVal}
+                  Мес: {currentVal}
                 </span>
               )}
             </div>
@@ -174,6 +180,25 @@ function CreateCaseModal({ chatter, onClose, onSuccess }: ModalProps) {
             </div>
           </div>
 
+          {/* HOLD period */}
+          <div>
+            <label className="block text-xs font-medium text-slate-400 mb-1.5">
+              HOLD-период (дней) <span className="text-red-400">*</span>
+            </label>
+            <input
+              type="number"
+              min={1}
+              max={60}
+              value={holdDays}
+              onChange={e => setHoldDays(Number(e.target.value))}
+              required
+              className="w-full bg-slate-800 border border-slate-600 rounded-lg px-3 py-2 text-sm text-slate-200 focus:outline-none focus:ring-1 focus:ring-amber-500"
+            />
+            <p className="text-xs text-slate-500 mt-1.5">
+              Через сколько дней система сама сверит метрику. Обычно 21, но можно меньше для быстрых правок или больше для сложных.
+            </p>
+          </div>
+
           {/* Error */}
           {error && (
             <div className="flex items-start gap-2 bg-red-500/10 border border-red-500/20 rounded-lg px-3 py-2.5">
@@ -203,11 +228,12 @@ export default function ChattersPage() {
   const router = useRouter()
   const qc = useQueryClient()
   const [modalChatter, setModalChatter] = useState<Chatter | null>(null)
-  const [successMsg, setSuccessMsg]     = useState<string | null>(null)
+  const [showAll, setShowAll]           = useState(false)
 
   const { data: chatters, isLoading } = useQuery<Chatter[]>({
-    queryKey: ['admin-portal-chatters'],
-    queryFn: () => api.get<Chatter[]>('/api/v1/admin-portal/chatters').then(r => r.data),
+    queryKey: ['admin-portal-chatters', showAll],
+    queryFn: () =>
+      api.get<Chatter[]>(`/api/v1/admin-portal/chatters?show_all=${showAll}`).then(r => r.data),
   })
 
   function handleSuccess(caseId: number) {
@@ -219,9 +245,28 @@ export default function ChattersPage() {
 
   return (
     <div className="p-6 max-w-5xl mx-auto">
-      <div className="mb-6">
-        <h1 className="text-xl font-bold text-slate-100">Чаттеры</h1>
-        <p className="text-sm text-slate-400 mt-0.5">Список чаттеров агентства с последними KPI-метриками</p>
+      <div className="mb-6 flex items-start justify-between">
+        <div>
+          <h1 className="text-xl font-bold text-slate-100">Чаттеры</h1>
+          <p className="text-sm text-slate-400 mt-0.5">
+            Активные чаттеры с месячными KPI-метриками (текущий месяц)
+          </p>
+        </div>
+        <label className="flex items-center gap-2 cursor-pointer select-none">
+          <span className="text-xs text-slate-400">Показать всех</span>
+          <div
+            onClick={() => setShowAll(v => !v)}
+            className={cn(
+              'relative w-9 h-5 rounded-full transition-colors',
+              showAll ? 'bg-amber-500' : 'bg-slate-600',
+            )}
+          >
+            <div className={cn(
+              'absolute top-0.5 w-4 h-4 bg-white rounded-full shadow transition-transform',
+              showAll ? 'translate-x-4' : 'translate-x-0.5',
+            )} />
+          </div>
+        </label>
       </div>
 
       {isLoading ? (
@@ -230,7 +275,11 @@ export default function ChattersPage() {
         </div>
       ) : !chatters?.length ? (
         <div className="text-center py-12 text-slate-500">
-          <p>Нет данных о чаттерах. Настройте маппинг Onlymonster.</p>
+          <p>
+            {showAll
+              ? 'Нет данных о чаттерах. Настройте маппинг Onlymonster.'
+              : 'Нет активных чаттеров за последние 30 дней. Включите «Показать всех».'}
+          </p>
         </div>
       ) : (
         <div className="bg-slate-800/40 border border-slate-700/50 rounded-xl overflow-hidden">
@@ -238,9 +287,10 @@ export default function ChattersPage() {
             <thead>
               <tr className="border-b border-slate-700/50">
                 <th className="text-left px-4 py-3 text-xs font-medium text-slate-400 uppercase tracking-wide">Чаттер</th>
-                <th className="text-right px-4 py-3 text-xs font-medium text-slate-400 uppercase tracking-wide">Open Rate</th>
-                <th className="text-right px-4 py-3 text-xs font-medium text-slate-400 uppercase tracking-wide">APV</th>
-                <th className="text-right px-4 py-3 text-xs font-medium text-slate-400 uppercase tracking-wide">Чатов</th>
+                <th className="text-right px-4 py-3 text-xs font-medium text-slate-400 uppercase tracking-wide">Open Rate (мес)</th>
+                <th className="text-right px-4 py-3 text-xs font-medium text-slate-400 uppercase tracking-wide">RPC (мес)</th>
+                <th className="text-right px-4 py-3 text-xs font-medium text-slate-400 uppercase tracking-wide">APV (мес)</th>
+                <th className="text-right px-4 py-3 text-xs font-medium text-slate-400 uppercase tracking-wide">Чатов (мес)</th>
                 <th className="text-center px-4 py-3 text-xs font-medium text-slate-400 uppercase tracking-wide">Статус</th>
                 <th className="px-4 py-3" />
               </tr>
@@ -251,17 +301,28 @@ export default function ChattersPage() {
                   <td className="px-4 py-3">
                     <div>
                       <p className="font-medium text-slate-200">{c.display_name}</p>
-                      <p className="text-xs text-slate-500 mt-0.5">ID: {c.om_user_id}</p>
+                      <p className="text-xs text-slate-500 mt-0.5">{c.om_user_id}</p>
                     </div>
                   </td>
                   <td className="px-4 py-3 text-right text-slate-300">
-                    {c.last_ppv_open_rate != null ? `${c.last_ppv_open_rate}%` : <span className="text-slate-600">—</span>}
+                    {c.month_open_rate != null
+                      ? `${c.month_open_rate.toFixed(1)}%`
+                      : <span className="text-slate-600">—</span>}
                   </td>
                   <td className="px-4 py-3 text-right text-slate-300">
-                    {c.last_apv != null ? `$${c.last_apv}` : <span className="text-slate-600">—</span>}
+                    {c.month_rpc != null
+                      ? `$${c.month_rpc.toFixed(2)}`
+                      : <span className="text-slate-600">—</span>}
                   </td>
                   <td className="px-4 py-3 text-right text-slate-300">
-                    {c.last_total_chats != null ? c.last_total_chats : <span className="text-slate-600">—</span>}
+                    {c.month_apv != null
+                      ? `$${c.month_apv.toFixed(2)}`
+                      : <span className="text-slate-600">—</span>}
+                  </td>
+                  <td className="px-4 py-3 text-right text-slate-300">
+                    {c.month_chats != null
+                      ? c.month_chats
+                      : <span className="text-slate-600">—</span>}
                   </td>
                   <td className="px-4 py-3 text-center">
                     {c.open_case_by_me ? (

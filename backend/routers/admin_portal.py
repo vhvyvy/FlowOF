@@ -19,7 +19,7 @@ GET    /me/kpi                      — KPI-снапшот текущего/вы
 from __future__ import annotations
 
 import logging
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from decimal import Decimal
 from typing import Any, Literal, Optional
 
@@ -38,7 +38,9 @@ from schema_patch import seed_default_kpi_config
 from services import admin_cases as svc_cases
 from services import case_ledger as svc_ledger
 from services.admin_kpi_calc import recalc_admin_kpi_snapshot
+from services.case_baseline import read_metric_at_date
 from services.case_review_service import check_review_due_cases
+from services.kpi_service import get_chatter_kpi
 
 logger = logging.getLogger("flowof.admin_portal")
 router = APIRouter(prefix="/api/v1/admin-portal", tags=["admin_portal"])
@@ -58,6 +60,7 @@ class CreateCaseRequest(BaseModel):
     diagnosis_text: str = ""
     action_plan: str = ""
     priority: PriorityLiteral = "normal"
+    hold_days: int = Field(default=21, ge=1, le=60)
 
 
 class CaseOut(BaseModel):
@@ -142,9 +145,17 @@ class HistoryOut(BaseModel):
         )
 
 
+class MetricPoint(BaseModel):
+    value: Optional[float] = None
+    date_label: Optional[str] = None   # human-readable period (e.g. "7 июл" or "июл 2025")
+
+
 class CaseDetailOut(CaseOut):
     snapshots: list[SnapshotOut] = []
     history: list[HistoryOut] = []
+    today_metric: MetricPoint = MetricPoint()
+    week_avg_metric: MetricPoint = MetricPoint()
+    month_metric: MetricPoint = MetricPoint()
 
 
 class PatchStageRequest(BaseModel):
@@ -160,12 +171,13 @@ class CloseRequest(BaseModel):
 class ChatterItem(BaseModel):
     om_user_id: str
     display_name: str
-    is_mapped: bool
-    last_ppv_open_rate: Optional[float]
-    last_apv: Optional[float]
-    last_total_chats: Optional[int]
-    has_open_case: bool
-    open_case_by_me: bool
+    month_open_rate: Optional[float] = None
+    month_rpc: Optional[float] = None
+    month_apv: Optional[float] = None
+    month_chats: Optional[int] = None
+    month_revenue: Optional[float] = None
+    has_open_case: bool = False
+    open_case_by_me: bool = False
 
 
 class KpiSnapshotOut(BaseModel):
@@ -239,6 +251,7 @@ async def create_case(
             diagnosis_text=body.diagnosis_text,
             action_plan=body.action_plan,
             priority=body.priority,
+            hold_days=body.hold_days,
         )
     except Exception as exc:
         raise _svc_err(exc) from exc
@@ -300,11 +313,68 @@ async def get_case(
         )
     ).scalars().all()
 
+    today = date.today()
+    year, month = today.year, today.month
+
+    # ── today_metric: yesterday's daily value (1-day lookback) ───────────────
+    yesterday = today - timedelta(days=1)
+    today_val = await read_metric_at_date(
+        db, case.tenant_id, case.om_user_id, case.metric_type, yesterday
+    )
+    today_metric = MetricPoint(
+        value=float(today_val) if today_val is not None else None,
+        date_label=yesterday.strftime("%-d %b").lstrip("0") if today_val is not None else None,
+    )
+
+    # ── week_avg_metric: average of last 7 available daily values ─────────────
+    week_vals = []
+    for d in range(1, 8):
+        v = await read_metric_at_date(
+            db, case.tenant_id, case.om_user_id, case.metric_type, today - timedelta(days=d)
+        )
+        if v is not None:
+            week_vals.append(float(v))
+    if week_vals:
+        avg = sum(week_vals) / len(week_vals)
+        start_day = (today - timedelta(days=7)).strftime("%-d")
+        end_day   = yesterday.strftime("%-d %b")
+        week_avg_metric = MetricPoint(
+            value=round(avg, 4),
+            date_label=f"{start_day}–{end_day}",
+        )
+    else:
+        week_avg_metric = MetricPoint()
+
+    # ── month_metric: current month aggregate from kpi_service ───────────────
+    try:
+        kpi_rows, _, _, _ = await get_chatter_kpi(db, case.tenant_id, year, month)
+        month_row = next(
+            (r for r in kpi_rows if r.onlymonster_id == case.om_user_id), None
+        )
+        metric_attr = {
+            "ppv_open_rate": "ppv_open_rate",
+            "apv":           "apv",
+            "rpc":           "rpc",
+            "total_chats":   "total_chats",
+            "revenue":       "revenue",
+        }.get(case.metric_type)
+        month_val = getattr(month_row, metric_attr, None) if month_row and metric_attr else None
+        month_metric = MetricPoint(
+            value=float(month_val) if month_val is not None else None,
+            date_label=today.strftime("%b %Y"),
+        )
+    except Exception as exc:
+        logger.warning("get_case: month_metric error case=%s: %s", case_id, exc)
+        month_metric = MetricPoint()
+
     base = CaseOut.from_orm(case)
     return CaseDetailOut(
         **base.model_dump(),
         snapshots=[SnapshotOut.from_orm(s) for s in snaps],
         history=[HistoryOut.from_orm(h) for h in history],
+        today_metric=today_metric,
+        week_avg_metric=week_avg_metric,
+        month_metric=month_metric,
     )
 
 
@@ -378,16 +448,48 @@ async def close_case(
 
 @router.get("/chatters", response_model=list[ChatterItem])
 async def list_chatters(
+    show_all: bool = Query(False, description="Показать всех, включая неактивных"),
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(require_admin),
 ):
     """
-    Список чаттеров агентства с последними KPI и наличием открытых кейсов.
-    Источник: chatter_onlymonster_mapping + последний день в chatter_kpi_daily.
+    Список активных чаттеров агентства с месячными KPI (текущий месяц).
+    Активность: транзакция или daily-запись за последние 30 дней.
+    Метрики: те же, что на KPI-вкладке owner'а (kpi_service.get_chatter_kpi).
     """
+    import json as _json
     tid = current_user.tenant_id
+    today = date.today()
+    year, month = today.year, today.month
 
-    # All mappings for this tenant
+    # ── Monthly KPI via the same service as owner KPI tab ────────────────────
+    kpi_rows, _, _, _ = await get_chatter_kpi(db, tid, year, month)
+
+    # Index monthly KPI by onlymonster_id
+    monthly_by_om: dict[str, Any] = {}
+    for row in kpi_rows:
+        if row.onlymonster_id:
+            monthly_by_om[row.onlymonster_id] = row
+
+    # ── Activity filter: active om_user_ids in last 30 days ─────────────────
+    if not show_all:
+        cutoff = today - timedelta(days=30)
+        active_rows = (
+            await db.execute(
+                text(
+                    """
+                    SELECT DISTINCT om_user_id FROM chatter_kpi_daily
+                    WHERE tenant_id = :tid AND date >= :cutoff
+                    """
+                ),
+                {"tid": tid, "cutoff": cutoff},
+            )
+        ).fetchall()
+        active_om_ids: set[str] = {r[0] for r in active_rows}
+    else:
+        active_om_ids = None  # type: ignore[assignment]
+
+    # ── All mappings ──────────────────────────────────────────────────────────
     mappings = (
         await db.execute(
             select(ChatterMapping).where(ChatterMapping.tenant_id == tid)
@@ -397,64 +499,52 @@ async def list_chatters(
     if not mappings:
         return []
 
-    om_ids = [m.onlymonster_id for m in mappings]
-
-    # Latest available date per om_user_id in chatter_kpi_daily
-    latest_rows = (
-        await db.execute(
-            text(
-                """
-                SELECT DISTINCT ON (om_user_id)
-                    om_user_id, ppv_open_rate, apv, total_chats, date
-                FROM chatter_kpi_daily
-                WHERE tenant_id = :tid AND om_user_id = ANY(:ids)
-                ORDER BY om_user_id, date DESC
-                """
-            ),
-            {"tid": tid, "ids": om_ids},
-        )
-    ).fetchall()
-
-    metrics: dict[str, dict] = {
-        r[0]: {
-            "ppv_open_rate": r[1],
-            "apv": r[2],
-            "total_chats": r[3],
-        }
-        for r in latest_rows
-    }
-
-    # Open cases per om_user_id (any admin)
+    # ── Open cases per om_user_id ─────────────────────────────────────────────
     open_cases_rows = (
         await db.execute(
             text(
-                """
-                SELECT om_user_id, admin_id
-                FROM admin_cases
-                WHERE tenant_id = :tid AND stage = ANY(:stages)
-                """
+                "SELECT om_user_id, admin_id FROM admin_cases "
+                "WHERE tenant_id = :tid AND stage = ANY(:stages)"
             ),
             {"tid": tid, "stages": list(_OPEN_STAGES)},
         )
     ).fetchall()
-
     open_any: set[str] = {r[0] for r in open_cases_rows}
     open_mine: set[str] = {r[0] for r in open_cases_rows if r[1] == current_user.id}
 
+    # ── Build items ───────────────────────────────────────────────────────────
     items: list[ChatterItem] = []
     for m in mappings:
-        display = (m.display_names or "").split(",")[0].strip() or m.onlymonster_id
-        daily = metrics.get(m.onlymonster_id, {})
+        om_id = m.onlymonster_id
+
+        # Activity filter
+        if active_om_ids is not None and om_id not in active_om_ids:
+            continue
+
+        # Unwrap display_names: handle JSON array, comma-list, or plain string
+        raw_name = m.display_names or ""
+        try:
+            parsed = _json.loads(raw_name)
+            if isinstance(parsed, list) and parsed:
+                display = str(parsed[0]).strip()
+            else:
+                display = raw_name.split(",")[0].strip()
+        except Exception:
+            display = raw_name.split(",")[0].strip()
+        display = display or om_id
+
+        kpi = monthly_by_om.get(om_id)
         items.append(
             ChatterItem(
-                om_user_id=m.onlymonster_id,
+                om_user_id=om_id,
                 display_name=display,
-                is_mapped=True,
-                last_ppv_open_rate=float(daily["ppv_open_rate"]) if daily.get("ppv_open_rate") is not None else None,
-                last_apv=float(daily["apv"]) if daily.get("apv") is not None else None,
-                last_total_chats=int(daily["total_chats"]) if daily.get("total_chats") is not None else None,
-                has_open_case=m.onlymonster_id in open_any,
-                open_case_by_me=m.onlymonster_id in open_mine,
+                month_open_rate=kpi.ppv_open_rate if kpi else None,
+                month_rpc=kpi.rpc if kpi else None,
+                month_apv=kpi.apv if kpi else None,
+                month_chats=kpi.total_chats if kpi else None,
+                month_revenue=kpi.revenue if kpi else None,
+                has_open_case=om_id in open_any,
+                open_case_by_me=om_id in open_mine,
             )
         )
 

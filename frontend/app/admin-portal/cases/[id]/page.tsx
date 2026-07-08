@@ -29,6 +29,11 @@ interface HistoryEntry {
   notes: string | null
 }
 
+interface MetricPoint {
+  value: number | null
+  date_label: string | null
+}
+
 interface CaseDetail {
   id: number
   admin_id: number
@@ -45,6 +50,9 @@ interface CaseDetail {
   notes: string | null
   snapshots: Snapshot[]
   history: HistoryEntry[]
+  today_metric: MetricPoint
+  week_avg_metric: MetricPoint
+  month_metric: MetricPoint
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
@@ -86,6 +94,14 @@ function StageBadge({ stage }: { stage: string }) {
 function fmtDate(s: string | null): string {
   if (!s) return '—'
   return new Date(s).toLocaleDateString('ru-RU', { day: 'numeric', month: 'short', year: 'numeric' })
+}
+
+function fmtVal(metric: string, v: number | null): string {
+  if (v == null) return '—'
+  if (metric === 'ppv_open_rate') return `${v.toFixed(1)}%`
+  if (metric === 'total_chats')   return String(Math.round(v))
+  if (metric === 'revenue')       return `$${v.toFixed(0)}`
+  return `$${v.toFixed(2)}`
 }
 
 function Section({ title, children }: { title: string; children: React.ReactNode }) {
@@ -401,21 +417,66 @@ export default function CaseDetailPage() {
         </div>
       </div>
 
-      {/* Baseline */}
+      {/* Metric overview: 4-column row */}
       {baselineSnap && (
-        <Section title="Baseline">
-          <div className="flex items-center gap-6 text-sm">
-            <div>
-              <p className="text-xs text-slate-500 mb-0.5">Значение</p>
-              <p className="text-xl font-bold text-slate-100">{baselineSnap.metric_value}</p>
+        <Section title="Метрика">
+          <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+            {/* Baseline */}
+            <div className="bg-slate-700/30 rounded-xl p-3">
+              <p className="text-xs text-slate-500 mb-1">Baseline</p>
+              <p className="text-lg font-bold text-slate-100">{fmtVal(c.metric_type, baselineSnap.metric_value)}</p>
+              <p className="text-xs text-slate-500 mt-1">{fmtDate(baselineSnap.snapshot_date)}</p>
             </div>
-            <div>
-              <p className="text-xs text-slate-500 mb-0.5">Дата</p>
-              <p className="font-medium text-slate-300">{fmtDate(baselineSnap.snapshot_date)}</p>
+            {/* Today */}
+            <div className="bg-slate-700/30 rounded-xl p-3">
+              <p className="text-xs text-slate-500 mb-1">Вчера</p>
+              {c.today_metric?.value != null ? (
+                <>
+                  <p className={cn(
+                    'text-lg font-bold',
+                    c.today_metric.value >= baselineSnap.metric_value ? 'text-green-400' : 'text-red-400',
+                  )}>
+                    {fmtVal(c.metric_type, c.today_metric.value)}
+                  </p>
+                  <p className="text-xs text-slate-500 mt-1">{c.today_metric.date_label ?? '—'}</p>
+                </>
+              ) : (
+                <p className="text-lg font-bold text-slate-600">—</p>
+              )}
             </div>
-            <div>
-              <p className="text-xs text-slate-500 mb-0.5">Источник</p>
-              <p className="font-medium text-slate-400">{baselineSnap.source.replace('system_from_', '')}</p>
+            {/* Week avg */}
+            <div className="bg-slate-700/30 rounded-xl p-3">
+              <p className="text-xs text-slate-500 mb-1">Неделя (среднее)</p>
+              {c.week_avg_metric?.value != null ? (
+                <>
+                  <p className={cn(
+                    'text-lg font-bold',
+                    c.week_avg_metric.value >= baselineSnap.metric_value ? 'text-green-400' : 'text-red-400',
+                  )}>
+                    {fmtVal(c.metric_type, c.week_avg_metric.value)}
+                  </p>
+                  <p className="text-xs text-slate-500 mt-1">{c.week_avg_metric.date_label ?? '—'}</p>
+                </>
+              ) : (
+                <p className="text-lg font-bold text-slate-600">—</p>
+              )}
+            </div>
+            {/* Month */}
+            <div className="bg-slate-700/30 rounded-xl p-3">
+              <p className="text-xs text-slate-500 mb-1">Месяц (агрегат)</p>
+              {c.month_metric?.value != null ? (
+                <>
+                  <p className={cn(
+                    'text-lg font-bold',
+                    c.month_metric.value >= baselineSnap.metric_value ? 'text-green-400' : 'text-red-400',
+                  )}>
+                    {fmtVal(c.metric_type, c.month_metric.value)}
+                  </p>
+                  <p className="text-xs text-slate-500 mt-1">{c.month_metric.date_label ?? '—'}</p>
+                </>
+              ) : (
+                <p className="text-lg font-bold text-slate-600">—</p>
+              )}
             </div>
           </div>
         </Section>

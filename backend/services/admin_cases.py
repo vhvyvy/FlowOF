@@ -135,6 +135,7 @@ async def create_case(
     diagnosis_text: str,
     action_plan: str,
     priority: str = "normal",
+    hold_days: int = 21,
 ) -> AdminCase:
     """
     Open a new KPI case in a single transaction.
@@ -166,8 +167,8 @@ async def create_case(
         )
     baseline_value, snapshot_date, snapshot_source = baseline_result
 
-    # 4. review_date
-    review_date = date.today() + timedelta(days=cfg.hold_days)
+    # 4. review_date — set by caller (admin's choice), kpi_config.hold_days is UI default only
+    review_date = date.today() + timedelta(days=hold_days)
 
     # 5. Build notes from diagnosis + action plan
     parts: list[str] = []
