@@ -1132,76 +1132,63 @@ async def seed_default_kpi_config(db, tenant_id: int) -> int:
     Returns:
         Number of rows actually inserted (0 if all already existed).
     """
-    import json as _json
+    from sqlalchemy.dialects.postgresql import insert as pg_insert
+    from models import KpiConfig
 
     _DEFAULTS = [
         {
-            "metric_type":              "ppv_open_rate",
-            "noise_threshold_pct":      5,    # % — percentage metric, tight noise band
-            "guardrail_metrics":        ["revenue", "rpc"],
-            "hold_days":                21,
+            "metric_type":               "ppv_open_rate",
+            "noise_threshold_pct":       5,
+            "guardrail_metrics":         ["revenue", "rpc"],
+            "hold_days":                 21,
             "detect_to_result_ratio_min": 15,
-            "calibration_days":         30,
+            "calibration_days":          30,
         },
         {
-            "metric_type":              "rpc",
-            "noise_threshold_pct":      10,   # $ — monetary, wider noise band
-            "guardrail_metrics":        ["revenue"],
-            "hold_days":                21,
+            "metric_type":               "rpc",
+            "noise_threshold_pct":       10,
+            "guardrail_metrics":         ["revenue"],
+            "hold_days":                 21,
             "detect_to_result_ratio_min": 15,
-            "calibration_days":         30,
+            "calibration_days":          30,
         },
         {
-            "metric_type":              "apv",
-            "noise_threshold_pct":      10,
-            "guardrail_metrics":        [],
-            "hold_days":                21,
+            "metric_type":               "apv",
+            "noise_threshold_pct":       10,
+            "guardrail_metrics":         [],
+            "hold_days":                 21,
             "detect_to_result_ratio_min": 15,
-            "calibration_days":         30,
+            "calibration_days":          30,
         },
         {
-            "metric_type":              "total_chats",
-            "noise_threshold_pct":      5,    # count — tight band
-            "guardrail_metrics":        ["rpc", "apv"],
-            "hold_days":                21,
+            "metric_type":               "total_chats",
+            "noise_threshold_pct":       5,
+            "guardrail_metrics":         ["rpc", "apv"],
+            "hold_days":                 21,
             "detect_to_result_ratio_min": 15,
-            "calibration_days":         30,
+            "calibration_days":          30,
         },
         {
-            "metric_type":              "revenue",
-            "noise_threshold_pct":      10,
-            "guardrail_metrics":        [],
-            "hold_days":                21,
+            "metric_type":               "revenue",
+            "noise_threshold_pct":       10,
+            "guardrail_metrics":         [],
+            "hold_days":                 21,
             "detect_to_result_ratio_min": 15,
-            "calibration_days":         30,
+            "calibration_days":          30,
         },
     ]
 
-    created = 0
-    for d in _DEFAULTS:
-        result = await db.execute(
-            text(
-                """
-                INSERT INTO kpi_config
-                    (tenant_id, metric_type, noise_threshold_pct,
-                     guardrail_metrics, hold_days, detect_to_result_ratio_min, calibration_days)
-                VALUES
-                    (:tid, :mt::metric_type, :noise,
-                     :guardrail::jsonb, :hold_days, :ratio, :cal_days)
-                ON CONFLICT (tenant_id, metric_type) DO NOTHING
-                """
-            ),
-            {
-                "tid":       tenant_id,
-                "mt":        d["metric_type"],
-                "noise":     d["noise_threshold_pct"],
-                "guardrail": _json.dumps(d["guardrail_metrics"]),
-                "hold_days": d["hold_days"],
-                "ratio":     d["detect_to_result_ratio_min"],
-                "cal_days":  d["calibration_days"],
-            },
-        )
-        created += result.rowcount if result.rowcount > 0 else 0
+    # Single bulk INSERT … ON CONFLICT DO NOTHING for all 5 metrics.
+    # KpiConfig.metric_type is typed as PG_ENUM(name='metric_type', create_type=False),
+    # so SQLAlchemy automatically emits the correct cast — no ::metric_type literal needed.
+    # guardrail_metrics is JSONB — asyncpg serialises Python list automatically.
+    stmt = (
+        pg_insert(KpiConfig)
+        .values([{"tenant_id": tenant_id, **d} for d in _DEFAULTS])
+        .on_conflict_do_nothing(index_elements=["tenant_id", "metric_type"])
+    )
+    result = await db.execute(stmt)
+    created = result.rowcount if result.rowcount and result.rowcount > 0 else 0
 
     await db.commit()
     logger.info("seed_default_kpi_config: tenant=%s inserted=%s rows", tenant_id, created)
