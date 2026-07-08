@@ -90,6 +90,8 @@ from routers import (  # noqa: E402
     reports,
     agent_events,
     agency_profile,
+    admin_portal,
+    admins_review,
 )
 from database import engine, Base, AsyncSessionLocal  # noqa: E402
 
@@ -122,6 +124,8 @@ app.include_router(import_data.router)
 app.include_router(reports.router)
 app.include_router(agent_events.router)
 app.include_router(agency_profile.router)
+app.include_router(admin_portal.router)
+app.include_router(admins_review.router)
 
 
 # ── Startup: create missing tables ───────────────────────────────────────────

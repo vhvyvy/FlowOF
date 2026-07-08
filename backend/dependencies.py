@@ -92,3 +92,13 @@ async def require_chatter(user: User = Depends(get_current_user)) -> User:
             detail="Доступ только для чаттеров",
         )
     return user
+
+
+async def require_admin(user: User = Depends(get_current_user)) -> User:
+    """Разрешает доступ только пользователям с is_admin=True в своём агентстве."""
+    if not getattr(user, "is_admin", False):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Доступ только для администраторов агентства",
+        )
+    return user
