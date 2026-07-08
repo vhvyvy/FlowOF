@@ -31,9 +31,12 @@ function LoginForm() {
     try {
       const response = await login({ email, password })
       const role = response.role ?? 'owner'
+      const isAdmin = Boolean(response.is_admin)
 
-      if (role === 'chatter') {
-        // Chatter always goes to portal — never to dashboard
+      if (isAdmin) {
+        // Admin users get their own portal, regardless of owner/chatter role
+        router.replace('/admin-portal')
+      } else if (role === 'chatter') {
         router.replace('/portal')
       } else {
         // Owner: honour ?next= only if it points to /dashboard (not /portal)

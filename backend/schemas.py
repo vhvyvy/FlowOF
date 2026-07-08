@@ -16,6 +16,7 @@ class TokenResponse(BaseModel):
     access_token: str
     token_type: str = "bearer"
     role: Optional[str] = None
+    is_admin: bool = False
 
 
 class RegisterRequest(BaseModel):

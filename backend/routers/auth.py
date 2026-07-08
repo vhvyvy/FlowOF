@@ -49,8 +49,8 @@ async def login(body: LoginRequest, db: AsyncSession = Depends(get_db)):
             user_id=user.id,
             role=user.role,
         )
-        logger.info("Login success user=%d role=%s", user.id, user.role)
-        return TokenResponse(access_token=token, role=user.role)
+        logger.info("Login success user=%d role=%s is_admin=%s", user.id, user.role, user.is_admin)
+        return TokenResponse(access_token=token, role=user.role, is_admin=bool(user.is_admin))
 
     # ── Fallback: старые tenants до миграции ─────────────────────────────────
     tenant_result = await db.execute(

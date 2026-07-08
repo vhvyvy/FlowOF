@@ -25,6 +25,9 @@ export async function login(data: LoginRequest): Promise<TokenResponse> {
     const role = res.data.role ?? 'owner'
     localStorage.setItem('user_role', role)
     setCookie('user_role', role)
+    const isAdmin = Boolean(res.data.is_admin)
+    localStorage.setItem('is_admin', isAdmin ? '1' : '0')
+    setCookie('is_admin', isAdmin ? '1' : '0')
   }
   return res.data
 }
@@ -65,11 +68,18 @@ export async function fetchOnboardingStatus(): Promise<OnboardingStatus> {
   return res.data
 }
 
+export function getUserIsAdmin(): boolean {
+  if (typeof window === 'undefined') return false
+  return localStorage.getItem('is_admin') === '1'
+}
+
 export function logout(): void {
   if (typeof window !== 'undefined') {
     localStorage.removeItem('token')
     localStorage.removeItem('user_role')
+    localStorage.removeItem('is_admin')
     deleteCookie('user_role')
+    deleteCookie('is_admin')
     window.location.href = '/login'
   }
 }
