@@ -151,6 +151,46 @@ def setup_scheduler() -> Any:
             replace_existing=True,
         )
 
+    # ── Admin KPI HOLD review (optional, ENABLE_ADMIN_KPI=1) ─────────────────
+    admin_kpi_enabled = os.getenv("ENABLE_ADMIN_KPI", "").strip().lower() in ("1", "true", "yes")
+
+    if admin_kpi_enabled:
+        async def _check_review_due_cases_job() -> None:
+            """05:00 UTC: process all HOLD cases whose review_date <= today."""
+            from services.case_review_service import check_review_due_cases
+
+            async with AsyncSessionLocal() as db:
+                r = await db.execute(select(Tenant).where(Tenant.active.is_(True)))
+                tenants = list(r.scalars().all())
+
+            logger.info("hold_review job: processing %d tenants", len(tenants))
+            for t in tenants:
+                try:
+                    async with AsyncSessionLocal() as db:
+                        stats = await check_review_due_cases(db, t.id)
+                    logger.info(
+                        "hold_review processed: tenant=%s processed=%s "
+                        "closed_success=%s guardrail=%s needs_review=%s errors=%s",
+                        t.id,
+                        stats.get("processed", 0),
+                        stats.get("closed_success", 0),
+                        stats.get("guardrail", 0),
+                        stats.get("needs_review", 0),
+                        stats.get("errors", []),
+                    )
+                except Exception as exc:
+                    logger.warning("hold_review job error tenant=%s: %s", t.id, exc)
+
+            logger.info("hold_review job DONE")
+
+        sched.add_job(
+            _check_review_due_cases_job,
+            "cron",
+            hour=5, minute=0,
+            id="admin_kpi_hold_review",
+            replace_existing=True,
+        )
+
     # ── Agent Watcher jobs (optional, AGENT_WATCHER_ENABLED=1) ────────────────
     watcher_enabled = os.getenv("AGENT_WATCHER_ENABLED", "").strip().lower() in ("1", "true", "yes")
 
@@ -233,12 +273,14 @@ def setup_scheduler() -> Any:
     )
     sched.start()
     _scheduler = sched
-    kpi_daily_msg = " + KPI daily 04:00 UTC" if kpi_daily_enabled else ""
-    watcher_msg   = " + Watcher scan 06:00 + Watcher review 07:00 UTC" if watcher_enabled else ""
+    kpi_daily_msg   = " + KPI daily 04:00 UTC" if kpi_daily_enabled else ""
+    admin_kpi_msg   = " + HOLD review 05:00 UTC" if admin_kpi_enabled else ""
+    watcher_msg     = " + Watcher scan 06:00 + Watcher review 07:00 UTC" if watcher_enabled else ""
+    job_count = 3 + (1 if kpi_daily_enabled else 0) + (1 if admin_kpi_enabled else 0) + (2 if watcher_enabled else 0)
     logger.info(
-        "APScheduler started: Notion sync every 24h, MMR daily 03:00 UTC, "
-        "Season close 23:55 UTC%s%s",
-        kpi_daily_msg, watcher_msg,
+        "APScheduler started with %d jobs: Notion sync every 24h, MMR daily 03:00 UTC, "
+        "Season close 23:55 UTC%s%s%s",
+        job_count, kpi_daily_msg, admin_kpi_msg, watcher_msg,
     )
     return sched
 

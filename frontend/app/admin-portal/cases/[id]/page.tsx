@@ -3,7 +3,7 @@
 import { useState } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { useParams, useRouter } from 'next/navigation'
-import { ArrowLeft, ArrowRight, Loader2, AlertCircle } from 'lucide-react'
+import { ArrowLeft, ArrowRight, Loader2, AlertCircle, Zap } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Skeleton } from '@/components/ui/skeleton'
 import api from '@/lib/api'
@@ -93,6 +93,56 @@ function Section({ title, children }: { title: string; children: React.ReactNode
     <div className="bg-slate-800/40 border border-slate-700/50 rounded-xl p-5 space-y-3">
       <h2 className="text-xs font-semibold text-slate-400 uppercase tracking-wider">{title}</h2>
       {children}
+    </div>
+  )
+}
+
+// ── HOLD test trigger ─────────────────────────────────────────────────────────
+
+function HoldTestButton({ caseId, onDone }: { caseId: number; onDone: () => void }) {
+  const [running, setRunning] = useState(false)
+  const [toast, setToast]     = useState<string | null>(null)
+
+  async function runReview() {
+    setRunning(true)
+    setToast(null)
+    try {
+      const res = await api.post('/api/v1/admin-portal/cases/run-review-now?force_all_hold=true')
+      const stats = res.data
+      setToast(
+        `Проверка запущена: обработано ${stats.processed ?? 0}, закрыто ${stats.closed_success ?? 0}. Обновляю…`
+      )
+      setTimeout(() => {
+        onDone()
+        setToast(null)
+      }, 1200)
+    } catch (err: unknown) {
+      const detail = (err as { response?: { data?: { detail?: string } } })?.response?.data?.detail
+      setToast(detail ?? 'Ошибка при запуске проверки')
+    } finally {
+      setRunning(false)
+    }
+  }
+
+  return (
+    <div>
+      {toast && (
+        <div className="mb-2 text-xs text-amber-300 bg-amber-500/10 border border-amber-500/20 rounded-lg px-3 py-2">
+          {toast}
+        </div>
+      )}
+      <button
+        onClick={runReview}
+        disabled={running}
+        title="Только для отладки: запускает HOLD-проверку немедленно, игнорируя review_date"
+        className="flex items-center gap-1.5 text-xs text-slate-500 hover:text-amber-400 transition-colors disabled:opacity-50"
+      >
+        {running
+          ? <Loader2 className="h-3.5 w-3.5 animate-spin" />
+          : <Zap className="h-3.5 w-3.5" />
+        }
+        Проверить сейчас (тест)
+      </button>
     </div>
   )
 }
@@ -211,13 +261,16 @@ function CaseActions({ caseDetail, onAction }: ActionsProps) {
       )}
 
       {stage === 'hold' && (
-        <p className="text-sm text-slate-400">
-          Кейс в холде до{' '}
-          <span className="font-semibold text-orange-300">
-            {caseDetail.review_date ? fmtDate(caseDetail.review_date) : '—'}
-          </span>.
-          Система автоматически проверит метрику и переведёт в стадию оценки.
-        </p>
+        <div className="space-y-3">
+          <p className="text-sm text-slate-400">
+            Кейс в холде до{' '}
+            <span className="font-semibold text-orange-300">
+              {caseDetail.review_date ? fmtDate(caseDetail.review_date) : '—'}
+            </span>.
+            Система автоматически проверит метрику и переведёт в стадию оценки.
+          </p>
+          <HoldTestButton caseId={id} onDone={onAction} />
+        </div>
       )}
 
       {stage === 'review_due' && (

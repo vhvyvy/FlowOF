@@ -38,6 +38,7 @@ from schema_patch import seed_default_kpi_config
 from services import admin_cases as svc_cases
 from services import case_ledger as svc_ledger
 from services.admin_kpi_calc import recalc_admin_kpi_snapshot
+from services.case_review_service import check_review_due_cases
 
 logger = logging.getLogger("flowof.admin_portal")
 router = APIRouter(prefix="/api/v1/admin-portal", tags=["admin_portal"])
@@ -512,3 +513,48 @@ async def my_kpi(
         )
 
     return KpiSnapshotOut.from_orm(snap)
+
+
+# ── Debug: manual HOLD review trigger ────────────────────────────────────────
+
+@router.post("/cases/run-review-now")
+async def run_review_now(
+    force_all_hold: bool = Query(False, description="Ignore review_date — process ALL hold cases"),
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_admin),
+):
+    """
+    Manually trigger the HOLD review for the current admin's tenant.
+
+    force_all_hold=true: processes every case in 'hold' stage regardless of
+    review_date — useful for testing without waiting 21 days.
+
+    Only for debugging/testing. Safe to call multiple times (idempotent decisions
+    based on current metric data).
+    """
+    from sqlalchemy import update
+
+    tid = current_user.tenant_id
+
+    if force_all_hold:
+        # Temporarily move all hold cases' review_date to today so the
+        # standard check_review_due_cases query picks them up.
+        # We restore nothing — the service itself will update/close them.
+        from datetime import date as _date
+        today = _date.today()
+        await db.execute(
+            update(AdminCase)
+            .where(
+                AdminCase.tenant_id == tid,
+                AdminCase.stage == "hold",
+            )
+            .values(review_date=today)
+        )
+        await db.flush()
+
+    stats = await check_review_due_cases(db, tid)
+    logger.info(
+        "run_review_now: admin=%s tenant=%s force=%s stats=%s",
+        current_user.id, tid, force_all_hold, stats,
+    )
+    return {"ok": True, "force_all_hold": force_all_hold, **stats}
