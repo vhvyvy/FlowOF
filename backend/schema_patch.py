@@ -637,74 +637,9 @@ _PATCHES: list[tuple[str, bool]] = [
 
     # ═══════════════════════════════════════════════════════════════════════════
     # KPI Admin Cabinet — шаг 1.1: схема БД
+    # NOTE: PostgreSQL enum types are created separately in _ENUM_PATCHES below
+    # (DO blocks with EXCEPTION handlers corrupt asyncpg transaction state).
     # ═══════════════════════════════════════════════════════════════════════════
-
-    # ── PostgreSQL enum types (idempotent via DO/EXCEPTION) ───────────────────
-    (
-        """DO $$ BEGIN
-    CREATE TYPE case_stage AS ENUM (
-        'detected','in_progress','hold','review_due','closed','cancelled'
-    );
-EXCEPTION WHEN duplicate_object THEN NULL;
-END $$""",
-        False,
-    ),
-    (
-        """DO $$ BEGIN
-    CREATE TYPE case_priority AS ENUM ('high','normal','low');
-EXCEPTION WHEN duplicate_object THEN NULL;
-END $$""",
-        False,
-    ),
-    (
-        """DO $$ BEGIN
-    CREATE TYPE case_result AS ENUM ('success','failed','cancelled');
-EXCEPTION WHEN duplicate_object THEN NULL;
-END $$""",
-        False,
-    ),
-    (
-        """DO $$ BEGIN
-    CREATE TYPE metric_type AS ENUM (
-        'ppv_open_rate','rpc','apv','total_chats','revenue'
-    );
-EXCEPTION WHEN duplicate_object THEN NULL;
-END $$""",
-        False,
-    ),
-    (
-        """DO $$ BEGIN
-    CREATE TYPE snapshot_type AS ENUM ('baseline','target','result');
-EXCEPTION WHEN duplicate_object THEN NULL;
-END $$""",
-        False,
-    ),
-    (
-        """DO $$ BEGIN
-    CREATE TYPE snapshot_source AS ENUM (
-        'system_from_daily','system_from_monthly','manual'
-    );
-EXCEPTION WHEN duplicate_object THEN NULL;
-END $$""",
-        False,
-    ),
-    (
-        """DO $$ BEGIN
-    CREATE TYPE ledger_event_type AS ENUM (
-        'case_opened','case_closed_success','case_closed_failed',
-        'case_cancelled','guardrail_triggered','baseline_frozen'
-    );
-EXCEPTION WHEN duplicate_object THEN NULL;
-END $$""",
-        False,
-    ),
-    (
-        """DO $$ BEGIN
-    CREATE TYPE stage_changed_by AS ENUM ('admin','owner','system');
-EXCEPTION WHEN duplicate_object THEN NULL;
-END $$""",
-        False,
-    ),
 
     # ── users: admin_shift_id (nullable FK → shifts_catalog) ─────────────────
     (
@@ -866,6 +801,26 @@ _CATALOG_UNIQUE_CONSTRAINTS: list[tuple[str, str]] = [
     ("shifts_catalog", "uq_shifts_catalog_tenant_name"),
 ]
 
+# ── KPI Admin Cabinet: PostgreSQL ENUM types ─────────────────────────────────
+# DO blocks with EXCEPTION handlers cause asyncpg to misread the internal
+# PostgreSQL subtransaction rollback as a failed outer transaction, which
+# corrupts the connection state for all subsequent patches.
+# Solution: check pg_type first in Python, CREATE only when missing.
+# Each enum is applied in its own separate transaction for full isolation.
+_ENUM_PATCHES: list[tuple[str, list[str]]] = [
+    ("case_stage",        ["detected", "in_progress", "hold", "review_due", "closed", "cancelled"]),
+    ("case_priority",     ["high", "normal", "low"]),
+    ("case_result",       ["success", "failed", "cancelled"]),
+    ("metric_type",       ["ppv_open_rate", "rpc", "apv", "total_chats", "revenue"]),
+    ("snapshot_type",     ["baseline", "target", "result"]),
+    ("snapshot_source",   ["system_from_daily", "system_from_monthly", "manual"]),
+    ("ledger_event_type", [
+        "case_opened", "case_closed_success", "case_closed_failed",
+        "case_cancelled", "guardrail_triggered", "baseline_frozen",
+    ]),
+    ("stage_changed_by",  ["admin", "owner", "system"]),
+]
+
 
 async def apply_schema_patches(engine: AsyncEngine) -> None:
     """
@@ -877,10 +832,37 @@ async def apply_schema_patches(engine: AsyncEngine) -> None:
     after the first error, causing perfectly valid CREATE TABLE statements to
     be silently skipped when they share a transaction with a failed ALTER.)
     """
+    # ── Phase 0: enum types (must exist before tables that reference them) ───
+    for enum_name, enum_values in _ENUM_PATCHES:
+        try:
+            async with engine.begin() as conn:
+                exists = (await conn.execute(
+                    text(
+                        "SELECT EXISTS ("
+                        "  SELECT 1 FROM pg_type"
+                        "  WHERE typname = :name AND typtype = 'e'"
+                        ")"
+                    ),
+                    {"name": enum_name},
+                )).scalar()
+                if not exists:
+                    vals_sql = ", ".join(f"'{v}'" for v in enum_values)
+                    await conn.execute(text(f"CREATE TYPE {enum_name} AS ENUM ({vals_sql})"))
+                    logger.info("patch applied: enum %s", enum_name)
+                else:
+                    logger.debug("patch skip (exists): enum %s", enum_name)
+        except Exception as e:
+            logger.warning("schema_patch enum %s skipped: %s", enum_name, e)
+
+    # ── Phase 1: regular DDL patches ─────────────────────────────────────────
     for sql, critical in _PATCHES:
         try:
             async with engine.begin() as conn:
                 await conn.execute(text(sql))
+            # Log table / index creations at INFO so they appear in Railway logs
+            first_word = sql.strip().split()[0].upper()
+            if first_word in ("CREATE", "ALTER"):
+                logger.info("patch applied: %s", sql.strip()[:100])
         except Exception as e:
             if critical:
                 logger.exception("schema_patch critical: %s — %s", sql[:120], e)
