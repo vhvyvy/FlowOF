@@ -4,10 +4,11 @@ from sqlalchemy import (
     Integer, Numeric, String, Text, UniqueConstraint, PrimaryKeyConstraint,
 )
 from sqlalchemy.dialects.postgresql import JSONB
+from sqlalchemy.orm import relationship
 from services.enum_types import (
     CASE_STAGE, CASE_PRIORITY, CASE_RESULT,
     METRIC_TYPE, SNAPSHOT_TYPE, SNAPSHOT_SOURCE,
-    LEDGER_EVENT_TYPE, STAGE_CHANGED_BY, KPI_METRIC_TYPE,
+    LEDGER_EVENT_TYPE, STAGE_CHANGED_BY, KPI_METRIC_TYPE, ACTIVITY_TYPE,
 )
 
 from database import Base
@@ -479,6 +480,49 @@ class AdminCase(Base):
     result_value   = Column(Numeric(14, 4), nullable=True)
     notes          = Column(Text, nullable=True)
     created_at     = Column(DateTime, nullable=False, default=datetime.utcnow)
+
+    activities = relationship(
+        "CaseActivity",
+        back_populates="case",
+        cascade="all, delete-orphan",
+    )
+
+
+class CaseActivity(Base):
+    """Запись активности админа по кейсу (review, training, note, …)."""
+    __tablename__ = "case_activities"
+
+    id            = Column(Integer, primary_key=True, autoincrement=True)
+    tenant_id     = Column(Integer, ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False, index=True)
+    case_id       = Column(Integer, ForeignKey("admin_cases.id", ondelete="CASCADE"), nullable=False, index=True)
+    admin_id      = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
+    activity_type = Column(ACTIVITY_TYPE, nullable=False)
+    text          = Column(Text, nullable=False)
+    created_at    = Column(DateTime, nullable=False, default=datetime.utcnow)
+    updated_at    = Column(DateTime, nullable=False, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    case  = relationship("AdminCase", back_populates="activities")
+    admin = relationship("User", foreign_keys=[admin_id])
+    files = relationship(
+        "CaseActivityFile",
+        back_populates="activity",
+        cascade="all, delete-orphan",
+    )
+
+
+class CaseActivityFile(Base):
+    """Вложение к активности (скриншот); file_path — относительный от FILE_STORAGE_ROOT."""
+    __tablename__ = "case_activity_files"
+
+    id            = Column(Integer, primary_key=True, autoincrement=True)
+    activity_id   = Column(Integer, ForeignKey("case_activities.id", ondelete="CASCADE"), nullable=False, index=True)
+    file_path     = Column(Text, nullable=False)
+    original_name = Column(Text, nullable=True)
+    mime_type     = Column(Text, nullable=True)
+    size_bytes    = Column(Integer, nullable=True)
+    created_at    = Column(DateTime, nullable=False, default=datetime.utcnow)
+
+    activity = relationship("CaseActivity", back_populates="files")
 
 
 class CaseStageHistory(Base):

@@ -41,6 +41,10 @@ STAGE_CHANGED_BY = PG_ENUM(
     "admin", "owner", "system",
     name="stage_changed_by", create_type=False,
 )
+ACTIVITY_TYPE = PG_ENUM(
+    "review", "training", "meeting", "observation", "note", "other",
+    name="activity_type_enum", create_type=False,
+)
 
 # Alias — KpiConfig.metric_type uses the same DB enum as AdminCase.metric_type
 KPI_METRIC_TYPE = METRIC_TYPE

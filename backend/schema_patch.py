@@ -751,6 +751,48 @@ _PATCHES: list[tuple[str, bool]] = [
         False,
     ),
 
+    # ── case_activities (admin portal UX) ─────────────────────────────────────
+    (
+        """CREATE TABLE IF NOT EXISTS case_activities (
+            id             SERIAL PRIMARY KEY,
+            tenant_id      INTEGER NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+            case_id        INTEGER NOT NULL REFERENCES admin_cases(id) ON DELETE CASCADE,
+            admin_id       INTEGER NOT NULL REFERENCES users(id),
+            activity_type  activity_type_enum NOT NULL,
+            text           TEXT NOT NULL CHECK (length(text) BETWEEN 1 AND 5000),
+            created_at     TIMESTAMP NOT NULL DEFAULT NOW(),
+            updated_at     TIMESTAMP NOT NULL DEFAULT NOW()
+        )""",
+        False,
+    ),
+    (
+        """CREATE INDEX IF NOT EXISTS idx_case_activities_case_created
+           ON case_activities (tenant_id, case_id, created_at DESC)""",
+        False,
+    ),
+    (
+        """CREATE INDEX IF NOT EXISTS idx_case_activities_admin
+           ON case_activities (tenant_id, admin_id, created_at DESC)""",
+        False,
+    ),
+    (
+        """CREATE TABLE IF NOT EXISTS case_activity_files (
+            id             SERIAL PRIMARY KEY,
+            activity_id    INTEGER NOT NULL REFERENCES case_activities(id) ON DELETE CASCADE,
+            file_path      TEXT NOT NULL,
+            original_name  TEXT,
+            mime_type      TEXT,
+            size_bytes     INTEGER,
+            created_at     TIMESTAMP NOT NULL DEFAULT NOW()
+        )""",
+        False,
+    ),
+    (
+        """CREATE INDEX IF NOT EXISTS idx_case_activity_files_activity
+           ON case_activity_files (activity_id)""",
+        False,
+    ),
+
     # ── kpi_config (3.6) ──────────────────────────────────────────────────────
     (
         """CREATE TABLE IF NOT EXISTS kpi_config (
@@ -843,6 +885,7 @@ _ENUM_PATCHES: list[tuple[str, list[str]]] = [
         "case_cancelled", "guardrail_triggered", "baseline_frozen",
     ]),
     ("stage_changed_by",  ["admin", "owner", "system"]),
+    ("activity_type_enum", ["review", "training", "meeting", "observation", "note", "other"]),
 ]
 
 
