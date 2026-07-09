@@ -72,6 +72,44 @@ const STAGE_LABELS: Record<string, string> = {
   review_due: 'На проверке', closed: 'Закрыт', cancelled: 'Отменён',
 }
 
+const STAGE_DESCRIPTION: Record<string, string> = {
+  detected:
+    'Обнаружена проблема. Baseline заморожен, план действий ещё не готов.',
+  in_progress: 'Работа с чаттером идёт. Скоро уйдём в HOLD-период.',
+  hold: 'HOLD-период. Метрику не трогаем, ждём review_date для проверки результата.',
+  review_due:
+    'Пришло время проверить результат. Система сравнила baseline и текущее значение.',
+  cancelled: 'Кейс отменён.',
+}
+
+const CLOSED_RESULT_DESCRIPTION: Record<string, string> = {
+  success: 'Кейс закрыт успешно.',
+  failed: 'Кейс закрыт без результата.',
+  cancelled: 'Кейс отменён.',
+}
+
+/** Подсказки для кнопок FSM (native title, как в chatters/page). */
+const ACTION_TOOLTIPS = {
+  detected_to_in_progress:
+    'Начать работу с чаттером. Дальше можно перейти в HOLD-период до review_date.',
+  detected_to_cancelled: 'Отменить кейс. -1 очко в ledger.',
+  in_progress_to_hold:
+    'Уйти в HOLD-период. После review_date система автоматически проверит результат.',
+  in_progress_to_cancelled: 'Отменить кейс. -1 очко в ledger.',
+  hold_to_cancelled:
+    'Отменить кейс на HOLD-периоде. Используй, если чаттер уволился, метрика уехала по независимой причине, или кейс потерял смысл. -1 очко в ledger.',
+  review_due_to_success:
+    'Закрыть как успех. +10 очков в ledger (если нет guardrail).',
+  review_due_to_failed: 'Закрыть без результата. -3 очка в ledger.',
+} as const
+
+function stageDescription(stage: string, result?: string | null): string {
+  if (stage === 'closed') {
+    return CLOSED_RESULT_DESCRIPTION[result ?? ''] ?? 'Кейс закрыт.'
+  }
+  return STAGE_DESCRIPTION[stage] ?? ''
+}
+
 const STAGE_COLOR: Record<string, string> = {
   detected: 'bg-blue-500/15 text-blue-300',
   in_progress: 'bg-yellow-500/15 text-yellow-300',
@@ -90,6 +128,32 @@ function StageBadge({ stage }: { stage: string }) {
     <span className={cn('text-xs font-semibold px-2.5 py-1 rounded-full', STAGE_COLOR[stage] ?? 'bg-slate-700 text-slate-300')}>
       {STAGE_LABELS[stage] ?? stage}
     </span>
+  )
+}
+
+function StageStatusBlock({
+  stage,
+  result,
+  align = 'end',
+}: {
+  stage: string
+  result?: string | null
+  align?: 'start' | 'end'
+}) {
+  const desc = stageDescription(stage, result)
+  return (
+    <div
+      className={cn(
+        'flex flex-col gap-1 max-w-[320px]',
+        align === 'end' ? 'items-end text-right' : 'items-start text-left',
+      )}
+    >
+      <span className="text-sm font-semibold text-slate-100">
+        {STAGE_LABELS[stage] ?? stage}
+      </span>
+      <StageBadge stage={stage} />
+      {desc && <p className="text-xs text-slate-500 leading-snug">{desc}</p>}
+    </div>
   )
 }
 
@@ -210,20 +274,18 @@ function CaseActions({ caseDetail, onAction }: ActionsProps) {
   if (['closed', 'cancelled'].includes(stage)) {
     return (
       <Section title="Статус">
-        <div className="flex items-center gap-3">
-          <StageBadge stage={stage} />
-          {caseDetail.result && (
-            <span className={cn(
-              'text-xs font-medium px-2 py-0.5 rounded-full',
-              caseDetail.result === 'success' ? 'bg-green-500/15 text-green-300'
-              : 'bg-red-500/15 text-red-300',
-            )}>
-              {caseDetail.result === 'success' ? '✓ Успех' : caseDetail.result === 'failed' ? '✗ Провал' : 'Отменён'}
-            </span>
-          )}
-        </div>
+        <StageStatusBlock stage={stage} result={caseDetail.result} />
+        {caseDetail.result && stage === 'closed' && (
+          <span className={cn(
+            'inline-flex text-xs font-medium px-2 py-0.5 rounded-full mt-2',
+            caseDetail.result === 'success' ? 'bg-green-500/15 text-green-300'
+            : 'bg-red-500/15 text-red-300',
+          )}>
+            {caseDetail.result === 'success' ? '✓ Успех' : '✗ Провал'}
+          </span>
+        )}
         {caseDetail.closed_at && (
-          <p className="text-xs text-slate-500">Закрыт {fmtDate(caseDetail.closed_at)}</p>
+          <p className="text-xs text-slate-500 mt-2">Закрыт {fmtDate(caseDetail.closed_at)}</p>
         )}
       </Section>
     )
@@ -231,6 +293,8 @@ function CaseActions({ caseDetail, onAction }: ActionsProps) {
 
   return (
     <Section title="Действия">
+      <StageStatusBlock stage={stage} result={caseDetail.result} align="start" />
+
       {error && (
         <div className="flex items-start gap-2 bg-red-500/10 border border-red-500/20 rounded-lg px-3 py-2">
           <AlertCircle className="h-4 w-4 text-red-400 shrink-0 mt-0.5" />
@@ -243,6 +307,7 @@ function CaseActions({ caseDetail, onAction }: ActionsProps) {
           <Button
             onClick={() => patchStage('in_progress')}
             disabled={loading}
+            title={ACTION_TOOLTIPS.detected_to_in_progress}
             className="flex-1 bg-amber-600 hover:bg-amber-500 text-sm"
           >
             {loading ? <Loader2 className="h-4 w-4 animate-spin" /> : 'Начать работу →'}
@@ -250,6 +315,7 @@ function CaseActions({ caseDetail, onAction }: ActionsProps) {
           <Button
             onClick={() => patchStage('cancelled', 'Отменён администратором')}
             disabled={loading}
+            title={ACTION_TOOLTIPS.detected_to_cancelled}
             variant="outline"
             className="text-slate-400 hover:text-red-400 text-sm"
           >
@@ -263,6 +329,7 @@ function CaseActions({ caseDetail, onAction }: ActionsProps) {
           <Button
             onClick={() => patchStage('hold')}
             disabled={loading}
+            title={ACTION_TOOLTIPS.in_progress_to_hold}
             className="flex-1 bg-amber-600 hover:bg-amber-500 text-sm"
           >
             {loading ? <Loader2 className="h-4 w-4 animate-spin" /> : 'Поставить на HOLD →'}
@@ -270,6 +337,7 @@ function CaseActions({ caseDetail, onAction }: ActionsProps) {
           <Button
             onClick={() => patchStage('cancelled', 'Отменён администратором')}
             disabled={loading}
+            title={ACTION_TOOLTIPS.in_progress_to_cancelled}
             variant="outline"
             className="text-slate-400 hover:text-red-400 text-sm"
           >
@@ -287,7 +355,20 @@ function CaseActions({ caseDetail, onAction }: ActionsProps) {
             </span>.
             Система автоматически проверит метрику и переведёт в стадию оценки.
           </p>
-          <HoldTestButton caseId={id} onDone={onAction} />
+          <div className="flex gap-2">
+            <div className="flex-1">
+              <HoldTestButton caseId={id} onDone={onAction} />
+            </div>
+            <Button
+              onClick={() => patchStage('cancelled', 'Отменён на HOLD-периоде')}
+              disabled={loading}
+              title={ACTION_TOOLTIPS.hold_to_cancelled}
+              variant="outline"
+              className="text-slate-400 hover:text-red-400 text-sm shrink-0"
+            >
+              Отменить
+            </Button>
+          </div>
         </div>
       )}
 
@@ -331,6 +412,7 @@ function CaseActions({ caseDetail, onAction }: ActionsProps) {
             <Button
               onClick={() => closeCase('success')}
               disabled={loading}
+              title={ACTION_TOOLTIPS.review_due_to_success}
               className="flex-1 bg-green-700 hover:bg-green-600 text-sm"
             >
               {loading ? <Loader2 className="h-4 w-4 animate-spin" /> : '✓ Сработало'}
@@ -338,6 +420,7 @@ function CaseActions({ caseDetail, onAction }: ActionsProps) {
             <Button
               onClick={() => closeCase('failed')}
               disabled={loading}
+              title={ACTION_TOOLTIPS.review_due_to_failed}
               className="flex-1 bg-red-800 hover:bg-red-700 text-sm"
             >
               {loading ? <Loader2 className="h-4 w-4 animate-spin" /> : '✗ Не помогло'}
@@ -411,7 +494,7 @@ export default function CaseDetailPage() {
             <p className="text-xs text-slate-500 mt-0.5">ID: {c.om_user_id} · Открыт {fmtDate(c.opened_at)}</p>
           </div>
           <div className="flex flex-col items-end gap-2">
-            <StageBadge stage={c.stage} />
+            <StageStatusBlock stage={c.stage} result={c.result} />
             {c.priority === 'high' && (
               <span className="text-xs bg-red-500/15 text-red-300 px-2 py-0.5 rounded-full">Высокий приоритет</span>
             )}
