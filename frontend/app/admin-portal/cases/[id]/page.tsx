@@ -7,6 +7,8 @@ import { ArrowLeft, ArrowRight, Loader2, AlertCircle, Zap } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Skeleton } from '@/components/ui/skeleton'
 import api from '@/lib/api'
+import { getUserIdFromToken } from '@/lib/auth'
+import CaseActivities from '@/components/admin-portal/CaseActivities'
 import { cn } from '@/lib/utils'
 
 // ── Types ─────────────────────────────────────────────────────────────────────
@@ -531,6 +533,13 @@ export default function CaseDetailPage() {
 
       {/* Actions */}
       <CaseActions caseDetail={c} onAction={refetch} />
+
+      {/* Activities */}
+      <CaseActivities
+        caseId={c.id}
+        currentAdminId={getUserIdFromToken() ?? c.admin_id}
+        caseOwnerAdminId={c.admin_id}
+      />
 
       {/* Timeline */}
       {c.history.length > 0 && (

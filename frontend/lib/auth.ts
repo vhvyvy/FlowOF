@@ -73,6 +73,19 @@ export function getUserIsAdmin(): boolean {
   return localStorage.getItem('is_admin') === '1'
 }
 
+/** user_id из JWT (новый формат токена). */
+export function getUserIdFromToken(): number | null {
+  if (typeof window === 'undefined') return null
+  const token = localStorage.getItem('token')
+  if (!token) return null
+  try {
+    const payload = JSON.parse(atob(token.split('.')[1])) as { user_id?: number }
+    return payload.user_id != null ? Number(payload.user_id) : null
+  } catch {
+    return null
+  }
+}
+
 export function logout(): void {
   if (typeof window !== 'undefined') {
     localStorage.removeItem('token')
