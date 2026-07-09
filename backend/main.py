@@ -180,6 +180,13 @@ async def _create_tables():
     except Exception as exc:
         logger.warning("scheduler setup (non-fatal): %s", exc)
 
+    try:
+        from services.file_storage import ensure_storage_dirs
+
+        ensure_storage_dirs()
+    except Exception as exc:
+        logger.warning("file_storage init (non-fatal): %s", exc)
+
 
 @app.on_event("shutdown")
 async def _shutdown_scheduler():

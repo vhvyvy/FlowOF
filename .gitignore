@@ -36,3 +36,6 @@ check_db.py
 
 # Logs
 *.log
+
+# Local file storage (FILE_STORAGE_ROOT=./local_storage)
+backend/local_storage/
