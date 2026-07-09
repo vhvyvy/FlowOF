@@ -36,6 +36,11 @@ const METRIC_OPTIONS: { value: MetricType; label: string }[] = [
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
+function chatterLabel(c: Chatter): string {
+  const name = c.display_name?.trim()
+  return name || c.om_user_id
+}
+
 function fmtMetric(c: Chatter, metric: MetricType): string {
   if (metric === 'ppv_open_rate') return c.month_open_rate != null ? `${c.month_open_rate.toFixed(1)}%` : '—'
   if (metric === 'rpc')           return c.month_rpc        != null ? `$${c.month_rpc.toFixed(2)}`      : '—'
@@ -71,7 +76,7 @@ function CreateCaseModal({ chatter, onClose, onSuccess }: ModalProps) {
     try {
       const res = await api.post<{ id: number; baseline_value: number | null }>('/api/v1/admin-portal/cases', {
         om_user_id:           chatter.om_user_id,
-        chatter_display_name: chatter.display_name,
+        chatter_display_name: chatterLabel(chatter),
         metric_type:          metric,
         diagnosis_text:       diagnosis,
         action_plan:          plan,
@@ -99,7 +104,7 @@ function CreateCaseModal({ chatter, onClose, onSuccess }: ModalProps) {
         <div className="flex items-center justify-between px-6 py-4 border-b border-slate-700/50">
           <div>
             <h2 className="text-base font-semibold text-slate-100">Открыть кейс</h2>
-            <p className="text-xs text-slate-400 mt-0.5">{chatter.display_name} · {chatter.om_user_id}</p>
+            <p className="text-xs text-slate-400 mt-0.5">{chatterLabel(chatter)} · {chatter.om_user_id}</p>
           </div>
           <button onClick={onClose} className="text-slate-500 hover:text-slate-300 transition-colors">
             <X className="h-5 w-5" />
@@ -300,7 +305,7 @@ export default function ChattersPage() {
                 <tr key={c.om_user_id} className="hover:bg-slate-800/50 transition-colors">
                   <td className="px-4 py-3">
                     <div>
-                      <p className="font-medium text-slate-200">{c.display_name}</p>
+                      <p className="font-medium text-slate-200">{chatterLabel(c)}</p>
                       <p className="text-xs text-slate-500 mt-0.5">{c.om_user_id}</p>
                     </div>
                   </td>

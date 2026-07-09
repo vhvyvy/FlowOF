@@ -25,7 +25,7 @@ from typing import Any, Literal, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel, Field
-from sqlalchemy import select, text
+from sqlalchemy import func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from database import get_db
@@ -446,6 +446,29 @@ async def close_case(
 
 # ── GET /chatters ─────────────────────────────────────────────────────────────
 
+def _resolve_chatter_display_name(om_id: str, raw_name: str | None) -> str:
+    """Unwrap mapping display_names; always return a non-empty label (fallback: om_id)."""
+    import json as _json
+
+    raw = (raw_name or "").strip()
+    display = ""
+    if raw:
+        try:
+            parsed = _json.loads(raw)
+            if isinstance(parsed, list) and parsed:
+                display = str(parsed[0]).strip()
+            else:
+                display = raw.split(",")[0].strip()
+        except Exception:
+            display = raw.split(",")[0].strip()
+    return display or str(om_id)
+
+
+def _mapping_is_admin_account(display_names: str | None) -> bool:
+    """ChatterMapping has no role/is_admin — agency admin OM accounts use [Adm] prefix."""
+    return "[Adm]" in (display_names or "")
+
+
 @router.get("/chatters", response_model=list[ChatterItem])
 async def list_chatters(
     show_all: bool = Query(False, description="Показать всех, включая неактивных"),
@@ -454,10 +477,14 @@ async def list_chatters(
 ):
     """
     Список активных чаттеров агентства с месячными KPI (текущий месяц).
-    Активность: транзакция или daily-запись за последние 30 дней.
+    Активность (show_all=false): за текущий календарный месяц —
+      daily total_chats > 0 (то же окно, что get_chatter_kpi year/month).
     Метрики: те же, что на KPI-вкладке owner'а (kpi_service.get_chatter_kpi).
+
+    Список строится по daily (вариант A), не по транзакциям get_chatter_kpi.
+    Намеренно не попадают чаттеры только с revenue в KPI, без daily total_chats>0
+    за месяц — напр. om 48721 @Vyach3slav (есть деньги, нет daily; sync vs не чатил — отдельно).
     """
-    import json as _json
     tid = current_user.tenant_id
     today = date.today()
     year, month = today.year, today.month
@@ -471,32 +498,47 @@ async def list_chatters(
         if row.onlymonster_id:
             monthly_by_om[row.onlymonster_id] = row
 
-    # ── Activity filter: active om_user_ids in last 30 days ─────────────────
-    if not show_all:
-        cutoff = today - timedelta(days=30)
-        active_rows = (
+    # ── Active mappings: calendar month, daily total_chats > 0 only ─────────
+    # month_start aligns with get_chatter_kpi(year, month) window.
+    # NOTE: on the 1st of each month, chatter_kpi_daily for the new month appears
+    # only after the kpi_daily CRON at 04:00 UTC. Between 00:00–04:00 UTC the list
+    # will be empty until the first daily sync runs.
+    month_start = date(year, month, 1)
+
+    admin_name_filter = func.coalesce(ChatterMapping.display_names, "").notlike("%[Adm]%")
+
+    if show_all:
+        mapping_rows = (
+            await db.execute(
+                select(ChatterMapping.onlymonster_id, ChatterMapping.display_names)
+                .where(ChatterMapping.tenant_id == tid, admin_name_filter)
+                .order_by(ChatterMapping.onlymonster_id)
+            )
+        ).fetchall()
+    else:
+        mapping_rows = (
             await db.execute(
                 text(
                     """
-                    SELECT DISTINCT om_user_id FROM chatter_kpi_daily
-                    WHERE tenant_id = :tid AND date >= :cutoff
+                    SELECT m.onlymonster_id, m.display_names
+                    FROM chatter_onlymonster_mapping m
+                    WHERE m.tenant_id = :tid
+                      AND COALESCE(m.display_names, '') NOT LIKE '%[Adm]%'
+                      AND EXISTS (
+                        SELECT 1 FROM chatter_kpi_daily d
+                        WHERE d.tenant_id = m.tenant_id
+                          AND d.om_user_id = m.onlymonster_id
+                          AND d.date >= :month_start
+                          AND d.total_chats > 0
+                      )
+                    ORDER BY m.onlymonster_id
                     """
                 ),
-                {"tid": tid, "cutoff": cutoff},
+                {"tid": tid, "month_start": month_start},
             )
         ).fetchall()
-        active_om_ids: set[str] = {r[0] for r in active_rows}
-    else:
-        active_om_ids = None  # type: ignore[assignment]
 
-    # ── All mappings ──────────────────────────────────────────────────────────
-    mappings = (
-        await db.execute(
-            select(ChatterMapping).where(ChatterMapping.tenant_id == tid)
-        )
-    ).scalars().all()
-
-    if not mappings:
+    if not mapping_rows:
         return []
 
     # ── Open cases per om_user_id ─────────────────────────────────────────────
@@ -514,24 +556,10 @@ async def list_chatters(
 
     # ── Build items ───────────────────────────────────────────────────────────
     items: list[ChatterItem] = []
-    for m in mappings:
-        om_id = m.onlymonster_id
-
-        # Activity filter
-        if active_om_ids is not None and om_id not in active_om_ids:
+    for om_id, raw_name in mapping_rows:
+        if _mapping_is_admin_account(raw_name):
             continue
-
-        # Unwrap display_names: handle JSON array, comma-list, or plain string
-        raw_name = m.display_names or ""
-        try:
-            parsed = _json.loads(raw_name)
-            if isinstance(parsed, list) and parsed:
-                display = str(parsed[0]).strip()
-            else:
-                display = raw_name.split(",")[0].strip()
-        except Exception:
-            display = raw_name.split(",")[0].strip()
-        display = display or om_id
+        display = _resolve_chatter_display_name(om_id, raw_name)
 
         kpi = monthly_by_om.get(om_id)
         items.append(
