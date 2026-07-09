@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from datetime import date, datetime
-from typing import Optional
+from typing import Literal, Optional
 from pydantic import BaseModel, EmailStr, Field
 
 
@@ -423,3 +423,45 @@ class SettingUpsert(BaseModel):
 
 class SettingsResponse(BaseModel):
     settings: dict[str, str]
+
+
+# ── Admin portal — case activities ────────────────────────────────────────────
+
+ActivityTypeLiteral = Literal[
+    "review", "training", "meeting", "observation", "note", "other",
+]
+
+
+class ActivityAdminOut(BaseModel):
+    id: int
+    name: str
+
+
+class ActivityFileOut(BaseModel):
+    id: int
+    file_path: str
+    original_name: Optional[str] = None
+    size_bytes: Optional[int] = None
+    mime_type: Optional[str] = None
+    download_url: str
+
+
+class ActivityItemOut(BaseModel):
+    id: int
+    activity_type: str
+    text: str
+    created_at: datetime
+    updated_at: datetime
+    admin: ActivityAdminOut
+    files: list[ActivityFileOut] = []
+
+
+class ActivityCreateOut(BaseModel):
+    activity_id: int
+    created_at: datetime
+    files_count: int
+
+
+class ActivityListOut(BaseModel):
+    items: list[ActivityItemOut]
+    total: int

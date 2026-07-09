@@ -13,6 +13,10 @@ GET    /cases/{case_id}             — детали + снапшоты + ист
 PATCH  /cases/{case_id}/stage       — сменить стадию
 POST   /cases/{case_id}/close       — закрыть кейс
 GET    /chatters                    — список чаттеров агентства + last metrics
+POST   /cases/{case_id}/activities  — добавить активность (multipart)
+GET    /cases/{case_id}/activities  — лента активностей кейса
+DELETE /cases/{case_id}/activities/{activity_id} — удалить (<24ч)
+GET    /activities/files/{file_id}  — скачать вложение
 GET    /me/ledger                   — история очков
 GET    /me/kpi                      — KPI-снапшот текущего/выбранного месяца
 """
@@ -23,19 +27,32 @@ from datetime import date, datetime, timedelta
 from decimal import Decimal
 from typing import Any, Literal, Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile, status
+from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
+from pathlib import Path
+
 from sqlalchemy import func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from database import get_db
-from dependencies import require_admin
+from dependencies import get_current_user, require_admin
 from models import (
-    AdminCase, AdminKpiSnapshot, BaselineSnapshot, CaseStageHistory,
+    AdminCase, AdminKpiSnapshot, BaselineSnapshot, CaseActivity,
+    CaseActivityFile, CaseStageHistory,
     ChatterMapping, KpiConfig, User,
+)
+from schemas import (
+    ActivityCreateOut,
+    ActivityFileOut,
+    ActivityItemOut,
+    ActivityListOut,
+    ActivityAdminOut,
 )
 from schema_patch import seed_default_kpi_config
 from services import admin_cases as svc_cases
+from services import case_activities as svc_activities
+from services.case_activities import CaseActivityNotFound, CaseActivityValidation
 from services import case_ledger as svc_ledger
 from services.admin_kpi_calc import recalc_admin_kpi_snapshot
 from services.case_baseline import read_metric_at_date
@@ -214,8 +231,79 @@ class KpiSnapshotOut(BaseModel):
 
 _OPEN_STAGES = ("detected", "in_progress", "hold", "review_due")
 
+_ACTIVITY_FILE_URL = "/api/v1/admin-portal/activities/files"
+
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
+
+def _map_activity_err(exc: Exception) -> HTTPException:
+    """Map case_activities service errors to HTTP status codes."""
+    if isinstance(exc, CaseActivityNotFound):
+        detail = exc.args[0] if exc.args else str(exc)
+        return HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=detail)
+    if isinstance(exc, PermissionError):
+        detail = exc.args[0] if exc.args else str(exc)
+        return HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=detail)
+    if isinstance(exc, CaseActivityValidation):
+        detail = exc.args[0] if exc.args else str(exc)
+        return HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=detail,
+        )
+    return _svc_err(exc)
+
+
+def _build_activity_filters(
+    activity_type: Optional[list[str]],
+    date_from: Optional[date],
+    date_to: Optional[date],
+    has_files: Optional[bool],
+    text_search: Optional[str],
+    limit: int,
+    offset: int,
+) -> svc_activities.ActivityFilters:
+    return svc_activities.ActivityFilters(
+        activity_types=activity_type,
+        date_from=date_from,
+        date_to=date_to,
+        has_files=has_files,
+        text_search=text_search,
+        limit=limit,
+        offset=offset,
+    )
+
+
+def _activity_list_out(raw: dict[str, Any]) -> ActivityListOut:
+    items: list[ActivityItemOut] = []
+    for row in raw.get("items", []):
+        admin = row.get("admin") or {}
+        files = [
+            ActivityFileOut(
+                id=f["id"],
+                file_path=f["file_path"],
+                original_name=f.get("original_name"),
+                size_bytes=f.get("size_bytes"),
+                mime_type=f.get("mime_type"),
+                download_url=f"{_ACTIVITY_FILE_URL}/{f['id']}",
+            )
+            for f in row.get("files", [])
+        ]
+        items.append(
+            ActivityItemOut(
+                id=row["id"],
+                activity_type=row["activity_type"],
+                text=row["text"],
+                created_at=row["created_at"],
+                updated_at=row["updated_at"],
+                admin=ActivityAdminOut(
+                    id=admin.get("id", row.get("admin_id", 0)),
+                    name=admin.get("name", ""),
+                ),
+                files=files,
+            )
+        )
+    return ActivityListOut(items=items, total=raw.get("total", 0))
+
 
 def _svc_err(exc: Exception) -> HTTPException:
     """Convert known service exceptions to HTTP errors."""
@@ -631,6 +719,163 @@ async def my_kpi(
         )
 
     return KpiSnapshotOut.from_orm(snap)
+
+
+# ── Case activities ───────────────────────────────────────────────────────────
+
+@router.post(
+    "/cases/{case_id}/activities",
+    response_model=ActivityCreateOut,
+    status_code=status.HTTP_201_CREATED,
+    summary="Добавить активность к кейсу",
+    description="Multipart: тип, текст и до 5 скриншотов (image/*, ≤5 МБ каждый).",
+)
+async def create_case_activity(
+    case_id: int,
+    activity_type: str = Form(...),
+    text: str = Form(...),
+    files: list[UploadFile] = File(default=[]),
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_admin),
+):
+    try:
+        result = await svc_activities.create_activity(
+            db=db,
+            tenant_id=current_user.tenant_id,
+            case_id=case_id,
+            admin_id=current_user.id,
+            activity_type=activity_type,
+            text=text,
+            uploaded_files=files,
+        )
+        return ActivityCreateOut(**result)
+    except (CaseActivityNotFound, CaseActivityValidation, PermissionError) as exc:
+        raise _map_activity_err(exc) from exc
+
+
+@router.get(
+    "/cases/{case_id}/activities",
+    response_model=ActivityListOut,
+    summary="Лента активностей кейса",
+    description="Фильтры по типу, дате, наличию файлов и тексту; пагинация limit/offset.",
+)
+async def list_case_activities(
+    case_id: int,
+    activity_type: Optional[list[str]] = Query(default=None),
+    date_from: Optional[date] = Query(default=None),
+    date_to: Optional[date] = Query(default=None),
+    has_files: Optional[bool] = Query(default=None),
+    text_search: Optional[str] = Query(default=None, max_length=200),
+    limit: int = Query(default=50, ge=1, le=200),
+    offset: int = Query(default=0, ge=0),
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_admin),
+):
+    try:
+        raw = await svc_activities.list_activities(
+            db,
+            current_user.tenant_id,
+            case_id,
+            _build_activity_filters(
+                activity_type, date_from, date_to, has_files, text_search, limit, offset
+            ),
+        )
+        return _activity_list_out(raw)
+    except (CaseActivityNotFound, CaseActivityValidation) as exc:
+        raise _map_activity_err(exc) from exc
+
+
+@router.get(
+    "/activities/files/{file_id}",
+    summary="Скачать вложение активности",
+    description="Доступ: owner тенанта или admin — автор кейса. Файл из FILE_STORAGE_ROOT.",
+    responses={
+        200: {"description": "Binary file"},
+        404: {"description": "Файл не найден в БД"},
+        410: {"description": "Запись есть, файл на диске отсутствует"},
+    },
+)
+async def download_activity_file(
+    file_id: int,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    from services.file_storage import get_storage_root
+
+    row = (
+        await db.execute(
+            select(CaseActivityFile, CaseActivity, AdminCase)
+            .join(CaseActivity, CaseActivityFile.activity_id == CaseActivity.id)
+            .join(AdminCase, CaseActivity.case_id == AdminCase.id)
+            .where(
+                CaseActivityFile.id == file_id,
+                AdminCase.tenant_id == current_user.tenant_id,
+            )
+        )
+    ).one_or_none()
+
+    if row is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Файл не найден")
+
+    file_row, _activity, admin_case = row
+
+    is_owner = current_user.role == "owner"
+    is_case_admin = bool(current_user.is_admin) and current_user.id == admin_case.admin_id
+    if not (is_owner or is_case_admin):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Нет доступа к этому файлу",
+        )
+
+    abs_path = get_storage_root() / file_row.file_path
+    if not abs_path.is_file():
+        logger.warning(
+            "activity file missing on disk: id=%s path=%s",
+            file_id,
+            abs_path,
+        )
+        raise HTTPException(
+            status_code=status.HTTP_410_GONE,
+            detail="Файл на диске отсутствует",
+        )
+
+    if file_row.original_name:
+        filename = file_row.original_name
+    else:
+        ext = Path(file_row.file_path).suffix or ".bin"
+        filename = f"file{ext}"
+
+    media_type = file_row.mime_type or "application/octet-stream"
+    return FileResponse(
+        path=str(abs_path),
+        media_type=media_type,
+        filename=filename,
+        headers={"Cache-Control": "private, max-age=3600"},
+    )
+
+
+@router.delete(
+    "/cases/{case_id}/activities/{activity_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+    summary="Удалить активность",
+    description="Только автор активности, в течение 24 часов после создания.",
+)
+async def delete_case_activity(
+    case_id: int,
+    activity_id: int,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_admin),
+):
+    try:
+        await svc_activities.delete_activity(
+            db=db,
+            tenant_id=current_user.tenant_id,
+            case_id=case_id,
+            admin_id=current_user.id,
+            activity_id=activity_id,
+        )
+    except (CaseActivityNotFound, PermissionError) as exc:
+        raise _map_activity_err(exc) from exc
 
 
 # ── Debug: manual HOLD review trigger ────────────────────────────────────────

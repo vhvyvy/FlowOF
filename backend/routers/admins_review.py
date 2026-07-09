@@ -13,6 +13,7 @@ GET  /admins/{admin_id}/ledger          — ledger конкретного адм
 GET  /admins/{admin_id}/kpi-history     — история снапшотов по месяцам
 GET  /kpi-config                        — конфиг метрик
 PUT  /kpi-config/{metric_type}          — обновить конфиг метрики
+GET  /cases/{case_id}/activities        — лента активностей кейса (read-only)
 """
 from __future__ import annotations
 
@@ -28,9 +29,17 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from database import get_db
 from dependencies import require_owner
 from models import AdminCase, AdminKpiSnapshot, KpiConfig, User
+from schemas import ActivityListOut
 from schema_patch import seed_default_kpi_config
+from services import case_activities as svc_activities
 from services import case_ledger as svc_ledger
+from services.case_activities import CaseActivityNotFound, CaseActivityValidation
 from services.admin_kpi_calc import recalc_admin_kpi_snapshot
+from routers.admin_portal import (
+    _activity_list_out,
+    _build_activity_filters,
+    _map_activity_err,
+)
 
 logger = logging.getLogger("flowof.admins_review")
 router = APIRouter(prefix="/api/v1/dashboard/admins-review", tags=["admins_review"])
@@ -411,3 +420,37 @@ async def update_kpi_config(
         )
     ).scalar_one()
     return KpiConfigOut.from_orm(row)
+
+
+# ── GET /cases/{case_id}/activities (owner read-only) ───────────────────────
+
+@router.get(
+    "/cases/{case_id}/activities",
+    response_model=ActivityListOut,
+    summary="Лента активностей кейса (овнер)",
+    description="Только чтение: любой кейс своего tenant; те же фильтры, что у admin-portal.",
+)
+async def owner_list_case_activities(
+    case_id: int,
+    activity_type: Optional[list[str]] = Query(default=None),
+    date_from: Optional[date] = Query(default=None),
+    date_to: Optional[date] = Query(default=None),
+    has_files: Optional[bool] = Query(default=None),
+    text_search: Optional[str] = Query(default=None, max_length=200),
+    limit: int = Query(default=50, ge=1, le=200),
+    offset: int = Query(default=0, ge=0),
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_owner),
+):
+    try:
+        raw = await svc_activities.list_activities(
+            db,
+            current_user.tenant_id,
+            case_id,
+            _build_activity_filters(
+                activity_type, date_from, date_to, has_files, text_search, limit, offset
+            ),
+        )
+        return _activity_list_out(raw)
+    except (CaseActivityNotFound, CaseActivityValidation) as exc:
+        raise _map_activity_err(exc) from exc
