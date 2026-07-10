@@ -13,6 +13,7 @@ GET  /admins/{admin_id}/ledger          — ledger конкретного адм
 GET  /admins/{admin_id}/kpi-history     — история снапшотов по месяцам
 GET  /kpi-config                        — конфиг метрик
 PUT  /kpi-config/{metric_type}          — обновить конфиг метрики
+GET  /cases/{case_id}                   — детали качественного кейса (овнер)
 GET  /cases/{case_id}/activities        — лента активностей кейса (read-only)
 GET  /pending-qualitative               — качественные кейсы на оценке
 POST /cases/{case_id}/close-qualitative — закрыть качественный кейс (success/failed)
@@ -111,6 +112,46 @@ class PendingQualitativeItem(BaseModel):
 class PendingQualitativeList(BaseModel):
     items: list[PendingQualitativeItem]
     total: int
+
+
+class StageHistoryItem(BaseModel):
+    id: int
+    from_stage: Optional[str]
+    to_stage: str
+    changed_at: datetime
+    changed_by: str
+    notes: Optional[str]
+
+    @classmethod
+    def from_orm(cls, h: CaseStageHistory) -> "StageHistoryItem":
+        return cls(
+            id=h.id,
+            from_stage=h.from_stage,
+            to_stage=h.to_stage,
+            changed_at=h.changed_at,
+            changed_by=h.changed_by,
+            notes=h.notes,
+        )
+
+
+class OwnerQualitativeCaseDetail(BaseModel):
+    id: int
+    om_user_id: str
+    chatter_display_name: str
+    category: str
+    diagnosis_text: str
+    action_plan: str
+    priority: str
+    stage: str
+    result: Optional[str]
+    admin: PendingQualitativeAdmin
+    hold_start_date: Optional[date] = None
+    hold_end_date: Optional[date] = None
+    sent_for_review_at: Optional[datetime] = None
+    opened_at: datetime
+    closed_at: Optional[datetime] = None
+    history: list[StageHistoryItem]
+    ledger_points: Optional[float] = None
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -581,6 +622,78 @@ async def pending_qualitative(
         )
 
     return PendingQualitativeList(items=items, total=total)
+
+
+# ── GET /cases/{case_id} (owner qualitative detail) ───────────────────────────
+
+@router.get("/cases/{case_id}", response_model=OwnerQualitativeCaseDetail)
+async def get_owner_qualitative_case(
+    case_id: int,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_owner),
+):
+    """Детали качественного кейса для оценки овнером."""
+    case = await _get_owner_case(db, current_user.tenant_id, case_id)
+    if case.case_type != "qualitative":
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="Эндпоинт только для качественных кейсов",
+        )
+
+    tid = current_user.tenant_id
+    mapping = (
+        await db.execute(
+            select(ChatterMapping.display_names).where(
+                ChatterMapping.tenant_id == tid,
+                ChatterMapping.onlymonster_id == case.om_user_id,
+            )
+        )
+    ).scalar_one_or_none()
+    admin_user = await db.get(User, case.admin_id)
+    admin_name = ""
+    if admin_user:
+        admin_name = (admin_user.full_name or admin_user.email or "").strip()
+
+    diagnosis, plan = _parse_case_notes(case.notes)
+    hold_start_dt = await _stage_entered_at(db, case.id, "hold")
+    sent_at = await _stage_entered_at(db, case.id, "awaiting_review")
+
+    hist_rows = (
+        await db.execute(
+            select(CaseStageHistory)
+            .where(CaseStageHistory.case_id == case_id)
+            .order_by(CaseStageHistory.changed_at.asc())
+        )
+    ).scalars().all()
+
+    ledger_points: Optional[float] = None
+    if case.stage == "closed" and case.result in ("success", "failed"):
+        event_type = (
+            "qualitative_success" if case.result == "success" else "qualitative_failed"
+        )
+        ledger = await _latest_ledger_for_case(db, case_id, (event_type,))
+        if ledger:
+            ledger_points = float(ledger.points)
+
+    return OwnerQualitativeCaseDetail(
+        id=case.id,
+        om_user_id=case.om_user_id,
+        chatter_display_name=_resolve_chatter_display_name(case.om_user_id, mapping),
+        category=case.category or "",
+        diagnosis_text=diagnosis,
+        action_plan=plan,
+        priority=case.priority,
+        stage=case.stage,
+        result=case.result,
+        admin=PendingQualitativeAdmin(id=case.admin_id, name=admin_name),
+        hold_start_date=hold_start_dt.date() if hold_start_dt else None,
+        hold_end_date=case.review_date,
+        sent_for_review_at=sent_at,
+        opened_at=case.opened_at,
+        closed_at=case.closed_at,
+        history=[StageHistoryItem.from_orm(h) for h in hist_rows],
+        ledger_points=ledger_points,
+    )
 
 
 # ── POST /cases/{case_id}/close-qualitative ───────────────────────────────────

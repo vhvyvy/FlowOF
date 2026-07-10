@@ -64,7 +64,19 @@ function appendArrayParams(
   return params
 }
 
-export function fetchActivities(caseId: number, filters: ActivityFiltersState) {
+export type ActivitiesApiMode = 'admin' | 'owner'
+
+function activitiesUrl(caseId: number, apiMode: ActivitiesApiMode): string {
+  return apiMode === 'owner'
+    ? `/api/v1/dashboard/admins-review/cases/${caseId}/activities`
+    : `/api/v1/admin-portal/cases/${caseId}/activities`
+}
+
+export function fetchActivities(
+  caseId: number,
+  filters: ActivityFiltersState,
+  apiMode: ActivitiesApiMode = 'admin',
+) {
   const params = appendArrayParams(
     new URLSearchParams(
       Object.entries(buildParams(filters)).map(([k, v]) => [k, String(v)]),
@@ -72,14 +84,18 @@ export function fetchActivities(caseId: number, filters: ActivityFiltersState) {
     filters,
   )
   const qs = params.toString()
-  const url = `/api/v1/admin-portal/cases/${caseId}/activities${qs ? `?${qs}` : ''}`
+  const url = `${activitiesUrl(caseId, apiMode)}${qs ? `?${qs}` : ''}`
   return api.get<ActivityListResponse>(url).then((r) => r.data)
 }
 
-export function useActivities(caseId: number, filters: ActivityFiltersState) {
+export function useActivities(
+  caseId: number,
+  filters: ActivityFiltersState,
+  apiMode: ActivitiesApiMode = 'admin',
+) {
   return useQuery({
-    queryKey: ['case-activities', caseId, filters],
-    queryFn: () => fetchActivities(caseId, filters),
+    queryKey: ['case-activities', apiMode, caseId, filters],
+    queryFn: () => fetchActivities(caseId, filters, apiMode),
     staleTime: 0,
     enabled: caseId > 0,
   })

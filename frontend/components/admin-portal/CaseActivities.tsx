@@ -219,16 +219,18 @@ function ActivityCard({
   activity,
   currentAdminId,
   onDelete,
+  readOnly = false,
 }: {
   activity: ActivityItem
   currentAdminId: number
   onDelete: (id: number) => void
+  readOnly?: boolean
 }) {
   const [menuOpen, setMenuOpen] = useState(false)
   const [confirmOpen, setConfirmOpen] = useState(false)
   const [lightboxSrc, setLightboxSrc] = useState<string | null>(null)
   const menuRef = useRef<HTMLDivElement>(null)
-  const showMenu = canDeleteActivity(activity, currentAdminId)
+  const showMenu = !readOnly && canDeleteActivity(activity, currentAdminId)
 
   useEffect(() => {
     if (!menuOpen) return
@@ -536,14 +538,18 @@ export interface CaseActivitiesProps {
   caseId: number
   currentAdminId: number
   caseOwnerAdminId: number
+  readOnly?: boolean
+  apiMode?: 'admin' | 'owner'
 }
 
 export default function CaseActivities({
   caseId,
   currentAdminId,
   caseOwnerAdminId,
+  readOnly = false,
+  apiMode = 'admin',
 }: CaseActivitiesProps) {
-  const isOwner = currentAdminId === caseOwnerAdminId
+  const isOwner = !readOnly && currentAdminId === caseOwnerAdminId
 
   const [selectedTypes, setSelectedTypes] = useState<ActivityType[]>([])
   const [dateFrom, setDateFrom] = useState('')
@@ -588,7 +594,7 @@ export default function CaseActivities({
     [selectedTypes, dateFrom, dateTo, onlyWithScreens, debouncedSearch, offset],
   )
 
-  const { data, isLoading, isFetching, refetch } = useActivities(caseId, queryFilters)
+  const { data, isLoading, isFetching, refetch } = useActivities(caseId, queryFilters, apiMode)
   const deleteMut = useDeleteActivity(caseId)
 
   useEffect(() => {
@@ -631,6 +637,9 @@ export default function CaseActivities({
         <p className="text-xs text-slate-500 mt-0.5">
           {isLoading && offset === 0 ? 'Загрузка…' : `${total} активностей`}
         </p>
+        {readOnly && (
+          <p className="text-xs text-slate-500 mt-1">Только просмотр</p>
+        )}
       </div>
 
       {toast && (
@@ -747,6 +756,7 @@ export default function CaseActivities({
               activity={a}
               currentAdminId={currentAdminId}
               onDelete={handleDelete}
+              readOnly={readOnly}
             />
           ))}
           {hasMore && (

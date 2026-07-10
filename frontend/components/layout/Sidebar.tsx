@@ -23,11 +23,13 @@ import {
   LineChart,
   Brain,
   ShieldCheck,
+  ClipboardCheck,
 } from 'lucide-react'
 import { useState } from 'react'
 import { cn } from '@/lib/utils'
 import { logout } from '@/lib/auth'
 import { useTenant } from '@/lib/hooks/useTenant'
+import { usePendingQualitativeCount } from '@/lib/hooks/usePendingQualitative'
 import { Badge } from '@/components/ui/badge'
 
 const NAV_ITEMS = [
@@ -42,6 +44,7 @@ const NAV_ITEMS = [
   { href: '/dashboard/catalog', label: 'Справочники', icon: BookOpen },
   { href: '/dashboard/chatter-accounts', label: 'Аккаунты', icon: UserCog },
   { href: '/dashboard/admins', label: 'Админы', icon: ShieldCheck },
+  { href: '/dashboard/admins-review/pending', label: 'На оценке', icon: ClipboardCheck, matchPrefix: '/dashboard/admins-review' },
   { href: '/dashboard/ranking', label: 'Рейтинг', icon: Trophy },
   { href: '/dashboard/reports', label: 'Отчёты', icon: LineChart },
   { href: '/dashboard/lab', label: 'Лаборатория', icon: FlaskConical },
@@ -54,6 +57,7 @@ const NAV_ITEMS = [
 export function Sidebar() {
   const pathname = usePathname()
   const { data: tenant } = useTenant()
+  const { data: pendingCount = 0 } = usePendingQualitativeCount()
   const [collapsed, setCollapsed] = useState(false)
 
   return (
@@ -101,8 +105,14 @@ export function Sidebar() {
 
       {/* Navigation */}
       <nav className="flex-1 px-2 py-3 space-y-0.5 overflow-y-auto">
-        {NAV_ITEMS.map(({ href, label, icon: Icon, exact }) => {
-          const active = exact ? pathname === href : pathname.startsWith(href)
+        {NAV_ITEMS.map(({ href, label, icon: Icon, exact, matchPrefix }) => {
+          const active = exact
+            ? pathname === href
+            : matchPrefix
+              ? pathname.startsWith(matchPrefix)
+              : pathname.startsWith(href)
+          const showPendingBadge =
+            !collapsed && href === '/dashboard/admins-review/pending' && pendingCount > 0
           return (
             <Link
               key={href}
@@ -115,7 +125,16 @@ export function Sidebar() {
               )}
             >
               <Icon className={cn('h-4 w-4 shrink-0', active ? 'text-indigo-400' : '')} />
-              {!collapsed && <span>{label}</span>}
+              {!collapsed && (
+                <>
+                  <span className="flex-1">{label}</span>
+                  {showPendingBadge && (
+                    <span className="min-w-[1.25rem] h-5 px-1.5 flex items-center justify-center rounded-full bg-amber-500/20 text-amber-300 text-[10px] font-semibold ring-1 ring-amber-500/40">
+                      {pendingCount > 99 ? '99+' : pendingCount}
+                    </span>
+                  )}
+                </>
+              )}
             </Link>
           )
         })}
