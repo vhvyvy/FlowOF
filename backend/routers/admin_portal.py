@@ -29,7 +29,8 @@ from typing import Any, Literal, Optional
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile, status
 from fastapi.responses import FileResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
+from pydantic.config import ConfigDict
 from pathlib import Path
 
 from sqlalchemy import func, select, text
@@ -63,7 +64,10 @@ logger = logging.getLogger("flowof.admin_portal")
 router = APIRouter(prefix="/api/v1/admin-portal", tags=["admin_portal"])
 
 MetricTypeLiteral = Literal["ppv_open_rate", "rpc", "apv", "total_chats", "revenue"]
-StageLiteral = Literal["detected", "in_progress", "hold", "review_due", "closed", "cancelled"]
+CaseTypeLiteral = Literal["quantitative", "qualitative"]
+StageLiteral = Literal[
+    "detected", "in_progress", "hold", "review_due", "awaiting_review", "closed", "cancelled"
+]
 PriorityLiteral = Literal["high", "normal", "low"]
 ResultLiteral = Literal["success", "failed", "cancelled"]
 
@@ -71,13 +75,34 @@ ResultLiteral = Literal["success", "failed", "cancelled"]
 # ── Pydantic schemas ──────────────────────────────────────────────────────────
 
 class CreateCaseRequest(BaseModel):
+    """Создание количественного или качественного кейса."""
+
+    model_config = ConfigDict(extra="forbid")
+
     om_user_id: str
     chatter_display_name: str = ""
-    metric_type: MetricTypeLiteral
+    case_type: CaseTypeLiteral = "quantitative"
+    category: Optional[str] = Field(default=None, min_length=1, max_length=100)
+    metric_type: Optional[MetricTypeLiteral] = None
     diagnosis_text: str = ""
     action_plan: str = ""
     priority: PriorityLiteral = "normal"
     hold_days: int = Field(default=21, ge=1, le=60)
+
+    @model_validator(mode="after")
+    def validate_case_type_fields(self) -> "CreateCaseRequest":
+        if self.case_type == "quantitative":
+            if self.metric_type is None:
+                raise ValueError("metric_type обязателен для количественного кейса")
+            if self.category is not None:
+                raise ValueError("category допустима только для качественных кейсов")
+        else:
+            cat = (self.category or "").strip()
+            if not cat:
+                raise ValueError("category обязателена для качественного кейса (1–100 символов)")
+            if self.metric_type is not None:
+                raise ValueError("metric_type не используется для качественных кейсов")
+        return self
 
 
 class CaseOut(BaseModel):
@@ -85,7 +110,9 @@ class CaseOut(BaseModel):
     tenant_id: int
     admin_id: int
     om_user_id: str
-    metric_type: str
+    case_type: str = "quantitative"
+    category: Optional[str] = None
+    metric_type: Optional[str] = None
     stage: str
     priority: str
     result: Optional[str]
@@ -105,6 +132,8 @@ class CaseOut(BaseModel):
             tenant_id=c.tenant_id,
             admin_id=c.admin_id,
             om_user_id=c.om_user_id,
+            case_type=c.case_type or "quantitative",
+            category=c.category,
             metric_type=c.metric_type,
             stage=c.stage,
             priority=c.priority,
@@ -176,7 +205,18 @@ class CaseDetailOut(CaseOut):
 
 
 class PatchStageRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     new_stage: StageLiteral
+    notes: Optional[str] = None
+
+
+class TransitionRequest(BaseModel):
+    """POST /cases/{id}/transition — смена стадии админом."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    target_stage: StageLiteral
     notes: Optional[str] = None
 
 
@@ -229,7 +269,7 @@ class KpiSnapshotOut(BaseModel):
         )
 
 
-_OPEN_STAGES = ("detected", "in_progress", "hold", "review_due")
+_OPEN_STAGES = ("detected", "in_progress", "hold", "review_due", "awaiting_review")
 
 _ACTIVITY_FILE_URL = "/api/v1/admin-portal/activities/files"
 
@@ -308,12 +348,22 @@ def _activity_list_out(raw: dict[str, Any]) -> ActivityListOut:
 def _svc_err(exc: Exception) -> HTTPException:
     """Convert known service exceptions to HTTP errors."""
     msg = str(exc)
+    if isinstance(exc, svc_cases.StageConflictError):
+        return HTTPException(status_code=status.HTTP_409_CONFLICT, detail=msg)
     if isinstance(exc, PermissionError):
         return HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=msg)
     if isinstance(exc, ValueError):
         if "Уже есть открытый кейс" in msg:
             return HTTPException(status_code=status.HTTP_409_CONFLICT, detail=msg)
-        if "Недостаточно данных для baseline" in msg or "not found" in msg.lower():
+        if (
+            "Достигнут лимит" in msg
+            or "Недостаточно данных для baseline" in msg
+            or "not found" in msg.lower()
+            or "обязател" in msg.lower()
+            or "допустим" in msg.lower()
+            or "не используется" in msg.lower()
+            or "Дождитесь окончания HOLD" in msg
+        ):
             return HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=msg)
         return HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=msg)
     return HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=msg)
@@ -335,11 +385,13 @@ async def create_case(
             admin_id=current_user.id,
             om_user_id=body.om_user_id,
             chatter_display_name=body.chatter_display_name,
-            metric_type=body.metric_type,
             diagnosis_text=body.diagnosis_text,
             action_plan=body.action_plan,
             priority=body.priority,
             hold_days=body.hold_days,
+            case_type=body.case_type,
+            category=body.category.strip() if body.category else None,
+            metric_type=body.metric_type,
         )
     except Exception as exc:
         raise _svc_err(exc) from exc
@@ -466,7 +518,37 @@ async def get_case(
     )
 
 
-# ── PATCH /cases/{case_id}/stage ─────────────────────────────────────────────
+# ── PATCH /cases/{case_id}/stage + POST /cases/{case_id}/transition ───────────
+
+async def _admin_transition_stage(
+    db: AsyncSession,
+    case_id: int,
+    target_stage: str,
+    current_user: User,
+    notes: Optional[str],
+) -> AdminCase:
+    case = await db.get(AdminCase, case_id)
+    if case is None or case.tenant_id != current_user.tenant_id:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Кейс не найден")
+    if case.admin_id != current_user.id:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Это не ваш кейс")
+
+    try:
+        await svc_cases.transition_stage(
+            db=db,
+            case_id=case_id,
+            new_stage=target_stage,
+            user=current_user,
+            notes=notes,
+        )
+        await db.commit()
+    except Exception as exc:
+        await db.rollback()
+        raise _svc_err(exc) from exc
+
+    await db.refresh(case)
+    return case
+
 
 @router.patch("/cases/{case_id}/stage", response_model=CaseOut)
 async def patch_stage(
@@ -475,26 +557,24 @@ async def patch_stage(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(require_admin),
 ):
-    """Сменить стадию кейса по FSM."""
-    case = await db.get(AdminCase, case_id)
-    if case is None or case.tenant_id != current_user.tenant_id:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Кейс не найден")
+    """Сменить стадию кейса по FSM (админ)."""
+    case = await _admin_transition_stage(
+        db, case_id, body.new_stage, current_user, body.notes
+    )
+    return CaseOut.from_orm(case)
 
-    try:
-        await svc_cases.transition_stage(
-            db=db,
-            case_id=case_id,
-            new_stage=body.new_stage,
-            changed_by="admin",
-            actor_id=current_user.id,
-            notes=body.notes,
-        )
-        await db.commit()
-    except Exception as exc:
-        await db.rollback()
-        raise _svc_err(exc) from exc
 
-    await db.refresh(case)
+@router.post("/cases/{case_id}/transition", response_model=CaseOut)
+async def post_transition(
+    case_id: int,
+    body: TransitionRequest,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_admin),
+):
+    """Сменить стадию кейса по FSM (админ). Алиас PATCH /stage с target_stage."""
+    case = await _admin_transition_stage(
+        db, case_id, body.target_stage, current_user, body.notes
+    )
     return CaseOut.from_orm(case)
 
 
