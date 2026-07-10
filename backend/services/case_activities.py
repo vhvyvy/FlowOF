@@ -251,6 +251,8 @@ async def create_activity(
     activity_type: str,
     text: str,
     uploaded_files: Optional[list[UploadFile]] = None,
+    *,
+    system_note: bool = False,
 ) -> dict[str, Any]:
     """
     Create activity with optional image attachments.
@@ -264,7 +266,7 @@ async def create_activity(
         raise CaseActivityValidation(f"Не более {MAX_FILES} файлов на активность")
 
     case = await _load_case(db, tenant_id, case_id)
-    if case.admin_id != admin_id:
+    if not system_note and case.admin_id != admin_id:
         raise PermissionError("Только автор кейса может добавлять активности")
 
     prepared: list[tuple[bytes, str, str, str]] = []

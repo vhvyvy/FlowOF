@@ -94,9 +94,19 @@ async def require_chatter(user: User = Depends(get_current_user)) -> User:
     return user
 
 
+def is_admin(user: User) -> bool:
+    """Пользователь — администратор агентства (is_admin=True)."""
+    return bool(getattr(user, "is_admin", False))
+
+
+def is_owner(user: User) -> bool:
+    """Пользователь — владелец агентства (role='owner')."""
+    return user.role == "owner"
+
+
 async def require_admin(user: User = Depends(get_current_user)) -> User:
     """Разрешает доступ только пользователям с is_admin=True в своём агентстве."""
-    if not getattr(user, "is_admin", False):
+    if not is_admin(user):
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Доступ только для администраторов агентства",

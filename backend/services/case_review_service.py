@@ -191,6 +191,7 @@ async def check_review_due_cases(db: AsyncSession, tenant_id: int) -> dict:
     due_cases_result = await db.execute(
         select(AdminCase).where(
             AdminCase.tenant_id == tenant_id,
+            AdminCase.case_type == "quantitative",
             AdminCase.stage == "hold",
             AdminCase.review_date <= today,
         )
@@ -305,7 +306,8 @@ async def check_review_due_cases(db: AsyncSession, tenant_id: int) -> dict:
                 # Within noise band — move to review_due, admin decides
                 await _add_result_snapshot(db, case, current_value)
                 await transition_stage(
-                    db, case.id, "review_due", "system",
+                    db, case.id, "review_due",
+                    changed_by="system",
                     notes=(
                         f"Шум: изменение {change_pct}% в пределах порога {noise}%. "
                         "Требует решения администратора."
@@ -318,7 +320,8 @@ async def check_review_due_cases(db: AsyncSession, tenant_id: int) -> dict:
                 # Negative change beyond noise — move to review_due, admin decides
                 await _add_result_snapshot(db, case, current_value)
                 await transition_stage(
-                    db, case.id, "review_due", "system",
+                    db, case.id, "review_due",
+                    changed_by="system",
                     notes=(
                         f"Ухудшение: {change_pct}% (порог -{noise}%). "
                         "Требует решения администратора."
