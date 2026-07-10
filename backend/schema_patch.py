@@ -857,6 +857,43 @@ _PATCHES: list[tuple[str, bool]] = [
         "CREATE INDEX IF NOT EXISTS idx_admin_invites_tenant ON admin_invites (tenant_id)",
         False,
     ),
+
+    # ═══════════════════════════════════════════════════════════════════════════
+    # Qualitative cases (case_type) — п.1 схема
+    # ═══════════════════════════════════════════════════════════════════════════
+    (
+        "ALTER TABLE admin_cases ADD COLUMN IF NOT EXISTS case_type case_type_enum NOT NULL DEFAULT 'quantitative'",
+        False,
+    ),
+    (
+        "ALTER TABLE admin_cases ADD COLUMN IF NOT EXISTS category VARCHAR(100)",
+        False,
+    ),
+    (
+        "ALTER TABLE admin_cases ALTER COLUMN metric_type DROP NOT NULL",
+        False,
+    ),
+    (
+        "DROP INDEX IF EXISTS uq_admin_cases_open_chatter_metric",
+        False,
+    ),
+    (
+        """CREATE UNIQUE INDEX IF NOT EXISTS uq_admin_cases_open_quant
+           ON admin_cases (tenant_id, om_user_id, metric_type)
+           WHERE stage NOT IN ('closed', 'cancelled') AND case_type = 'quantitative'""",
+        False,
+    ),
+    (
+        """CREATE UNIQUE INDEX IF NOT EXISTS uq_admin_cases_open_qual
+           ON admin_cases (tenant_id, om_user_id, category)
+           WHERE stage NOT IN ('closed', 'cancelled') AND case_type = 'qualitative'""",
+        False,
+    ),
+    (
+        """CREATE INDEX IF NOT EXISTS idx_admin_cases_case_type
+           ON admin_cases (tenant_id, case_type, stage)""",
+        False,
+    ),
 ]
 
 # Catalog tables that should have UNIQUE(tenant_id, name).
@@ -874,7 +911,7 @@ _CATALOG_UNIQUE_CONSTRAINTS: list[tuple[str, str]] = [
 # Solution: check pg_type first in Python, CREATE only when missing.
 # Each enum is applied in its own separate transaction for full isolation.
 _ENUM_PATCHES: list[tuple[str, list[str]]] = [
-    ("case_stage",        ["detected", "in_progress", "hold", "review_due", "closed", "cancelled"]),
+    ("case_stage",        ["detected", "in_progress", "hold", "review_due", "awaiting_review", "closed", "cancelled"]),
     ("case_priority",     ["high", "normal", "low"]),
     ("case_result",       ["success", "failed", "cancelled"]),
     ("metric_type",       ["ppv_open_rate", "rpc", "apv", "total_chats", "revenue"]),
@@ -883,9 +920,19 @@ _ENUM_PATCHES: list[tuple[str, list[str]]] = [
     ("ledger_event_type", [
         "case_opened", "case_closed_success", "case_closed_failed",
         "case_cancelled", "guardrail_triggered", "baseline_frozen",
+        "qualitative_success", "qualitative_failed", "returned_for_revision",
     ]),
     ("stage_changed_by",  ["admin", "owner", "system"]),
     ("activity_type_enum", ["review", "training", "meeting", "observation", "note", "other"]),
+    ("case_type_enum",    ["quantitative", "qualitative"]),
+]
+
+# ADD VALUE for enums on existing DBs (each value in its own transaction; idempotent).
+_ENUM_ADD_VALUE_PATCHES: list[tuple[str, str]] = [
+    ("case_stage", "awaiting_review"),
+    ("ledger_event_type", "qualitative_success"),
+    ("ledger_event_type", "qualitative_failed"),
+    ("ledger_event_type", "returned_for_revision"),
 ]
 
 
@@ -920,6 +967,33 @@ async def apply_schema_patches(engine: AsyncEngine) -> None:
                     logger.debug("patch skip (exists): enum %s", enum_name)
         except Exception as e:
             logger.warning("schema_patch enum %s skipped: %s", enum_name, e)
+
+    # ── Phase 0b: ADD VALUE to existing enums (separate tx per value) ────────
+    for enum_name, enum_value in _ENUM_ADD_VALUE_PATCHES:
+        try:
+            async with engine.begin() as conn:
+                exists = (await conn.execute(
+                    text(
+                        "SELECT EXISTS ("
+                        "  SELECT 1 FROM pg_enum e"
+                        "  JOIN pg_type t ON e.enumtypid = t.oid"
+                        "  WHERE t.typname = :ename AND e.enumlabel = :val"
+                        ")"
+                    ),
+                    {"ename": enum_name, "val": enum_value},
+                )).scalar()
+                if exists:
+                    logger.debug("patch skip (exists): enum %s.%s", enum_name, enum_value)
+                    continue
+                await conn.execute(
+                    text(f"ALTER TYPE {enum_name} ADD VALUE IF NOT EXISTS '{enum_value}'")
+                )
+                logger.info("patch applied: enum %s +%s", enum_name, enum_value)
+        except Exception as e:
+            logger.warning(
+                "schema_patch enum add-value %s.%s skipped: %s",
+                enum_name, enum_value, e,
+            )
 
     # ── Phase 1: regular DDL patches ─────────────────────────────────────────
     for sql, critical in _PATCHES:

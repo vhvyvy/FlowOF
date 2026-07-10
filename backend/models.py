@@ -6,7 +6,7 @@ from sqlalchemy import (
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import relationship
 from services.enum_types import (
-    CASE_STAGE, CASE_PRIORITY, CASE_RESULT,
+    CASE_STAGE, CASE_PRIORITY, CASE_RESULT, CASE_TYPE,
     METRIC_TYPE, SNAPSHOT_TYPE, SNAPSHOT_SOURCE,
     LEDGER_EVENT_TYPE, STAGE_CHANGED_BY, KPI_METRIC_TYPE, ACTIVITY_TYPE,
 )
@@ -461,14 +461,16 @@ class Script(Base):
 # schema_patch.  The PG enums are already enforced at the DB level.
 
 class AdminCase(Base):
-    """Кейс работы с чаттером (один открытый кейс per chatter×metric)."""
+    """Кейс работы с чаттером (quantitative: один открытый per chatter×metric; qualitative: per category)."""
     __tablename__ = "admin_cases"
 
     id             = Column(Integer, primary_key=True, autoincrement=True)
     tenant_id      = Column(Integer, ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False, index=True)
     admin_id       = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
     om_user_id     = Column(String(64), nullable=False)
-    metric_type    = Column(METRIC_TYPE, nullable=False)
+    case_type      = Column(CASE_TYPE, nullable=False, default="quantitative")
+    category       = Column(String(100), nullable=True)
+    metric_type    = Column(METRIC_TYPE, nullable=True)
     stage          = Column(CASE_STAGE, nullable=False, default="detected")
     priority       = Column(CASE_PRIORITY, nullable=False, default="normal")
     result         = Column(CASE_RESULT, nullable=True)

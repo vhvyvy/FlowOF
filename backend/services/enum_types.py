@@ -9,8 +9,12 @@ Names here MUST match the enum names in schema_patch._ENUM_PATCHES exactly.
 from sqlalchemy.dialects.postgresql import ENUM as PG_ENUM
 
 CASE_STAGE = PG_ENUM(
-    "detected", "in_progress", "hold", "review_due", "closed", "cancelled",
+    "detected", "in_progress", "hold", "review_due", "awaiting_review", "closed", "cancelled",
     name="case_stage", create_type=False,
+)
+CASE_TYPE = PG_ENUM(
+    "quantitative", "qualitative",
+    name="case_type_enum", create_type=False,
 )
 CASE_PRIORITY = PG_ENUM(
     "high", "normal", "low",
@@ -35,6 +39,7 @@ SNAPSHOT_SOURCE = PG_ENUM(
 LEDGER_EVENT_TYPE = PG_ENUM(
     "case_opened", "case_closed_success", "case_closed_failed",
     "case_cancelled", "guardrail_triggered", "baseline_frozen",
+    "qualitative_success", "qualitative_failed", "returned_for_revision",
     name="ledger_event_type", create_type=False,
 )
 STAGE_CHANGED_BY = PG_ENUM(
