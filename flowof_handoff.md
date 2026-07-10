@@ -1,10 +1,10 @@
 # FlowOF — Handoff (операционный статус)
 
-Последнее обновление: 9 июля 2026. Документ для передачи контекста между сессиями Cursor / между разработчиками.
+Последнее обновление: 10 июля 2026. Документ для передачи контекста между сессиями Cursor / между разработчиками.
 
 **Деплой:** backend → Railway (`/backend`), frontend → Vercel (`/frontend`), БД → Neon PostgreSQL.
 
-**Недавние коммиты (KPI admin + активности):** `469c3d0` (п.0 Volume) → `a6274f7` (п.1 схема) → `a6c8be3` (п.2 сервис) → `45ee968` (п.3 API) → `5288ee6` (п.4 UI).
+**Недавние коммиты (качественные кейсы):** `3de95bc` (п.1 схема) → `af32241` (п.2 сервис) → `cb53081` (п.3 API) → `aa23660` (п.4 admin UI) → `486fb31` (п.5 owner UI).
 
 ---
 
@@ -18,6 +18,7 @@
 - ⏳ **1.6 — Овнерский обзор (frontend):** `/dashboard/admins-review` — таблица админов есть (`/dashboard/admins`), drill-down по кейсам + конфиг `kpi_config` — в работе. **Эндпоинты готовы.**
 - ⏳ **1.7 — Инвайт-флоу для админов:** backend + UI создания инвайтов на `/dashboard/admins`, активация `/admin-join/[token]`; полировка и edge-cases — отдельно.
 - ✅ **1.8 — Активности в кейсе + файловое хранилище:** Railway Volume на `/data`, таблицы `case_activities` + `case_activity_files`, enum `activity_type` (6 типов: review / training / meeting / observation / note / other). API: `POST/GET/DELETE /api/v1/admin-portal/cases/{id}/activities`, `GET /api/v1/admin-portal/activities/files/{id}`, owner-read `GET /api/v1/dashboard/admins-review/cases/{id}/activities`. UI на странице кейса: форма (только автор), фильтры, лента, lightbox, удаление в течение 24 ч.
+- ✅ **1.9 — Качественные кейсы (`case_type=qualitative`):** `case_type` + `category`, стадия `awaiting_review`, partial unique indexes, ledger `qualitative_success` / `qualitative_failed` / `returned_for_revision`. Сервис: лимит 5 open, FSM owner/admin, cron только для quantitative. API: create с cross-validation, `POST /transition`, owner `pending-qualitative`, `close-qualitative`, `return-for-revision`, `GET /cases/{id}`. Admin UI: toggle типа, категория, отправка на оценку. Owner UI: сайдбар «На оценке» + бейдж, список `/dashboard/admins-review/pending`, оценка на `/dashboard/admins-review/cases/[id]`, `CaseActivities` read-only.
 
 ---
 
@@ -34,11 +35,11 @@
 **Дальше по UX-полировке:**
 
 - ⏳ **Пояснения на стадиях** (короткий UX-фикс на карточке кейса / FSM-кнопках).
-- ⏳ **Качественные кейсы** (`case_type=qualitative` — отдельный тип кейса без числового baseline).
+- ✅ **Качественные кейсы** (`case_type=qualitative` — отдельный тип кейса без числового baseline). Коммиты `3de95bc`…`486fb31`, задеплоено на prod.
 
 **После UX-полировки → Слой 1:**
 
-- ⏳ **1.6** — овнерский обзор `/dashboard/admins-review`: UI над готовыми эндпоинтами (кейсы админа, ledger, read-only активности).
+- ⏳ **1.6** — овнерский обзор `/dashboard/admins-review`: таблица админов есть (`/dashboard/admins`); **качественные кейсы на оценке** — UI готов (`/dashboard/admins-review/pending`); drill-down quant-кейсов + конфиг `kpi_config` — в работе.
 
 ---
 
