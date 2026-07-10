@@ -87,7 +87,7 @@ class CreateCaseRequest(BaseModel):
     diagnosis_text: str = ""
     action_plan: str = ""
     priority: PriorityLiteral = "normal"
-    hold_days: int = Field(default=21, ge=1, le=60)
+    hold_days: int = Field(default=21, ge=0, le=60)
 
     @model_validator(mode="after")
     def validate_case_type_fields(self) -> "CreateCaseRequest":

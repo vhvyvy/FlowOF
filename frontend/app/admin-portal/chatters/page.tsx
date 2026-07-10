@@ -71,7 +71,7 @@ function CreateCaseModal({ chatter, onClose, onSuccess }: ModalProps) {
   const [error, setError]         = useState<string | null>(null)
 
   const categoryOk = caseType === 'quantitative' || category.trim().length >= 1
-  const canSubmit = diagnosis.trim().length > 0 && holdDays >= 1 && holdDays <= 60 && categoryOk && !loading
+  const canSubmit = diagnosis.trim().length > 0 && holdDays >= 0 && holdDays <= 60 && categoryOk && !loading
 
   async function submit(e: React.FormEvent) {
     e.preventDefault()
@@ -80,7 +80,7 @@ function CreateCaseModal({ chatter, onClose, onSuccess }: ModalProps) {
       setError('Укажите категорию для качественного кейса')
       return
     }
-    if (holdDays < 1 || holdDays > 60) { setError('HOLD-период: от 1 до 60 дней'); return }
+    if (holdDays < 0 || holdDays > 60) { setError('HOLD-период: от 0 до 60 дней'); return }
     setError(null)
     setLoading(true)
     try {
@@ -257,7 +257,7 @@ function CreateCaseModal({ chatter, onClose, onSuccess }: ModalProps) {
             </label>
             <input
               type="number"
-              min={1}
+              min={0}
               max={60}
               value={holdDays}
               onChange={e => setHoldDays(Number(e.target.value))}
@@ -265,7 +265,7 @@ function CreateCaseModal({ chatter, onClose, onSuccess }: ModalProps) {
               className="w-full bg-slate-800 border border-slate-600 rounded-lg px-3 py-2 text-sm text-slate-200 focus:outline-none focus:ring-1 focus:ring-amber-500"
             />
             <p className="text-xs text-slate-500 mt-1.5">
-              Через сколько дней система сама сверит метрику. Обычно 21, но можно меньше для быстрых правок или больше для сложных.
+              0–60 дней. 0 — сразу на оценку (для теста).
             </p>
           </div>
 
