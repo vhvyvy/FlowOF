@@ -25,6 +25,7 @@ interface Chatter {
 
 type MetricType = 'ppv_open_rate' | 'rpc' | 'apv' | 'total_chats' | 'revenue'
 type Priority   = 'high' | 'normal' | 'low'
+type CaseType   = 'quantitative' | 'qualitative'
 
 const METRIC_OPTIONS: { value: MetricType; label: string }[] = [
   { value: 'ppv_open_rate', label: 'PPV Open Rate (%)' },
@@ -59,7 +60,9 @@ interface ModalProps {
 }
 
 function CreateCaseModal({ chatter, onClose, onSuccess }: ModalProps) {
+  const [caseType, setCaseType]   = useState<CaseType>('quantitative')
   const [metric, setMetric]       = useState<MetricType>('ppv_open_rate')
+  const [category, setCategory]   = useState('')
   const [diagnosis, setDiagnosis] = useState('')
   const [plan, setPlan]           = useState('')
   const [priority, setPriority]   = useState<Priority>('normal')
@@ -67,29 +70,42 @@ function CreateCaseModal({ chatter, onClose, onSuccess }: ModalProps) {
   const [loading, setLoading]     = useState(false)
   const [error, setError]         = useState<string | null>(null)
 
+  const categoryOk = caseType === 'quantitative' || category.trim().length >= 1
+  const canSubmit = diagnosis.trim().length > 0 && holdDays >= 1 && holdDays <= 60 && categoryOk && !loading
+
   async function submit(e: React.FormEvent) {
     e.preventDefault()
     if (!diagnosis.trim()) { setError('Укажите диагноз'); return }
+    if (caseType === 'qualitative' && !category.trim()) {
+      setError('Укажите категорию для качественного кейса')
+      return
+    }
     if (holdDays < 1 || holdDays > 60) { setError('HOLD-период: от 1 до 60 дней'); return }
     setError(null)
     setLoading(true)
     try {
-      const res = await api.post<{ id: number; baseline_value: number | null }>('/api/v1/admin-portal/cases', {
+      const body: Record<string, unknown> = {
         om_user_id:           chatter.om_user_id,
         chatter_display_name: chatterLabel(chatter),
-        metric_type:          metric,
+        case_type:            caseType,
         diagnosis_text:       diagnosis,
         action_plan:          plan,
         priority,
         hold_days:            holdDays,
-      })
+      }
+      if (caseType === 'quantitative') {
+        body.metric_type = metric
+      } else {
+        body.category = category.trim()
+      }
+      const res = await api.post<{ id: number }>('/api/v1/admin-portal/cases', body)
       onSuccess(res.data.id)
     } catch (err: unknown) {
-      const status = (err as { response?: { status?: number; data?: { detail?: string } } })?.response
-      const detail  = status?.data?.detail ?? 'Ошибка создания кейса'
-      if (status?.status === 409) setError('Уже открыт кейс по этой метрике у этого чаттера')
-      else if (status?.status === 422) setError('Недостаточно данных для baseline у этого чаттера (нет данных за 7 дней)')
-      else setError(detail)
+      const resp = (err as { response?: { status?: number; data?: { detail?: string } } })?.response
+      const detail = resp?.data?.detail ?? 'Ошибка создания кейса'
+      if (resp?.status === 409) setError('Уже открытый кейс по этому чаттеру')
+      else if (resp?.status === 422) setError(typeof detail === 'string' ? detail : 'Ошибка валидации')
+      else setError(typeof detail === 'string' ? detail : 'Ошибка создания кейса')
     } finally {
       setLoading(false)
     }
@@ -112,7 +128,35 @@ function CreateCaseModal({ chatter, onClose, onSuccess }: ModalProps) {
         </div>
 
         <form onSubmit={submit} className="px-6 py-5 space-y-4">
-          {/* Metric */}
+          {/* Case type toggle */}
+          <div>
+            <label className="block text-xs font-medium text-slate-400 mb-1.5">Тип кейса</label>
+            <div className="flex gap-2">
+              {([
+                { value: 'quantitative' as CaseType, label: 'Количественный' },
+                { value: 'qualitative' as CaseType, label: 'Качественный' },
+              ]).map(opt => (
+                <button
+                  key={opt.value}
+                  type="button"
+                  onClick={() => setCaseType(opt.value)}
+                  className={cn(
+                    'flex-1 py-1.5 rounded-lg text-xs font-medium transition-colors',
+                    caseType === opt.value
+                      ? opt.value === 'qualitative'
+                        ? 'bg-violet-500/20 text-violet-300 ring-1 ring-violet-500/50'
+                        : 'bg-amber-500/20 text-amber-300 ring-1 ring-amber-500/50'
+                      : 'bg-slate-800 text-slate-500 hover:text-slate-300',
+                  )}
+                >
+                  {opt.label}
+                </button>
+              ))}
+            </div>
+          </div>
+
+          {/* Metric (quantitative only) */}
+          {caseType === 'quantitative' && (
           <div>
             <label className="block text-xs font-medium text-slate-400 mb-1.5">Метрика</label>
             <div className="flex gap-2 items-center">
@@ -132,6 +176,27 @@ function CreateCaseModal({ chatter, onClose, onSuccess }: ModalProps) {
               )}
             </div>
           </div>
+          )}
+
+          {/* Category (qualitative only) */}
+          {caseType === 'qualitative' && (
+          <div>
+            <label className="block text-xs font-medium text-slate-400 mb-1.5">
+              Категория <span className="text-red-400">*</span>
+            </label>
+            <input
+              type="text"
+              value={category}
+              onChange={e => setCategory(e.target.value)}
+              maxLength={100}
+              placeholder="мотивация / дисциплина / скрипты / ..."
+              className="w-full bg-slate-800 border border-slate-600 rounded-lg px-3 py-2 text-sm text-slate-200 placeholder-slate-500 focus:outline-none focus:ring-1 focus:ring-violet-500"
+            />
+            <p className="text-xs text-slate-500 mt-1.5">
+              Опиши, что нельзя измерить метрикой
+            </p>
+          </div>
+          )}
 
           {/* Diagnosis */}
           <div>
@@ -217,7 +282,7 @@ function CreateCaseModal({ chatter, onClose, onSuccess }: ModalProps) {
             <Button type="button" variant="outline" onClick={onClose} className="flex-1" disabled={loading}>
               Отмена
             </Button>
-            <Button type="submit" className="flex-1 bg-amber-600 hover:bg-amber-500" disabled={loading}>
+            <Button type="submit" className="flex-1 bg-amber-600 hover:bg-amber-500" disabled={!canSubmit}>
               {loading ? <Loader2 className="h-4 w-4 animate-spin" /> : 'Создать кейс'}
             </Button>
           </div>

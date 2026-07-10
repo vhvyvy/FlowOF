@@ -456,56 +456,58 @@ async def get_case(
     today = date.today()
     year, month = today.year, today.month
 
-    # ── today_metric: yesterday's daily value (1-day lookback) ───────────────
-    yesterday = today - timedelta(days=1)
-    today_val = await read_metric_at_date(
-        db, case.tenant_id, case.om_user_id, case.metric_type, yesterday
-    )
-    today_metric = MetricPoint(
-        value=float(today_val) if today_val is not None else None,
-        date_label=yesterday.strftime("%-d %b").lstrip("0") if today_val is not None else None,
-    )
+    today_metric = MetricPoint()
+    week_avg_metric = MetricPoint()
+    month_metric = MetricPoint()
 
-    # ── week_avg_metric: average of last 7 available daily values ─────────────
-    week_vals = []
-    for d in range(1, 8):
-        v = await read_metric_at_date(
-            db, case.tenant_id, case.om_user_id, case.metric_type, today - timedelta(days=d)
+    if case.metric_type and (case.case_type or "quantitative") == "quantitative":
+        # ── today_metric: yesterday's daily value (1-day lookback) ───────────
+        yesterday = today - timedelta(days=1)
+        today_val = await read_metric_at_date(
+            db, case.tenant_id, case.om_user_id, case.metric_type, yesterday
         )
-        if v is not None:
-            week_vals.append(float(v))
-    if week_vals:
-        avg = sum(week_vals) / len(week_vals)
-        start_day = (today - timedelta(days=7)).strftime("%-d")
-        end_day   = yesterday.strftime("%-d %b")
-        week_avg_metric = MetricPoint(
-            value=round(avg, 4),
-            date_label=f"{start_day}–{end_day}",
+        today_metric = MetricPoint(
+            value=float(today_val) if today_val is not None else None,
+            date_label=yesterday.strftime("%-d %b").lstrip("0") if today_val is not None else None,
         )
-    else:
-        week_avg_metric = MetricPoint()
 
-    # ── month_metric: current month aggregate from kpi_service ───────────────
-    try:
-        kpi_rows, _, _, _ = await get_chatter_kpi(db, case.tenant_id, year, month)
-        month_row = next(
-            (r for r in kpi_rows if r.onlymonster_id == case.om_user_id), None
-        )
-        metric_attr = {
-            "ppv_open_rate": "ppv_open_rate",
-            "apv":           "apv",
-            "rpc":           "rpc",
-            "total_chats":   "total_chats",
-            "revenue":       "revenue",
-        }.get(case.metric_type)
-        month_val = getattr(month_row, metric_attr, None) if month_row and metric_attr else None
-        month_metric = MetricPoint(
-            value=float(month_val) if month_val is not None else None,
-            date_label=today.strftime("%b %Y"),
-        )
-    except Exception as exc:
-        logger.warning("get_case: month_metric error case=%s: %s", case_id, exc)
-        month_metric = MetricPoint()
+        # ── week_avg_metric: average of last 7 available daily values ─────────────
+        week_vals = []
+        for d in range(1, 8):
+            v = await read_metric_at_date(
+                db, case.tenant_id, case.om_user_id, case.metric_type, today - timedelta(days=d)
+            )
+            if v is not None:
+                week_vals.append(float(v))
+        if week_vals:
+            avg = sum(week_vals) / len(week_vals)
+            start_day = (today - timedelta(days=7)).strftime("%-d")
+            end_day   = yesterday.strftime("%-d %b")
+            week_avg_metric = MetricPoint(
+                value=round(avg, 4),
+                date_label=f"{start_day}–{end_day}",
+            )
+
+        # ── month_metric: current month aggregate from kpi_service ───────────────
+        try:
+            kpi_rows, _, _, _ = await get_chatter_kpi(db, case.tenant_id, year, month)
+            month_row = next(
+                (r for r in kpi_rows if r.onlymonster_id == case.om_user_id), None
+            )
+            metric_attr = {
+                "ppv_open_rate": "ppv_open_rate",
+                "apv":           "apv",
+                "rpc":           "rpc",
+                "total_chats":   "total_chats",
+                "revenue":       "revenue",
+            }.get(case.metric_type)
+            month_val = getattr(month_row, metric_attr, None) if month_row and metric_attr else None
+            month_metric = MetricPoint(
+                value=float(month_val) if month_val is not None else None,
+                date_label=today.strftime("%b %Y"),
+            )
+        except Exception as exc:
+            logger.warning("get_case: month_metric error case=%s: %s", case_id, exc)
 
     base = CaseOut.from_orm(case)
     return CaseDetailOut(

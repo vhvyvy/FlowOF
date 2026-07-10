@@ -40,7 +40,9 @@ interface CaseDetail {
   id: number
   admin_id: number
   om_user_id: string
-  metric_type: string
+  case_type: string
+  category: string | null
+  metric_type: string | null
   stage: string
   priority: string
   result: string | null
@@ -69,7 +71,8 @@ const METRIC_LABELS: Record<string, string> = {
 
 const STAGE_LABELS: Record<string, string> = {
   detected: 'Обнаружен', in_progress: 'В работе', hold: 'Холд',
-  review_due: 'На проверке', closed: 'Закрыт', cancelled: 'Отменён',
+  review_due: 'На проверке', awaiting_review: 'Ожидает оценки',
+  closed: 'Закрыт', cancelled: 'Отменён',
 }
 
 const STAGE_DESCRIPTION: Record<string, string> = {
@@ -79,6 +82,7 @@ const STAGE_DESCRIPTION: Record<string, string> = {
   hold: 'HOLD-период. Метрику не трогаем, ждём review_date для проверки результата.',
   review_due:
     'Пришло время проверить результат. Система сравнила baseline и текущее значение.',
+  awaiting_review: 'Отправлено на оценку владельцу. Ждём решения.',
   cancelled: 'Кейс отменён.',
 }
 
@@ -101,6 +105,8 @@ const ACTION_TOOLTIPS = {
   review_due_to_success:
     'Закрыть как успех. +10 очков в ledger (если нет guardrail).',
   review_due_to_failed: 'Закрыть без результата. -3 очка в ledger.',
+  hold_to_awaiting_review:
+    'Отправить кейс на оценку владельцу. Овнер решит: сработало, не помогло или вернуть на доработку.',
 } as const
 
 function stageDescription(stage: string, result?: string | null): string {
@@ -115,8 +121,37 @@ const STAGE_COLOR: Record<string, string> = {
   in_progress: 'bg-yellow-500/15 text-yellow-300',
   hold: 'bg-orange-500/15 text-orange-300',
   review_due: 'bg-red-500/15 text-red-300',
+  awaiting_review: 'bg-violet-500/15 text-violet-300',
   closed: 'bg-green-500/15 text-green-300',
   cancelled: 'bg-slate-600/20 text-slate-400',
+}
+
+function getSentForReviewAt(history: HistoryEntry[]): string | null {
+  const entries = history.filter(h => h.to_stage === 'awaiting_review')
+  if (!entries.length) return null
+  return entries[entries.length - 1].changed_at
+}
+
+function formatSentForReviewDisplay(iso: string): string {
+  const then = new Date(iso)
+  const now = new Date()
+  const diffDays = Math.floor((now.getTime() - then.getTime()) / 86400000)
+  if (diffDays < 1) return 'менее суток назад'
+  if (diffDays <= 7) return `${diffDays} дней назад`
+  return then.toLocaleDateString('ru-RU', { day: '2-digit', month: '2-digit', year: 'numeric' })
+}
+
+function isHoldReviewReady(reviewDate: string | null): boolean {
+  if (!reviewDate) return false
+  const end = new Date(reviewDate)
+  end.setHours(0, 0, 0, 0)
+  const today = new Date()
+  today.setHours(0, 0, 0, 0)
+  return today >= end
+}
+
+function isQualitative(c: CaseDetail): boolean {
+  return (c.case_type ?? 'quantitative') === 'qualitative'
 }
 
 const CHANGED_BY_LABEL: Record<string, string> = {
@@ -162,8 +197,8 @@ function fmtDate(s: string | null): string {
   return new Date(s).toLocaleDateString('ru-RU', { day: 'numeric', month: 'short', year: 'numeric' })
 }
 
-function fmtVal(metric: string, v: number | null): string {
-  if (v == null) return '—'
+function fmtVal(metric: string | null, v: number | null): string {
+  if (v == null || !metric) return '—'
   if (metric === 'ppv_open_rate') return `${v.toFixed(1)}%`
   if (metric === 'total_chats')   return String(Math.round(v))
   if (metric === 'revenue')       return `$${v.toFixed(0)}`
@@ -240,6 +275,7 @@ function CaseActions({ caseDetail, onAction }: ActionsProps) {
   const qc = useQueryClient()
   const { id } = caseDetail
   const stage = caseDetail.stage
+  const qualitative = isQualitative(caseDetail)
 
   const [loading, setLoading]           = useState(false)
   const [resultNotes, setResultNotes]   = useState('')
@@ -254,7 +290,25 @@ function CaseActions({ caseDetail, onAction }: ActionsProps) {
       onAction()
     } catch (err: unknown) {
       const detail = (err as { response?: { data?: { detail?: string } } })?.response?.data?.detail
-      setError(detail ?? 'Ошибка')
+      setError(typeof detail === 'string' ? detail : 'Ошибка')
+    } finally { setLoading(false) }
+  }
+
+  async function postTransition(targetStage: string, notes?: string) {
+    setLoading(true); setError(null)
+    try {
+      await api.post(`/api/v1/admin-portal/cases/${id}/transition`, { target_stage: targetStage, notes })
+      qc.invalidateQueries({ queryKey: ['admin-portal-case', String(id)] })
+      qc.invalidateQueries({ queryKey: ['admin-portal-cases-active'] })
+      onAction()
+    } catch (err: unknown) {
+      const resp = (err as { response?: { status?: number; data?: { detail?: string } } })?.response
+      const detail = resp?.data?.detail
+      if (resp?.status === 422 && typeof detail === 'string' && detail.includes('HOLD')) {
+        setError('Дождитесь окончания HOLD-периода')
+      } else {
+        setError(typeof detail === 'string' ? detail : 'Ошибка')
+      }
     } finally { setLoading(false) }
   }
 
@@ -281,12 +335,29 @@ function CaseActions({ caseDetail, onAction }: ActionsProps) {
             caseDetail.result === 'success' ? 'bg-green-500/15 text-green-300'
             : 'bg-red-500/15 text-red-300',
           )}>
-            {caseDetail.result === 'success' ? '✓ Успех' : '✗ Провал'}
+            {caseDetail.result === 'success'
+              ? (qualitative ? '✓ Оценка: сработало' : '✓ Успех')
+              : (qualitative ? '✗ Оценка: не помогло' : '✗ Провал')}
           </span>
         )}
         {caseDetail.closed_at && (
           <p className="text-xs text-slate-500 mt-2">Закрыт {fmtDate(caseDetail.closed_at)}</p>
         )}
+      </Section>
+    )
+  }
+
+  if (qualitative && stage === 'awaiting_review') {
+    const sentAt = getSentForReviewAt(caseDetail.history)
+    const sentLabel = sentAt ? formatSentForReviewDisplay(sentAt) : 'недавно'
+    return (
+      <Section title="Статус">
+        <StageStatusBlock stage={stage} result={caseDetail.result} align="start" />
+        <div className="mt-3 rounded-lg border border-violet-500/25 bg-violet-500/10 px-4 py-3">
+          <p className="text-sm text-violet-200">
+            Ожидает оценки владельца. Отправлено {sentLabel}.
+          </p>
+        </div>
       </Section>
     )
   }
@@ -349,16 +420,43 @@ function CaseActions({ caseDetail, onAction }: ActionsProps) {
       {stage === 'hold' && (
         <div className="space-y-3">
           <p className="text-sm text-slate-400">
-            Кейс в холде до{' '}
-            <span className="font-semibold text-orange-300">
-              {caseDetail.review_date ? fmtDate(caseDetail.review_date) : '—'}
-            </span>.
-            Система автоматически проверит метрику и переведёт в стадию оценки.
+            {qualitative ? (
+              <>
+                HOLD-период до{' '}
+                <span className="font-semibold text-violet-300">
+                  {caseDetail.review_date ? fmtDate(caseDetail.review_date) : '—'}
+                </span>
+                . После этой даты можно отправить кейс на оценку владельцу.
+              </>
+            ) : (
+              <>
+                Кейс в холде до{' '}
+                <span className="font-semibold text-orange-300">
+                  {caseDetail.review_date ? fmtDate(caseDetail.review_date) : '—'}
+                </span>.
+                Система автоматически проверит метрику и переведёт в стадию оценки.
+              </>
+            )}
           </p>
-          <div className="flex gap-2">
-            <div className="flex-1">
-              <HoldTestButton caseId={id} onDone={onAction} />
-            </div>
+          <div className="flex gap-2 flex-wrap">
+            {qualitative ? (
+              <Button
+                onClick={() => postTransition('awaiting_review')}
+                disabled={loading || !isHoldReviewReady(caseDetail.review_date)}
+                title={
+                  isHoldReviewReady(caseDetail.review_date)
+                    ? ACTION_TOOLTIPS.hold_to_awaiting_review
+                    : `Дождитесь окончания HOLD-периода (${caseDetail.review_date ? fmtDate(caseDetail.review_date) : '—'})`
+                }
+                className="flex-1 min-w-[200px] bg-violet-700 hover:bg-violet-600 text-sm"
+              >
+                {loading ? <Loader2 className="h-4 w-4 animate-spin" /> : 'Отправить на оценку →'}
+              </Button>
+            ) : (
+              <div className="flex-1">
+                <HoldTestButton caseId={id} onDone={onAction} />
+              </div>
+            )}
             <Button
               onClick={() => patchStage('cancelled', 'Отменён на HOLD-периоде')}
               disabled={loading}
@@ -488,9 +586,22 @@ export default function CaseDetailPage() {
         <div className="flex items-start justify-between gap-4 flex-wrap">
           <div>
             <h1 className="text-lg font-bold text-slate-100">{chatterLine}</h1>
-            <p className="text-sm text-amber-300 font-medium mt-0.5">
-              {METRIC_LABELS[c.metric_type] ?? c.metric_type}
-            </p>
+            {isQualitative(c) ? (
+              <div className="flex flex-wrap items-center gap-2 mt-1.5">
+                <span className="text-xs font-semibold px-2 py-0.5 rounded-full bg-violet-500/15 text-violet-300 ring-1 ring-violet-500/30">
+                  Качественный
+                </span>
+                {c.category && (
+                  <span className="text-sm text-slate-300">
+                    Категория: <span className="text-violet-200 font-medium">{c.category}</span>
+                  </span>
+                )}
+              </div>
+            ) : (
+              <p className="text-sm text-amber-300 font-medium mt-0.5">
+                {METRIC_LABELS[c.metric_type ?? ''] ?? c.metric_type}
+              </p>
+            )}
             <p className="text-xs text-slate-500 mt-0.5">ID: {c.om_user_id} · Открыт {fmtDate(c.opened_at)}</p>
           </div>
           <div className="flex flex-col items-end gap-2">
@@ -502,8 +613,8 @@ export default function CaseDetailPage() {
         </div>
       </div>
 
-      {/* Metric overview: 4-column row */}
-      {baselineSnap && (
+      {/* Metric overview: quantitative only */}
+      {!isQualitative(c) && baselineSnap && c.metric_type && (
         <Section title="Метрика">
           <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
             {/* Baseline */}
@@ -567,8 +678,8 @@ export default function CaseDetailPage() {
         </Section>
       )}
 
-      {/* Result snapshot (if review_due or closed) */}
-      {resultSnap && (
+      {/* Result snapshot (quantitative, review_due or closed) */}
+      {!isQualitative(c) && resultSnap && (
         <Section title="Результат (текущее значение)">
           <div className="flex items-center gap-6 text-sm">
             <div>
