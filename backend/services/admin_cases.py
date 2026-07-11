@@ -30,6 +30,7 @@ Invariants enforced here
 from __future__ import annotations
 
 import logging
+import os
 from datetime import date, datetime, timedelta
 from decimal import Decimal
 from typing import Optional, TYPE_CHECKING
@@ -41,13 +42,23 @@ from dependencies import is_admin, is_owner
 from models import AdminCase, BaselineSnapshot, CaseLedger, CaseStageHistory, KpiConfig
 from schema_patch import seed_default_kpi_config
 from services.case_activities import create_activity
-from services.case_baseline import BASELINE_LOOKBACK_DAYS, freeze_baseline
+from services.case_baseline import (
+    BASELINE_LOOKBACK_DAYS,
+    collect_baseline_snapshot_v2,
+    freeze_baseline,
+)
 from services.case_ledger import record_event
 
 if TYPE_CHECKING:
     from models import User
 
 logger = logging.getLogger("flowof.admin_cases")
+
+
+def _baseline_v2_enabled() -> bool:
+    return os.getenv("ENABLE_BASELINE_V2", "1").strip().lower() not in (
+        "0", "false", "no", "off",
+    )
 
 # ── Points constants (move to DB / kpi_config later) ─────────────────────────
 CASE_POINTS: dict[str, float] = {
@@ -277,6 +288,7 @@ async def create_case(
     case_type: str = "quantitative",
     category: Optional[str] = None,
     metric_type: Optional[str] = None,
+    baseline_as_of: Optional[date] = None,
 ) -> AdminCase:
     """
     Open a new KPI case in a single transaction.
@@ -339,6 +351,76 @@ async def create_case(
     await _assert_no_open_quant_case(db, tenant_id, om_user_id, metric_type)
     await _load_kpi_config(db, tenant_id, metric_type)
 
+    if _baseline_v2_enabled():
+        target_date = baseline_as_of or date.today()
+        snapshot = await collect_baseline_snapshot_v2(
+            db, tenant_id, om_user_id, metric_type, target_date
+        )
+        if snapshot is None or snapshot.daily_value is None:
+            chatter_name = (chatter_display_name or "").strip() or om_user_id
+            raise ValueError(
+                f"Недостаточно данных: чаттер {chatter_name!r} давно не работал "
+                f"по метрике {metric_type!r}."
+            )
+
+        primary_baseline = snapshot.month_current_value or snapshot.daily_value
+        snapshot_date = snapshot.daily_date or target_date
+
+        case = AdminCase(
+            tenant_id=tenant_id,
+            admin_id=admin_id,
+            om_user_id=om_user_id,
+            case_type="quantitative",
+            category=None,
+            metric_type=metric_type,
+            stage="detected",
+            priority=priority,
+            review_date=review_date,
+            baseline_value=primary_baseline,
+            baseline_version="v2",
+            is_early_month=snapshot.is_early_month,
+            is_new_chatter=snapshot.is_new_chatter,
+            notes=notes,
+        )
+        db.add(case)
+        await db.flush()
+
+        snap = BaselineSnapshot(
+            case_id=case.id,
+            snapshot_type="baseline",
+            snapshot_type_v2="baseline_v2",
+            metric_type=metric_type,
+            metric_value=primary_baseline,
+            daily_value=snapshot.daily_value,
+            week_avg_value=snapshot.week_avg_value,
+            month_current_value=snapshot.month_current_value,
+            prev_month_value=snapshot.prev_month_value,
+            snapshot_date=snapshot_date,
+            snapshot_as_of=snapshot.snapshot_as_of,
+            source="system_from_daily",
+        )
+        db.add(snap)
+        await _append_history(db, case.id, None, "detected", "admin")
+        await record_event(
+            db,
+            tenant_id=tenant_id,
+            admin_id=admin_id,
+            event_type="case_opened",
+            points=0,
+            case_id=case.id,
+            notes=f"Диагноз: {metric_type} (baseline v2)",
+        )
+
+        await db.commit()
+        await db.refresh(case)
+        logger.info(
+            "create_case quantitative v2: tenant=%s admin=%s case=%s metric=%s "
+            "baseline=%s early=%s new_chatter=%s review=%s",
+            tenant_id, admin_id, case.id, metric_type, primary_baseline,
+            snapshot.is_early_month, snapshot.is_new_chatter, review_date,
+        )
+        return case
+
     baseline_result = await freeze_baseline(db, tenant_id, om_user_id, metric_type)
     if baseline_result is None:
         chatter_name = (chatter_display_name or "").strip() or om_user_id
@@ -360,6 +442,7 @@ async def create_case(
         priority=priority,
         review_date=review_date,
         baseline_value=baseline_value,
+        baseline_version="v1",
         notes=notes,
     )
     db.add(case)

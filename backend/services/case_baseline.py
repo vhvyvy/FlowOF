@@ -13,16 +13,23 @@ Public API
         → Decimal | None
         Point-in-time read (no look-back).  Used by check_review_due_cases
         for guardrail baseline reconstruction.
+
+    collect_baseline_snapshot_v2(db, tenant_id, om_user_id, metric_type, target_date)
+        → BaselineSnapshotV2Result | None
+        Collects 4-value snapshot for baseline v2 at case creation.
 """
 from __future__ import annotations
 
 import logging
+from dataclasses import dataclass
 from datetime import date, timedelta
 from decimal import Decimal
 from typing import Optional
 
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
+
+from services.kpi_service import get_chatter_kpi
 
 logger = logging.getLogger("flowof.case_baseline")
 
@@ -31,6 +38,28 @@ BASELINE_LOOKBACK_DAYS = 30
 
 # Metrics stored directly in chatter_kpi_daily
 _DAILY_COLS: frozenset[str] = frozenset({"ppv_open_rate", "apv", "total_chats"})
+
+_METRIC_KPI_ATTR: dict[str, str] = {
+    "ppv_open_rate": "ppv_open_rate",
+    "apv": "apv",
+    "rpc": "rpc",
+    "total_chats": "total_chats",
+    "revenue": "revenue",
+}
+
+
+@dataclass
+class BaselineSnapshotV2Result:
+    """Four-value baseline snapshot collected at a single point in time."""
+
+    daily_value: Decimal | None
+    daily_date: date | None
+    week_avg_value: Decimal | None
+    month_current_value: Decimal | None
+    prev_month_value: Decimal | None
+    snapshot_as_of: date
+    is_early_month: bool
+    is_new_chatter: bool
 
 
 # ── Internal helpers ──────────────────────────────────────────────────────────
@@ -135,6 +164,94 @@ async def _compute_metric(
     return None
 
 
+async def _find_daily_at_anchor(
+    db: AsyncSession,
+    tenant_id: int,
+    om_user_id: str,
+    metric_type: str,
+    target_date: date,
+    *,
+    lookback_days: int = BASELINE_LOOKBACK_DAYS,
+) -> tuple[Decimal, date] | None:
+    """Most recent daily point scanning backward from target_date - 1 day."""
+    names = await _display_names(db, tenant_id, om_user_id)
+
+    for days_back in range(1, lookback_days + 1):
+        d = target_date - timedelta(days=days_back)
+        try:
+            val = await _compute_metric(db, tenant_id, om_user_id, metric_type, d, names)
+            if val is not None:
+                return val, d
+        except Exception as exc:
+            logger.warning(
+                "_find_daily_at_anchor error tenant=%s uid=%s metric=%s date=%s: %s",
+                tenant_id, om_user_id, metric_type, d, exc,
+            )
+            continue
+
+    return None
+
+
+async def _week_avg_at_anchor(
+    db: AsyncSession,
+    tenant_id: int,
+    om_user_id: str,
+    metric_type: str,
+    target_date: date,
+    *,
+    days: int = 7,
+) -> Decimal | None:
+    """Average of non-null daily metric values for the `days` days before target_date."""
+    names = await _display_names(db, tenant_id, om_user_id)
+    vals: list[Decimal] = []
+
+    for days_back in range(1, days + 1):
+        d = target_date - timedelta(days=days_back)
+        try:
+            val = await _compute_metric(db, tenant_id, om_user_id, metric_type, d, names)
+            if val is not None:
+                vals.append(val)
+        except Exception as exc:
+            logger.warning(
+                "_week_avg_at_anchor error tenant=%s uid=%s metric=%s date=%s: %s",
+                tenant_id, om_user_id, metric_type, d, exc,
+            )
+
+    if not vals:
+        return None
+    return sum(vals) / Decimal(len(vals))
+
+
+async def _monthly_metric_from_kpi(
+    db: AsyncSession,
+    tenant_id: int,
+    om_user_id: str,
+    metric_type: str,
+    year: int,
+    month: int,
+) -> Decimal | None:
+    """
+    Monthly aggregate for one chatter — same source as get_case month_metric
+    (get_chatter_kpi → chatter_kpi_mt + transactions).
+    """
+    attr = _METRIC_KPI_ATTR.get(metric_type)
+    if not attr:
+        return None
+    try:
+        kpi_rows, _, _, _ = await get_chatter_kpi(db, tenant_id, year, month)
+        row = next((r for r in kpi_rows if r.onlymonster_id == om_user_id), None)
+        if row is None:
+            return None
+        raw = getattr(row, attr, None)
+        return Decimal(str(raw)) if raw is not None else None
+    except Exception as exc:
+        logger.warning(
+            "_monthly_metric_from_kpi error tenant=%s uid=%s metric=%s %s-%s: %s",
+            tenant_id, om_user_id, metric_type, year, month, exc,
+        )
+        return None
+
+
 # ── Public API ────────────────────────────────────────────────────────────────
 
 async def read_metric_at_date(
@@ -208,3 +325,69 @@ async def freeze_baseline(
         tenant_id, om_user_id, metric_type, val, target,
     )
     return val, target, "system_from_daily"
+
+
+async def collect_baseline_snapshot_v2(
+    db: AsyncSession,
+    tenant_id: int,
+    om_user_id: str,
+    metric_type: str,
+    target_date: date,
+) -> BaselineSnapshotV2Result | None:
+    """
+    Collect 4 baseline values anchored to target_date.
+    Returns None when daily_value cannot be found (30-day lookback).
+    """
+    daily_result = await _find_daily_at_anchor(
+        db, tenant_id, om_user_id, metric_type, target_date
+    )
+    daily_value: Decimal | None = None
+    daily_date: date | None = None
+    if daily_result is not None:
+        daily_value, daily_date = daily_result
+
+    if daily_value is None:
+        logger.warning(
+            "collect_baseline_snapshot_v2: no daily data — tenant=%s uid=%s metric=%s as_of=%s",
+            tenant_id, om_user_id, metric_type, target_date,
+        )
+        return None
+
+    week_avg_value = await _week_avg_at_anchor(
+        db, tenant_id, om_user_id, metric_type, target_date
+    )
+
+    year, month = target_date.year, target_date.month
+    month_current_value = await _monthly_metric_from_kpi(
+        db, tenant_id, om_user_id, metric_type, year, month
+    )
+
+    if month == 1:
+        prev_year, prev_month = year - 1, 12
+    else:
+        prev_year, prev_month = year, month - 1
+    prev_month_value = await _monthly_metric_from_kpi(
+        db, tenant_id, om_user_id, metric_type, prev_year, prev_month
+    )
+
+    is_early_month = target_date.day <= 7
+    is_new_chatter = prev_month_value is None
+
+    logger.info(
+        "collect_baseline_snapshot_v2: tenant=%s uid=%s metric=%s as_of=%s "
+        "daily=%s week_avg=%s month=%s prev_month=%s early=%s new=%s",
+        tenant_id, om_user_id, metric_type, target_date,
+        daily_value, week_avg_value, month_current_value, prev_month_value,
+        is_early_month, is_new_chatter,
+    )
+
+    return BaselineSnapshotV2Result(
+        daily_value=daily_value,
+        daily_date=daily_date,
+        week_avg_value=week_avg_value,
+        month_current_value=month_current_value,
+        prev_month_value=prev_month_value,
+        snapshot_as_of=target_date,
+        is_early_month=is_early_month,
+        is_new_chatter=is_new_chatter,
+    )
