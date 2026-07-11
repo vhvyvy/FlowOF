@@ -4,7 +4,7 @@
 
 **Деплой:** backend → Railway (`/backend`), frontend → Vercel (`/frontend`), БД → Neon PostgreSQL.
 
-**Недавние коммиты (качественные кейсы):** `3de95bc` (п.1 схема) → `af32241` (п.2 сервис) → `cb53081` (п.3 API) → `aa23660` (п.4 admin UI) → `486fb31` (п.5 owner UI) → `b0a836b` (`hold_days=0`).
+**Недавние коммиты (baseline v2):** `d90a92b` (п.1 схема) → `a81e2de` (п.2 сбор snapshot) → `c0e9f57` (п.3 review rule D) → `8d0eb9f` (п.4 API + UI). Ранее: качественные кейсы `3de95bc`…`486fb31`, baseline preview `269cf0c`, KPI daily fix `a1c9ded`.
 
 ---
 
@@ -20,12 +20,13 @@
 - ✅ **1.8 — Активности в кейсе + файловое хранилище:** Railway Volume на `/data`, таблицы `case_activities` + `case_activity_files`, enum `activity_type` (6 типов: review / training / meeting / observation / note / other). API: `POST/GET/DELETE /api/v1/admin-portal/cases/{id}/activities`, `GET /api/v1/admin-portal/activities/files/{id}`, owner-read `GET /api/v1/dashboard/admins-review/cases/{id}/activities`. UI на странице кейса: форма (только автор), фильтры, лента, lightbox, удаление в течение 24 ч.
 - ✅ **1.9 — Качественные кейсы (`case_type=qualitative`):** новый тип кейса без метрик, категория свободным текстом, HOLD задаёт админ, отправка на оценку → овнер закрывает (success +5 / failed −2) или возвращает на доработку с комментарием (системная note в ленте активностей). Лимит 5 открытых на админа. Guardrail и detect:result ratio не применяются. Отдельные partial unique index'ы для quantitative и qualitative кейсов. Стадия `awaiting_review` в FSM. Минимальный овнерский UI `/dashboard/admins-review/pending` + детальная страница для оценки. Коммиты `3de95bc`…`486fb31`.
 - ✅ **1.10 — Овнерский обзор `/dashboard/admins-review`:** главная с таблицей N админов, KPI-балл текущего месяца, кнопка «Пересчитать сейчас» (батч и по одному). Детали админа с секциями кейсов и ledger, переключатель периода. Универсальная страница кейса (quant + qual) в read-only; для qual `awaiting_review` — три кнопки оценки. Редактор `kpi_config`. Ночной cron `nightly_kpi_snapshot_recalc` в 04:30 UTC под флагом `ENABLE_ADMIN_KPI_NIGHTLY=1`. Коммиты `59f523c`…`abfe8d1`.
+- ✅ **1.11 — Baseline v2 (multi-value snapshot):** 4 метрики морозятся при создании quantitative-кейса (`daily`, `week_avg`, `month_current`, `prev_month`). При HOLD-проверке пишется аналогичный review-snapshot (`review_v2`). **Правило D:** основной критерий success/failed = `month_current_at_review` vs `prev_month_at_baseline` (noise из `kpi_config`). Особые случаи: `is_early_month` (первые 7 дней месяца), `is_new_chatter` (нет prev_month → `awaiting_review`, ручная оценка овнером). Guardrail для v2 **не применяется** — контекст даёт полный снимок. UI: модалка создания — 4 карточки preview; карточка кейса — два ряда × 4 колонки («Точка отсчёта» / «Сейчас»), при `closed` — ряд «Итог». Feature flag `ENABLE_BASELINE_V2` (default `1`). Обратная совместимость: `baseline_version=v1` кейсы по старой логике. Коммиты `d90a92b`…`8d0eb9f`, задеплоено на prod.
 
 ---
 
 ## Активная задача
 
-**1.6 закрыто.** UX-полировка портала админа и овнерский обзор admins-review полностью завершены. Следующие приоритеты определит владелец.
+**Baseline v2 (1.11) задеплоен на prod.** Следующие приоритеты определит владелец.
 
 ### UX-полировка портала админа (завершена)
 
@@ -53,7 +54,9 @@
 - **Список чаттеров в `/admin-portal/chatters`** теперь показывает всех активных за месяц (смаппированные из daily + сироты из transactions), кнопка домаппинга открыта админам.
 - ✅ **KPI Daily синк:** 10-дневный пробел `chatter_kpi_daily` (2–11 июля 2026) был вызван отсутствием `ENABLE_KPI_DAILY` в Railway Variables. Выставлено `=1`, cron поднялся (`APScheduler started with 6 jobs`, KPI daily 04:00 UTC), backfill за пробел `2026-07-02`→`2026-07-10` выполнен (224 строки, 9 дней ok).
 - ✅ **Baseline при создании кейса:** fallback расширен с 7 до 30 дней (`1abb8ab`). Review-логика продолжает использовать 7 дней (параметризация `lookback_days`, `b70485a`).
-- ✅ **Baseline preview в модалке:** endpoint `GET /admin-portal/chatters/{om}/baseline-preview` показывает baseline до создания кейса; UI модалки блокирует создание quantitative-кейса если данных нет (`269cf0c`).
+- ✅ **Baseline preview в модалке:** endpoint `GET /admin-portal/chatters/{om}/baseline-preview` показывает baseline до создания кейса; UI модалки блокирует создание quantitative-кейса если данных нет (`269cf0c`). **v2:** preview отдаёт 4 значения + флаги (`8d0eb9f`).
+- ✅ **Baseline v2 на prod:** `d90a92b`…`8d0eb9f`, Railway + Vercel redeploy после push 11.07.2026. Схема v2 уже на shared Neon; `schema_patch` на старте Railway — idempotent, без ошибок (краткий 502 при рестарте, затем `/docs` 200, OpenAPI содержит `baseline_version`, `snapshot_type_v2`, 4 value-поля).
+- **Попутный фикс:** `%-d` в `strftime` для `get_case` заменён на кроссплатформенный `_day_month_label` (Windows-совместимость, `8d0eb9f`).
 - **`hold_days=0` разрешён** (для тестов и краевых случаев). В проде разумный минимум 7–14 дней; ограничение стоит на овнере через `kpi_config` при развитии.
 - **Тестовые qualitative-кейсы 39–43** на dev-БД (`qual_ui_seed_chatter_1`…`4`) — почистить перед демо, если нужно.
 - **CardinalityViolationError** в `schema_patch` на `INSERT INTO chatter_mmr` при переходе сезонов (Весна 2026 → Лето 2026): в логах видно WARNING, миграция не падает целиком, но патч скипается. Разобраться отдельно.
@@ -71,6 +74,7 @@
 | `ENABLE_KPI_DAILY` | Сбор `chatter_kpi_daily` (04:00 UTC). **На prod должно быть `=1`** |
 | `ENABLE_ADMIN_KPI` | HOLD-review cron + роутеры admin KPI (05:00 UTC) |
 | `ENABLE_ADMIN_KPI_NIGHTLY` | Ночной пересчёт `admin_kpi_snapshot` (04:30 UTC) |
+| `ENABLE_BASELINE_V2` | Multi-value baseline v2 при создании/review quantitative-кейсов. **На prod должно быть `=1`** (default в коде `1`, явно в Variables — для отката `0` → v1) |
 | `FILE_STORAGE_ROOT` | **`/data`** на Railway (Volume mount); локально `./local_storage` |
 | `ANTHROPIC_API_KEY` | AI-аналитик / watcher |
 
