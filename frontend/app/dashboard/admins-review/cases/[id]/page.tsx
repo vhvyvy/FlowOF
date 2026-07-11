@@ -1,6 +1,6 @@
 'use client'
 
-import { useState } from 'react'
+import { useMemo, useState } from 'react'
 import Link from 'next/link'
 import { useParams, useRouter } from 'next/navigation'
 import { useQueryClient } from '@tanstack/react-query'
@@ -13,10 +13,16 @@ import {
   RotateCcw,
 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
+import { Badge } from '@/components/ui/badge'
 import { Skeleton } from '@/components/ui/skeleton'
 import CaseActivities from '@/components/admin-portal/CaseActivities'
 import api, { formatApiError } from '@/lib/api'
-import { useOwnerQualitativeCase } from '@/lib/hooks/useOwnerQualitativeCase'
+import { useOwnerCaseDetail } from '@/lib/hooks/useOwnerCaseDetail'
+import {
+  CASE_TYPE_LABELS,
+  METRIC_LABELS,
+  ledgerEventLabel,
+} from '@/lib/adminReviewLabels'
 import {
   CHANGED_BY_LABEL,
   PRIORITY_LABELS,
@@ -35,13 +41,57 @@ function Section({ title, children }: { title: string; children: React.ReactNode
   )
 }
 
-export default function OwnerQualitativeCasePage() {
+function ledgerPointsClass(points: number): string {
+  if (points > 0) return 'text-emerald-400'
+  if (points < 0) return 'text-red-400'
+  return 'text-slate-400'
+}
+
+function formatLedgerDate(iso: string): string {
+  return new Date(iso).toLocaleString('ru-RU', {
+    day: '2-digit',
+    month: '2-digit',
+    year: 'numeric',
+    hour: '2-digit',
+    minute: '2-digit',
+  })
+}
+
+function pctChange(baseline: number | null, result: number | null): string | null {
+  if (baseline == null || result == null || baseline === 0) return null
+  const pct = ((result - baseline) / Math.abs(baseline)) * 100
+  return `${pct > 0 ? '+' : ''}${pct.toFixed(1)}%`
+}
+
+const RESULT_LABELS: Record<string, string> = {
+  success: 'Успех',
+  failed: 'Провал',
+  cancelled: 'Отменён',
+  guardrail: 'Guardrail',
+}
+
+function resultBadgeVariant(result: string): 'success' | 'danger' | 'warning' | 'secondary' {
+  if (result === 'success') return 'success'
+  if (result === 'failed' || result === 'guardrail') return 'danger'
+  if (result === 'cancelled') return 'warning'
+  return 'secondary'
+}
+
+function stageBadgeClass(stage: string): string {
+  if (stage === 'awaiting_review') return 'bg-violet-500/15 text-violet-300 ring-violet-500/30'
+  if (stage === 'closed') return 'bg-emerald-500/15 text-emerald-300 ring-emerald-500/30'
+  if (stage === 'cancelled') return 'bg-slate-600/40 text-slate-400 ring-slate-600/40'
+  if (stage === 'hold') return 'bg-amber-500/15 text-amber-300 ring-amber-500/30'
+  return 'bg-slate-700/60 text-slate-300 ring-slate-600/40'
+}
+
+export default function OwnerCaseDetailPage() {
   const params = useParams()
   const router = useRouter()
   const qc = useQueryClient()
   const caseId = Number(params.id)
 
-  const { data: c, isLoading, error } = useOwnerQualitativeCase(caseId)
+  const { data: c, isLoading, error } = useOwnerCaseDetail(caseId)
 
   const [confirmAction, setConfirmAction] = useState<'success' | 'failed' | null>(null)
   const [returnOpen, setReturnOpen] = useState(false)
@@ -52,10 +102,24 @@ export default function OwnerQualitativeCasePage() {
   const commentLen = returnComment.trim().length
   const returnValid = commentLen >= 10 && commentLen <= 500
 
+  const ledgerTotal = useMemo(
+    () => (c?.ledger ?? []).reduce((sum, e) => sum + e.points, 0),
+    [c?.ledger],
+  )
+
+  const qualLedgerPoints = useMemo(() => {
+    if (!c) return null
+    const qual = c.ledger.filter(
+      (e) => e.event_type === 'qualitative_success' || e.event_type === 'qualitative_failed',
+    )
+    if (qual.length === 0) return ledgerTotal
+    return qual[qual.length - 1].points
+  }, [c, ledgerTotal])
+
   async function afterAction() {
     await qc.invalidateQueries({ queryKey: ['pending-qualitative-list'] })
     await qc.invalidateQueries({ queryKey: ['pending-qualitative-count'] })
-    await qc.invalidateQueries({ queryKey: ['owner-qualitative-case', caseId] })
+    await qc.invalidateQueries({ queryKey: ['owner-case-detail', caseId] })
     router.push('/dashboard/admins-review/pending')
   }
 
@@ -108,16 +172,21 @@ export default function OwnerQualitativeCasePage() {
     return (
       <div className="p-6 max-w-3xl mx-auto">
         <Link
-          href="/dashboard/admins-review/pending"
+          href="/dashboard/admins-review"
           className="inline-flex items-center gap-1.5 text-sm text-slate-400 hover:text-slate-200 mb-4"
         >
-          <ArrowLeft className="h-4 w-4" /> К списку
+          <ArrowLeft className="h-4 w-4" /> К обзору
         </Link>
         <p className="text-sm text-red-400">Кейс не найден или недоступен</p>
       </div>
     )
   }
 
+  const isQual = c.case_type === 'qualitative'
+  const typeInline = isQual
+    ? c.category ?? '—'
+    : METRIC_LABELS[c.metric_type ?? ''] ?? c.metric_type ?? '—'
+  const pct = !isQual ? pctChange(c.baseline_value, c.result_value) : null
   const sentLabel = c.sent_for_review_at
     ? formatSentForReviewDisplay(c.sent_for_review_at)
     : null
@@ -127,73 +196,101 @@ export default function OwnerQualitativeCasePage() {
       {/* Header */}
       <div>
         <Link
-          href="/dashboard/admins-review/pending"
+          href="/dashboard/admins-review"
           className="inline-flex items-center gap-1.5 text-sm text-slate-400 hover:text-slate-200 mb-3"
         >
-          <ArrowLeft className="h-4 w-4" /> К списку
+          <ArrowLeft className="h-4 w-4" /> К обзору
         </Link>
-        <div className="flex items-start justify-between gap-4">
-          <div>
-            <h1 className="text-xl font-bold text-slate-100">
-              {STAGE_LABELS_OWNER[c.stage] ?? c.stage}
-            </h1>
-            {sentLabel && c.stage === 'awaiting_review' && (
-              <p className="text-sm text-slate-400 mt-0.5">Отправлено {sentLabel}</p>
-            )}
-            {c.closed_at && c.stage === 'closed' && (
-              <p className="text-sm text-slate-400 mt-0.5">Закрыт {fmtRuDate(c.closed_at)}</p>
-            )}
+        <div className="flex flex-col sm:flex-row sm:items-start sm:justify-between gap-3">
+          <div className="min-w-0">
+            <div className="flex items-center gap-2 flex-wrap">
+              <h1 className="text-xl font-bold text-slate-100 truncate">
+                {c.chatter_display_name || c.om_user_id}
+              </h1>
+              <span
+                className={cn(
+                  'text-[10px] font-semibold px-2 py-0.5 rounded-full ring-1',
+                  isQual
+                    ? 'bg-violet-500/15 text-violet-300 ring-violet-500/30'
+                    : 'bg-slate-600/50 text-slate-300 ring-slate-500/40',
+                )}
+              >
+                {CASE_TYPE_LABELS[c.case_type]}
+              </span>
+              <span className="text-sm text-slate-400">{typeInline}</span>
+            </div>
+            <p className="text-xs text-slate-500 mt-0.5">{c.om_user_id}</p>
           </div>
-          <span
-            className={cn(
-              'text-xs font-semibold px-2.5 py-1 rounded-full shrink-0',
-              c.stage === 'awaiting_review'
-                ? 'bg-violet-500/15 text-violet-300'
-                : c.stage === 'closed'
-                  ? 'bg-green-500/15 text-green-300'
-                  : 'bg-slate-700 text-slate-300',
-            )}
-          >
-            {STAGE_LABELS_OWNER[c.stage] ?? c.stage}
-          </span>
+          <div className="flex items-center gap-2 shrink-0 flex-wrap">
+            <span
+              className={cn(
+                'text-xs font-semibold px-2.5 py-1 rounded-full ring-1',
+                stageBadgeClass(c.stage),
+              )}
+            >
+              {STAGE_LABELS_OWNER[c.stage] ?? c.stage}
+            </span>
+            <Badge variant="secondary" className="text-[10px]">
+              {PRIORITY_LABELS[c.priority] ?? c.priority}
+            </Badge>
+          </div>
         </div>
       </div>
 
-      {/* Case info */}
-      <Section title="Кейс">
+      {/* Information */}
+      <Section title="Информация">
         <dl className="grid grid-cols-1 sm:grid-cols-2 gap-x-4 gap-y-3 text-sm">
-          <div>
-            <dt className="text-xs text-slate-500">Чаттер</dt>
-            <dd className="text-slate-100 font-medium mt-0.5">{c.chatter_display_name}</dd>
-            <dd className="text-xs text-slate-500">{c.om_user_id}</dd>
-          </div>
-          <div>
-            <dt className="text-xs text-slate-500">Категория</dt>
-            <dd className="mt-0.5">
-              <span className="text-xs font-medium px-2 py-0.5 rounded-full bg-violet-500/15 text-violet-300">
-                {c.category}
-              </span>
-            </dd>
-          </div>
-          <div>
-            <dt className="text-xs text-slate-500">Приоритет</dt>
-            <dd className="text-slate-200 mt-0.5">{PRIORITY_LABELS[c.priority] ?? c.priority}</dd>
-          </div>
-          <div>
-            <dt className="text-xs text-slate-500">HOLD-период</dt>
-            <dd className="text-slate-200 mt-0.5">
-              {fmtRuDate(c.hold_start_date)} → {fmtRuDate(c.hold_end_date)}
-            </dd>
-          </div>
           <div className="sm:col-span-2">
-            <dt className="text-xs text-slate-500">Отправил</dt>
-            <dd className="text-slate-200 mt-0.5">
-              {c.admin.name || 'Администратор'}
-              {sentLabel && (
-                <span className="text-slate-500"> · {sentLabel}</span>
+            <dt className="text-xs text-slate-500">Ведёт</dt>
+            <dd className="mt-0.5 flex items-center gap-2 flex-wrap">
+              <span className="text-slate-100">
+                {c.admin.name || '—'} <span className="text-slate-500">#{c.admin.id}</span>
+              </span>
+              {c.admin.shift_name && (
+                <Badge variant="secondary" className="text-[10px]">
+                  {c.admin.shift_name}
+                </Badge>
               )}
             </dd>
           </div>
+          <div>
+            <dt className="text-xs text-slate-500">Открыт</dt>
+            <dd className="text-slate-200 mt-0.5">{fmtRuDate(c.opened_at)}</dd>
+          </div>
+          {c.hold_days != null && (
+            <div>
+              <dt className="text-xs text-slate-500">HOLD</dt>
+              <dd className="text-slate-200 mt-0.5">{c.hold_days} дней</dd>
+            </div>
+          )}
+          {c.review_date && (
+            <div>
+              <dt className="text-xs text-slate-500">Ревью до</dt>
+              <dd className="text-slate-200 mt-0.5">{fmtRuDate(c.review_date)}</dd>
+            </div>
+          )}
+          {c.closed_at && (
+            <div>
+              <dt className="text-xs text-slate-500">Закрыт</dt>
+              <dd className="text-slate-200 mt-0.5">{fmtRuDate(c.closed_at)}</dd>
+            </div>
+          )}
+          {c.result && (
+            <div>
+              <dt className="text-xs text-slate-500">Результат</dt>
+              <dd className="mt-0.5">
+                <Badge variant={resultBadgeVariant(c.result)}>
+                  {RESULT_LABELS[c.result] ?? c.result}
+                </Badge>
+              </dd>
+            </div>
+          )}
+          {sentLabel && c.stage === 'awaiting_review' && (
+            <div className="sm:col-span-2">
+              <dt className="text-xs text-slate-500">На оценке</dt>
+              <dd className="text-slate-400 mt-0.5 text-xs">Отправлено {sentLabel}</dd>
+            </div>
+          )}
         </dl>
       </Section>
 
@@ -209,8 +306,88 @@ export default function OwnerQualitativeCasePage() {
         </div>
       </Section>
 
-      {/* History timeline */}
-      <Section title="История переходов">
+      {/* Metrics (quantitative only) */}
+      {!isQual && (
+        <Section title="Метрики">
+          <dl className="grid grid-cols-1 sm:grid-cols-3 gap-4 text-sm">
+            <div>
+              <dt className="text-xs text-slate-500">Baseline</dt>
+              <dd className="text-slate-100 font-medium tabular-nums mt-0.5">
+                {c.baseline_value != null ? c.baseline_value.toFixed(2) : '—'}
+              </dd>
+            </div>
+            <div>
+              <dt className="text-xs text-slate-500">Result</dt>
+              <dd className="text-slate-100 font-medium tabular-nums mt-0.5">
+                {c.result_value != null ? c.result_value.toFixed(2) : '—'}
+              </dd>
+            </div>
+            <div>
+              <dt className="text-xs text-slate-500">Изменение</dt>
+              <dd
+                className={cn(
+                  'font-medium tabular-nums mt-0.5',
+                  pct == null
+                    ? 'text-slate-500'
+                    : pct.startsWith('+')
+                      ? 'text-emerald-400'
+                      : pct.startsWith('-')
+                        ? 'text-red-400'
+                        : 'text-slate-300',
+                )}
+              >
+                {pct ?? '—'}
+              </dd>
+            </div>
+          </dl>
+        </Section>
+      )}
+
+      {/* Ledger */}
+      <Section title="Ledger по этому кейсу">
+        {c.ledger.length === 0 ? (
+          <p className="text-sm text-slate-500">Нет событий</p>
+        ) : (
+          <>
+            <div className="space-y-2">
+              {c.ledger.map((e) => (
+                <div
+                  key={e.id}
+                  className="flex items-start justify-between gap-3 py-2 border-b border-slate-700/30 last:border-0"
+                >
+                  <div className="min-w-0">
+                    <p className="text-sm text-slate-200">{ledgerEventLabel(e.event_type)}</p>
+                    {e.notes && (
+                      <p className="text-xs text-slate-500 mt-0.5 truncate">{e.notes}</p>
+                    )}
+                    <p className="text-xs text-slate-600 mt-0.5">{formatLedgerDate(e.created_at)}</p>
+                  </div>
+                  <span
+                    className={cn(
+                      'text-sm font-medium tabular-nums shrink-0',
+                      ledgerPointsClass(e.points),
+                    )}
+                  >
+                    {e.points > 0 ? '+' : ''}
+                    {e.points.toFixed(1)}
+                  </span>
+                </div>
+              ))}
+            </div>
+            <p className="text-xs text-slate-500 pt-2 border-t border-slate-700/30">
+              Итого по кейсу: {c.ledger.length}{' '}
+              {c.ledger.length === 1 ? 'событие' : c.ledger.length < 5 ? 'события' : 'событий'},{' '}
+              <span className={cn('font-medium', ledgerPointsClass(ledgerTotal))}>
+                {ledgerTotal > 0 ? '+' : ''}
+                {ledgerTotal.toFixed(1)} очков
+              </span>
+            </p>
+          </>
+        )}
+      </Section>
+
+      {/* Stage history */}
+      <Section title="История стадий">
         {c.history.length === 0 ? (
           <p className="text-sm text-slate-500">Нет записей</p>
         ) : (
@@ -240,7 +417,7 @@ export default function OwnerQualitativeCasePage() {
         )}
       </Section>
 
-      {/* Activities read-only */}
+      {/* Activities */}
       <CaseActivities
         caseId={caseId}
         currentAdminId={0}
@@ -249,8 +426,8 @@ export default function OwnerQualitativeCasePage() {
         apiMode="owner"
       />
 
-      {/* Evaluation */}
-      {c.stage === 'awaiting_review' && (
+      {/* Evaluation (qualitative awaiting_review only) */}
+      {isQual && c.stage === 'awaiting_review' && (
         <Section title="Оценка">
           {actionError && (
             <div className="flex items-start gap-2 bg-red-500/10 border border-red-500/20 rounded-lg px-3 py-2">
@@ -292,27 +469,34 @@ export default function OwnerQualitativeCasePage() {
         </Section>
       )}
 
-      {/* Result (closed) */}
-      {c.stage === 'closed' && (
-        <Section title="Результат">
+      {/* Final status (closed qualitative) */}
+      {isQual && c.stage === 'closed' && (
+        <div
+          className={cn(
+            'rounded-xl border p-5 text-center',
+            c.result === 'success'
+              ? 'bg-emerald-500/10 border-emerald-500/30'
+              : 'bg-red-500/10 border-red-500/30',
+          )}
+        >
           <p
             className={cn(
-              'text-sm font-semibold',
+              'text-lg font-bold',
               c.result === 'success' ? 'text-emerald-300' : 'text-red-300',
             )}
           >
-            {c.result === 'success' ? 'Сработало (+5)' : 'Не помогло (-2)'}
+            {c.result === 'success' ? '✓ Сработало (+5)' : '✗ Не помогло (-2)'}
           </p>
-          {c.ledger_points != null && (
-            <p className="text-xs text-slate-500">
-              Очки в ledger: {c.ledger_points > 0 ? '+' : ''}
-              {c.ledger_points}
+          {c.closed_at && (
+            <p className="text-xs text-slate-500 mt-2">Закрыт {fmtRuDate(c.closed_at)}</p>
+          )}
+          {qualLedgerPoints != null && (
+            <p className="text-xs text-slate-400 mt-1">
+              Очки в ledger: {qualLedgerPoints > 0 ? '+' : ''}
+              {qualLedgerPoints.toFixed(1)}
             </p>
           )}
-          {c.closed_at && (
-            <p className="text-xs text-slate-500">Закрыт {fmtRuDate(c.closed_at)}</p>
-          )}
-        </Section>
+        </div>
       )}
 
       {/* Confirm close */}
@@ -375,9 +559,7 @@ export default function OwnerQualitativeCasePage() {
                 {commentLen} / 500
               </span>
             </div>
-            {actionError && (
-              <p className="text-xs text-red-400 mt-2">{actionError}</p>
-            )}
+            {actionError && <p className="text-xs text-red-400 mt-2">{actionError}</p>}
             <div className="flex gap-2 mt-4 justify-end">
               <Button
                 variant="outline"

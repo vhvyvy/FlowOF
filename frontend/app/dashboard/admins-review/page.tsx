@@ -124,7 +124,7 @@ export default function AdminsReviewPage() {
 
   async function handleRecalc() {
     try {
-      const result = await recalc.mutateAsync()
+      const result = await recalc.mutateAsync(undefined)
       setLastRecalcAt(new Date(result.cached_at).getTime())
       const n = result.recalculated
       const word = n === 1 ? 'админ' : n < 5 ? 'админа' : 'админов'

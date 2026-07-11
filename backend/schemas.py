@@ -475,6 +475,7 @@ CaseTypeLiteral = Literal["quantitative", "qualitative"]
 class OwnerAdminBrief(BaseModel):
     id: int
     name: str
+    shift_name: Optional[str] = None
 
 
 class StageHistoryItem(BaseModel):

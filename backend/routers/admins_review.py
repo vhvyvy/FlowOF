@@ -231,6 +231,9 @@ async def _build_owner_case_detail(
         )
     ).scalar_one_or_none()
     admin_user = await db.get(User, case.admin_id)
+    shift_map = await _fetch_shift_map(db, tenant_id)
+    admin_shift_id = getattr(admin_user, "admin_shift_id", None) if admin_user else None
+    shift_name = shift_map.get(admin_shift_id) if admin_shift_id else None
     diagnosis, plan = _parse_case_notes(case.notes)
     sent_at = await _stage_entered_at(db, case.id, "awaiting_review")
 
@@ -263,7 +266,11 @@ async def _build_owner_case_detail(
         id=case.id,
         case_type=case_type,
         tenant_id=case.tenant_id,
-        admin=OwnerAdminBrief(id=case.admin_id, name=_admin_display_name(admin_user)),
+        admin=OwnerAdminBrief(
+            id=case.admin_id,
+            name=_admin_display_name(admin_user),
+            shift_name=shift_name,
+        ),
         om_user_id=case.om_user_id,
         chatter_display_name=_resolve_chatter_display_name(case.om_user_id, mapping),
         category=case.category if case_type == "qualitative" else None,

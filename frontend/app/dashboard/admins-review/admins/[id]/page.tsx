@@ -262,7 +262,7 @@ export default function AdminDetailPage() {
             <p className="text-sm text-slate-500 mt-0.5">{admin.email}</p>
             {admin.shift_name && (
               <Badge
-                variant="outline"
+                variant="secondary"
                 className="mt-2 text-xs border-slate-600 text-slate-300"
               >
                 {admin.shift_name}

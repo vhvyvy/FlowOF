@@ -25,6 +25,7 @@ import {
   ShieldCheck,
   ClipboardCheck,
   LayoutList,
+  Settings2,
 } from 'lucide-react'
 import { useState } from 'react'
 import { cn } from '@/lib/utils'
@@ -58,6 +59,12 @@ const NAV_ITEMS = [
     icon: ClipboardCheck,
     isActive: (p: string) =>
       p === '/dashboard/admins-review/pending' || p.startsWith('/dashboard/admins-review/cases/'),
+  },
+  {
+    href: '/dashboard/admins-review/config',
+    label: 'Настройки KPI',
+    icon: Settings2,
+    exact: true,
   },
   { href: '/dashboard/ranking', label: 'Рейтинг', icon: Trophy },
   { href: '/dashboard/reports', label: 'Отчёты', icon: LineChart },

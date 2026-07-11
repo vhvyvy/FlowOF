@@ -19,3 +19,19 @@ export const CASE_TYPE_LABELS: Record<string, string> = {
   quantitative: 'Количественный',
   qualitative: 'Качественный',
 }
+
+export const METRIC_LABELS: Record<string, string> = {
+  ppv_open_rate: 'Open Rate',
+  rpc: 'RPC',
+  apv: 'APV',
+  total_chats: 'Чаты',
+  revenue: 'Выручка',
+}
+
+export const GUARDRAIL_METRIC_OPTIONS = [
+  'ppv_open_rate',
+  'rpc',
+  'apv',
+  'total_chats',
+  'revenue',
+] as const
