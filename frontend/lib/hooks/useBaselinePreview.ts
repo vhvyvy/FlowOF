@@ -11,9 +11,16 @@ export type BaselineMetricType =
 export interface BaselinePreview {
   available: boolean
   lookback_days: number
+  baseline_version?: 'v1' | 'v2'
   value?: number
   snapshot_date?: string
   days_ago?: number
+  daily_value?: number | null
+  week_avg_value?: number | null
+  month_current_value?: number | null
+  prev_month_value?: number | null
+  is_new_chatter?: boolean
+  is_early_month?: boolean
 }
 
 export function useBaselinePreview(

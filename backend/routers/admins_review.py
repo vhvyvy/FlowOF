@@ -215,6 +215,9 @@ def _case_out_from_row(case: AdminCase, display_names: Optional[str]) -> CaseOut
         hold_days=_derive_hold_days(case),
         baseline_value=float(case.baseline_value) if case.baseline_value is not None else None,
         result_value=float(case.result_value) if case.result_value is not None else None,
+        baseline_version=case.baseline_version or "v1",
+        is_early_month=bool(case.is_early_month),
+        is_new_chatter=bool(case.is_new_chatter),
         notes=case.notes,
     )
 
@@ -284,6 +287,9 @@ async def _build_owner_case_detail(
         hold_days=_derive_hold_days(case),
         baseline_value=float(case.baseline_value) if case.baseline_value is not None else None,
         result_value=float(case.result_value) if case.result_value is not None else None,
+        baseline_version=case.baseline_version or "v1",
+        is_early_month=bool(case.is_early_month),
+        is_new_chatter=bool(case.is_new_chatter),
         diagnosis_text=diagnosis,
         action_plan=plan,
         history=[StageHistoryItem.from_orm(h) for h in hist_rows],

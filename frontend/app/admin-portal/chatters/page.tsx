@@ -15,6 +15,11 @@ import {
   type BaselineMetricType,
   useBaselinePreview,
 } from '@/lib/hooks/useBaselinePreview'
+import {
+  BaselinePreviewV2Cards,
+  BaselineV2Flags,
+} from '@/components/admin-portal/MetricV2Block'
+import { fmtMetricValue } from '@/lib/metricFormat'
 import { cn } from '@/lib/utils'
 
 // ── Types ─────────────────────────────────────────────────────────────────────
@@ -227,16 +232,31 @@ function CreateCaseModal({ chatter, onClose, onSuccess }: ModalProps) {
               {currentVal !== '—' && (
                 <span
                   className="text-sm font-semibold text-amber-300 shrink-0 cursor-help"
-                  title="Месячная агрегация. Baseline берётся из дневных данных."
+                  title={
+                    baselinePreview?.baseline_version === 'v2'
+                      ? 'Месячная агрегация — основная цифра точки отсчёта'
+                      : 'Месячная агрегация. Baseline берётся из дневных данных.'
+                  }
                   data-testid="month-metric-badge"
                 >
-                  Мес: {currentVal}
+                  {baselinePreview?.baseline_version === 'v2' ? 'Точка отсчёта' : 'Мес'}:{' '}
+                  {baselinePreview?.baseline_version === 'v2' && baselinePreview.month_current_value != null
+                    ? fmtMetricValue(metric, baselinePreview.month_current_value)
+                    : currentVal}
                 </span>
               )}
             </div>
             <div className="mt-2 min-h-[1.25rem]" data-testid="baseline-preview">
               {baselinePending ? (
                 <p className="text-xs text-slate-500">Проверяем данные…</p>
+              ) : baselinePreview?.available && baselinePreview.baseline_version === 'v2' ? (
+                <>
+                  <BaselinePreviewV2Cards metric={metric} preview={baselinePreview} />
+                  <BaselineV2Flags
+                    isEarlyMonth={baselinePreview.is_early_month}
+                    isNewChatter={baselinePreview.is_new_chatter}
+                  />
+                </>
               ) : baselinePreview?.available && baselinePreview.value != null && baselinePreview.snapshot_date ? (
                 <p className="text-xs text-emerald-400">
                   Baseline: {fmtBaselineValue(metric, baselinePreview.value)} на{' '}

@@ -525,6 +525,9 @@ class CaseOut(BaseModel):
     hold_days: Optional[int] = None
     baseline_value: Optional[float] = None
     result_value: Optional[float] = None
+    baseline_version: str = "v1"
+    is_early_month: bool = False
+    is_new_chatter: bool = False
     notes: Optional[str] = None
 
 
@@ -548,6 +551,9 @@ class OwnerCaseDetail(BaseModel):
     hold_days: Optional[int] = None
     baseline_value: Optional[float] = None
     result_value: Optional[float] = None
+    baseline_version: str = "v1"
+    is_early_month: bool = False
+    is_new_chatter: bool = False
     diagnosis_text: str
     action_plan: str
     history: list[StageHistoryItem]

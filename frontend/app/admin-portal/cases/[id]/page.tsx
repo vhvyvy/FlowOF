@@ -9,6 +9,7 @@ import { Skeleton } from '@/components/ui/skeleton'
 import api from '@/lib/api'
 import { getUserIdFromToken } from '@/lib/auth'
 import CaseActivities from '@/components/admin-portal/CaseActivities'
+import { MetricV2Block } from '@/components/admin-portal/MetricV2Block'
 import { cn } from '@/lib/utils'
 
 // ── Types ─────────────────────────────────────────────────────────────────────
@@ -16,9 +17,15 @@ import { cn } from '@/lib/utils'
 interface Snapshot {
   id: number
   snapshot_type: string
+  snapshot_type_v2?: string | null
   metric_type: string
   metric_value: number
+  daily_value?: number | null
+  week_avg_value?: number | null
+  month_current_value?: number | null
+  prev_month_value?: number | null
   snapshot_date: string
+  snapshot_as_of?: string | null
   source: string
 }
 
@@ -51,6 +58,9 @@ interface CaseDetail {
   review_date: string | null
   baseline_value: number | null
   result_value: number | null
+  baseline_version?: string
+  is_early_month?: boolean
+  is_new_chatter?: boolean
   notes: string | null
   snapshots: Snapshot[]
   history: HistoryEntry[]
@@ -562,8 +572,14 @@ export default function CaseDetailPage() {
     )
   }
 
-  const baselineSnap = c.snapshots.find(s => s.snapshot_type === 'baseline')
-  const resultSnap   = c.snapshots.find(s => s.snapshot_type === 'result')
+  const baselineSnap = c.snapshots.find(
+    s => s.snapshot_type === 'baseline' && (s.snapshot_type_v2 === 'baseline_v2' || !s.snapshot_type_v2),
+  ) ?? c.snapshots.find(s => s.snapshot_type === 'baseline')
+  const resultSnap = c.snapshots.find(
+    s => s.snapshot_type === 'result' && s.snapshot_type_v2 === 'review_v2',
+  ) ?? c.snapshots.find(s => s.snapshot_type === 'result')
+  const isV2 = (c.baseline_version ?? 'v1') === 'v2'
+  const isClosed = c.stage === 'closed'
 
   const diagnosisLines = (c.notes ?? '').split('\n')
   const chatterLine = diagnosisLines.find(l => l.startsWith('Чаттер:'))?.replace('Чаттер: ', '') ?? c.om_user_id
@@ -616,6 +632,50 @@ export default function CaseDetailPage() {
       {/* Metric overview: quantitative only */}
       {!isQualitative(c) && baselineSnap && c.metric_type && (
         <Section title="Метрика">
+          {isV2 && baselineSnap.snapshot_type_v2 === 'baseline_v2' ? (
+            <MetricV2Block
+              metric={c.metric_type}
+              isClosed={isClosed}
+              isEarlyMonth={c.is_early_month}
+              isNewChatter={c.is_new_chatter}
+              baseline={{
+                daily_value: baselineSnap.daily_value,
+                week_avg_value: baselineSnap.week_avg_value,
+                month_current_value: baselineSnap.month_current_value,
+                prev_month_value: baselineSnap.prev_month_value,
+                snapshot_date: baselineSnap.snapshot_date,
+                snapshot_as_of: baselineSnap.snapshot_as_of ?? baselineSnap.snapshot_date,
+              }}
+              now={
+                !isClosed
+                  ? (() => {
+                      const y = new Date()
+                      y.setDate(y.getDate() - 1)
+                      return {
+                        daily_value: c.today_metric?.value,
+                        week_avg_value: c.week_avg_metric?.value,
+                        month_current_value: c.month_metric?.value,
+                        prev_month_value: baselineSnap.prev_month_value,
+                        snapshot_date: y.toISOString().slice(0, 10),
+                        snapshot_as_of: new Date().toISOString().slice(0, 10),
+                      }
+                    })()
+                  : null
+              }
+              outcome={
+                isClosed && resultSnap
+                  ? {
+                      daily_value: resultSnap.daily_value,
+                      week_avg_value: resultSnap.week_avg_value,
+                      month_current_value: resultSnap.month_current_value,
+                      prev_month_value: resultSnap.prev_month_value,
+                      snapshot_date: resultSnap.snapshot_date,
+                      snapshot_as_of: resultSnap.snapshot_as_of ?? resultSnap.snapshot_date,
+                    }
+                  : null
+              }
+            />
+          ) : (
           <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
             {/* Baseline */}
             <div className="bg-slate-700/30 rounded-xl p-3">
@@ -675,11 +735,12 @@ export default function CaseDetailPage() {
               )}
             </div>
           </div>
+          )}
         </Section>
       )}
 
-      {/* Result snapshot (quantitative, review_due or closed) */}
-      {!isQualitative(c) && resultSnap && (
+      {/* Result snapshot (v1 quantitative, review_due or closed) */}
+      {!isQualitative(c) && !isV2 && resultSnap && (
         <Section title="Результат (текущее значение)">
           <div className="flex items-center gap-6 text-sm">
             <div>

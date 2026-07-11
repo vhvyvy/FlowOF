@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 from datetime import date, datetime, timedelta
 from decimal import Decimal
 from typing import Any, Literal, Optional
@@ -59,7 +60,12 @@ from services import case_activities as svc_activities
 from services.case_activities import CaseActivityNotFound, CaseActivityValidation
 from services import case_ledger as svc_ledger
 from services.admin_kpi_calc import recalc_admin_kpi_snapshot
-from services.case_baseline import BASELINE_LOOKBACK_DAYS, find_baseline_value, read_metric_at_date
+from services.case_baseline import (
+    BASELINE_LOOKBACK_DAYS,
+    collect_baseline_snapshot_v2,
+    find_baseline_value,
+    read_metric_at_date,
+)
 from services.case_review_service import check_review_due_cases
 from services.kpi_service import get_chatter_kpi
 
@@ -125,6 +131,9 @@ class CaseOut(BaseModel):
     baseline_value: Optional[float]
     target_value: Optional[float]
     result_value: Optional[float]
+    baseline_version: str = "v1"
+    is_early_month: bool = False
+    is_new_chatter: bool = False
     notes: Optional[str]
     created_at: datetime
 
@@ -147,6 +156,9 @@ class CaseOut(BaseModel):
             baseline_value=float(c.baseline_value) if c.baseline_value is not None else None,
             target_value=float(c.target_value) if c.target_value is not None else None,
             result_value=float(c.result_value) if c.result_value is not None else None,
+            baseline_version=c.baseline_version or "v1",
+            is_early_month=bool(c.is_early_month),
+            is_new_chatter=bool(c.is_new_chatter),
             notes=c.notes,
             created_at=c.created_at,
         )
@@ -160,6 +172,12 @@ class SnapshotOut(BaseModel):
     snapshot_date: date
     source: str
     created_at: datetime
+    snapshot_type_v2: Optional[str] = None
+    daily_value: Optional[float] = None
+    week_avg_value: Optional[float] = None
+    month_current_value: Optional[float] = None
+    prev_month_value: Optional[float] = None
+    snapshot_as_of: Optional[date] = None
 
     @classmethod
     def from_orm(cls, s: BaselineSnapshot) -> "SnapshotOut":
@@ -171,6 +189,14 @@ class SnapshotOut(BaseModel):
             snapshot_date=s.snapshot_date,
             source=s.source,
             created_at=s.created_at,
+            snapshot_type_v2=s.snapshot_type_v2,
+            daily_value=float(s.daily_value) if s.daily_value is not None else None,
+            week_avg_value=float(s.week_avg_value) if s.week_avg_value is not None else None,
+            month_current_value=(
+                float(s.month_current_value) if s.month_current_value is not None else None
+            ),
+            prev_month_value=float(s.prev_month_value) if s.prev_month_value is not None else None,
+            snapshot_as_of=s.snapshot_as_of,
         )
 
 
@@ -257,9 +283,22 @@ class CreateChatterMappingResponse(BaseModel):
 class BaselinePreviewOut(BaseModel):
     available: bool
     lookback_days: int
+    baseline_version: str = "v1"
     value: Optional[float] = None
     snapshot_date: Optional[date] = None
     days_ago: Optional[int] = None
+    daily_value: Optional[float] = None
+    week_avg_value: Optional[float] = None
+    month_current_value: Optional[float] = None
+    prev_month_value: Optional[float] = None
+    is_new_chatter: Optional[bool] = None
+    is_early_month: Optional[bool] = None
+
+
+def _baseline_v2_enabled() -> bool:
+    return os.getenv("ENABLE_BASELINE_V2", "1").strip().lower() not in (
+        "0", "false", "no", "off",
+    )
 
 
 class KpiSnapshotOut(BaseModel):
@@ -297,6 +336,15 @@ class KpiSnapshotOut(BaseModel):
 _OPEN_STAGES = ("detected", "in_progress", "hold", "review_due", "awaiting_review")
 
 _ACTIVITY_FILE_URL = "/api/v1/admin-portal/activities/files"
+
+
+def _day_month_label(d: date) -> str:
+    """Cross-platform day + short month (Windows lacks %-d)."""
+    return f"{d.day} {d.strftime('%b')}"
+
+
+def _day_only_label(d: date) -> str:
+    return str(d.day)
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -493,7 +541,7 @@ async def get_case(
         )
         today_metric = MetricPoint(
             value=float(today_val) if today_val is not None else None,
-            date_label=yesterday.strftime("%-d %b").lstrip("0") if today_val is not None else None,
+            date_label=_day_month_label(yesterday) if today_val is not None else None,
         )
 
         # ── week_avg_metric: average of last 7 available daily values ─────────────
@@ -506,8 +554,8 @@ async def get_case(
                 week_vals.append(float(v))
         if week_vals:
             avg = sum(week_vals) / len(week_vals)
-            start_day = (today - timedelta(days=7)).strftime("%-d")
-            end_day   = yesterday.strftime("%-d %b")
+            start_day = _day_only_label(today - timedelta(days=7))
+            end_day   = _day_month_label(yesterday)
             week_avg_metric = MetricPoint(
                 value=round(avg, 4),
                 date_label=f"{start_day}–{end_day}",
@@ -860,8 +908,40 @@ async def baseline_preview(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(require_admin),
 ):
-    """Предпросмотр baseline из daily-данных (без записи в БД). Только quantitative-метрики."""
+    """Предпросмотр baseline (v2: 4 значения; v1: одна точка). Без записи в БД."""
     tid = current_user.tenant_id
+
+    if _baseline_v2_enabled():
+        snap = await collect_baseline_snapshot_v2(
+            db, tid, om_user_id, metric_type, date.today()
+        )
+        if snap is None or snap.daily_value is None:
+            return BaselinePreviewOut(
+                available=False,
+                lookback_days=BASELINE_LOOKBACK_DAYS,
+                baseline_version="v2",
+            )
+        primary = snap.month_current_value or snap.daily_value
+        snap_date = snap.daily_date or date.today()
+        return BaselinePreviewOut(
+            available=True,
+            lookback_days=BASELINE_LOOKBACK_DAYS,
+            baseline_version="v2",
+            value=float(primary),
+            snapshot_date=snap_date,
+            days_ago=(date.today() - snap_date).days,
+            daily_value=float(snap.daily_value),
+            week_avg_value=float(snap.week_avg_value) if snap.week_avg_value is not None else None,
+            month_current_value=(
+                float(snap.month_current_value) if snap.month_current_value is not None else None
+            ),
+            prev_month_value=(
+                float(snap.prev_month_value) if snap.prev_month_value is not None else None
+            ),
+            is_new_chatter=snap.is_new_chatter,
+            is_early_month=snap.is_early_month,
+        )
+
     result = await find_baseline_value(db, tid, om_user_id, metric_type)
     if result is None:
         return BaselinePreviewOut(available=False, lookback_days=BASELINE_LOOKBACK_DAYS)
@@ -870,6 +950,7 @@ async def baseline_preview(
     return BaselinePreviewOut(
         available=True,
         lookback_days=BASELINE_LOOKBACK_DAYS,
+        baseline_version="v1",
         value=float(val),
         snapshot_date=snap_date,
         days_ago=days_ago,

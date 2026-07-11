@@ -35,6 +35,9 @@ export interface AdminCaseOut {
   hold_days: number | null
   baseline_value: number | null
   result_value: number | null
+  baseline_version?: string
+  is_early_month?: boolean
+  is_new_chatter?: boolean
   notes: string | null
 }
 
