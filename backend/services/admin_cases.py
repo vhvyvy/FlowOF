@@ -78,12 +78,13 @@ _CATEGORY_MAX_LEN = 100
 
 # ── FSM per case type ─────────────────────────────────────────────────────────
 _FSM_QUANTITATIVE: dict[str, list[str]] = {
-    "detected":    ["in_progress", "cancelled"],
-    "in_progress": ["hold", "cancelled"],
-    "hold":        ["review_due", "cancelled"],
-    "review_due":  ["closed"],
-    "closed":      [],
-    "cancelled":   [],
+    "detected":        ["in_progress", "cancelled"],
+    "in_progress":     ["hold", "cancelled"],
+    "hold":            ["review_due", "awaiting_review", "cancelled"],
+    "review_due":      ["closed"],
+    "awaiting_review": ["closed", "in_progress"],
+    "closed":          [],
+    "cancelled":       [],
 }
 
 _FSM_QUALITATIVE: dict[str, list[str]] = {
@@ -96,7 +97,9 @@ _FSM_QUALITATIVE: dict[str, list[str]] = {
 }
 
 # ── Stages that represent "open" (block duplicate case creation) ──────────────
-_OPEN_STAGES_QUANT: tuple[str, ...] = ("detected", "in_progress", "hold", "review_due")
+_OPEN_STAGES_QUANT: tuple[str, ...] = (
+    "detected", "in_progress", "hold", "review_due", "awaiting_review",
+)
 _OPEN_STAGES_QUAL: tuple[str, ...] = ("detected", "in_progress", "hold", "awaiting_review")
 _CLOSED_STAGES: frozenset[str] = frozenset({"closed", "cancelled"})
 

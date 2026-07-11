@@ -16,7 +16,11 @@ Public API
 
     collect_baseline_snapshot_v2(db, tenant_id, om_user_id, metric_type, target_date)
         → BaselineSnapshotV2Result | None
-        Collects 4-value snapshot for baseline v2 at case creation.
+        Collects 4 values + create-time flags at case creation.
+
+    collect_metric_snapshot_v2 / collect_review_snapshot_v2
+        → MetricSnapshotV2Values | None
+        Shared 4-value collection for baseline and HOLD review.
 """
 from __future__ import annotations
 
@@ -49,8 +53,20 @@ _METRIC_KPI_ATTR: dict[str, str] = {
 
 
 @dataclass
+class MetricSnapshotV2Values:
+    """Four metric values at a single point in time (no create-time flags)."""
+
+    daily_value: Decimal | None
+    daily_date: date | None
+    week_avg_value: Decimal | None
+    month_current_value: Decimal | None
+    prev_month_value: Decimal | None
+    snapshot_as_of: date
+
+
+@dataclass
 class BaselineSnapshotV2Result:
-    """Four-value baseline snapshot collected at a single point in time."""
+    """Four-value baseline snapshot collected at case creation."""
 
     daily_value: Decimal | None
     daily_date: date | None
@@ -327,16 +343,17 @@ async def freeze_baseline(
     return val, target, "system_from_daily"
 
 
-async def collect_baseline_snapshot_v2(
+async def collect_metric_snapshot_v2(
     db: AsyncSession,
     tenant_id: int,
     om_user_id: str,
     metric_type: str,
     target_date: date,
-) -> BaselineSnapshotV2Result | None:
+) -> MetricSnapshotV2Values | None:
     """
-    Collect 4 baseline values anchored to target_date.
+    Collect 4 metric values anchored to target_date.
     Returns None when daily_value cannot be found (30-day lookback).
+    Shared by baseline (create) and review (HOLD check) flows.
     """
     daily_result = await _find_daily_at_anchor(
         db, tenant_id, om_user_id, metric_type, target_date
@@ -348,7 +365,7 @@ async def collect_baseline_snapshot_v2(
 
     if daily_value is None:
         logger.warning(
-            "collect_baseline_snapshot_v2: no daily data — tenant=%s uid=%s metric=%s as_of=%s",
+            "collect_metric_snapshot_v2: no daily data — tenant=%s uid=%s metric=%s as_of=%s",
             tenant_id, om_user_id, metric_type, target_date,
         )
         return None
@@ -370,24 +387,74 @@ async def collect_baseline_snapshot_v2(
         db, tenant_id, om_user_id, metric_type, prev_year, prev_month
     )
 
-    is_early_month = target_date.day <= 7
-    is_new_chatter = prev_month_value is None
-
-    logger.info(
-        "collect_baseline_snapshot_v2: tenant=%s uid=%s metric=%s as_of=%s "
-        "daily=%s week_avg=%s month=%s prev_month=%s early=%s new=%s",
-        tenant_id, om_user_id, metric_type, target_date,
-        daily_value, week_avg_value, month_current_value, prev_month_value,
-        is_early_month, is_new_chatter,
-    )
-
-    return BaselineSnapshotV2Result(
+    return MetricSnapshotV2Values(
         daily_value=daily_value,
         daily_date=daily_date,
         week_avg_value=week_avg_value,
         month_current_value=month_current_value,
         prev_month_value=prev_month_value,
         snapshot_as_of=target_date,
+    )
+
+
+async def collect_baseline_snapshot_v2(
+    db: AsyncSession,
+    tenant_id: int,
+    om_user_id: str,
+    metric_type: str,
+    target_date: date,
+) -> BaselineSnapshotV2Result | None:
+    """
+    Collect 4 baseline values anchored to target_date.
+    Returns None when daily_value cannot be found (30-day lookback).
+    """
+    values = await collect_metric_snapshot_v2(
+        db, tenant_id, om_user_id, metric_type, target_date
+    )
+    if values is None:
+        return None
+
+    is_early_month = target_date.day <= 7
+    is_new_chatter = values.prev_month_value is None
+
+    logger.info(
+        "collect_baseline_snapshot_v2: tenant=%s uid=%s metric=%s as_of=%s "
+        "daily=%s week_avg=%s month=%s prev_month=%s early=%s new=%s",
+        tenant_id, om_user_id, metric_type, target_date,
+        values.daily_value, values.week_avg_value, values.month_current_value,
+        values.prev_month_value, is_early_month, is_new_chatter,
+    )
+
+    return BaselineSnapshotV2Result(
+        daily_value=values.daily_value,
+        daily_date=values.daily_date,
+        week_avg_value=values.week_avg_value,
+        month_current_value=values.month_current_value,
+        prev_month_value=values.prev_month_value,
+        snapshot_as_of=values.snapshot_as_of,
         is_early_month=is_early_month,
         is_new_chatter=is_new_chatter,
     )
+
+
+async def collect_review_snapshot_v2(
+    db: AsyncSession,
+    tenant_id: int,
+    om_user_id: str,
+    metric_type: str,
+    target_date: date | None = None,
+) -> MetricSnapshotV2Values | None:
+    """Symmetric 4-value snapshot at review time (same helpers as baseline v2)."""
+    as_of = target_date or date.today()
+    result = await collect_metric_snapshot_v2(
+        db, tenant_id, om_user_id, metric_type, as_of
+    )
+    if result is not None:
+        logger.info(
+            "collect_review_snapshot_v2: tenant=%s uid=%s metric=%s as_of=%s "
+            "daily=%s week_avg=%s month=%s prev_month=%s",
+            tenant_id, om_user_id, metric_type, as_of,
+            result.daily_value, result.week_avg_value,
+            result.month_current_value, result.prev_month_value,
+        )
+    return result
