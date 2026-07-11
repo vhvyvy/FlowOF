@@ -3,7 +3,7 @@ Freeze baseline for KPI Admin cases.
 
 Public API
 ----------
-    freeze_baseline(db, tenant_id, om_user_id, metric_type)
+    freeze_baseline(db, tenant_id, om_user_id, metric_type, lookback_days=30)
         → tuple[Decimal, date, str] | None
 
     read_metric_at_date(db, tenant_id, om_user_id, metric_type, target_date)
@@ -154,10 +154,12 @@ async def freeze_baseline(
     tenant_id: int,
     om_user_id: str,
     metric_type: str,
+    *,
+    lookback_days: int = BASELINE_LOOKBACK_DAYS,
 ) -> tuple[Decimal, date, str] | None:
     """
     Find the most recent day with data, scanning from yesterday up to
-    BASELINE_LOOKBACK_DAYS back.
+    lookback_days back (default: BASELINE_LOOKBACK_DAYS).
 
     Returns
     -------
@@ -165,7 +167,7 @@ async def freeze_baseline(
     """
     names = await _display_names(db, tenant_id, om_user_id)
 
-    for days_back in range(1, BASELINE_LOOKBACK_DAYS + 1):
+    for days_back in range(1, lookback_days + 1):
         target = date.today() - timedelta(days=days_back)
         try:
             val = await _compute_metric(db, tenant_id, om_user_id, metric_type, target, names)
@@ -184,6 +186,6 @@ async def freeze_baseline(
 
     logger.warning(
         "freeze_baseline: no data in %s days — tenant=%s uid=%s metric=%s",
-        BASELINE_LOOKBACK_DAYS, tenant_id, om_user_id, metric_type,
+        lookback_days, tenant_id, om_user_id, metric_type,
     )
     return None

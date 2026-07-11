@@ -34,6 +34,9 @@ from schema_patch import seed_default_kpi_config
 from services.admin_cases import close_case, transition_stage
 from services.case_baseline import freeze_baseline, read_metric_at_date
 
+# Short window for HOLD review: current metric, not historical baseline search
+REVIEW_LOOKBACK_DAYS = 7
+
 logger = logging.getLogger("flowof.case_review")
 
 
@@ -136,7 +139,8 @@ async def _check_guardrails(
 
             # Current guardrail metric value
             g_current_result = await freeze_baseline(
-                db, case.tenant_id, case.om_user_id, g_metric
+                db, case.tenant_id, case.om_user_id, g_metric,
+                lookback_days=REVIEW_LOOKBACK_DAYS,
             )
             if g_current_result is None:
                 logger.debug(
@@ -220,19 +224,26 @@ async def check_review_due_cases(db: AsyncSession, tenant_id: int) -> dict:
 
             # 2. Current metric value
             current_result = await freeze_baseline(
-                db, case.tenant_id, case.om_user_id, case.metric_type
+                db, case.tenant_id, case.om_user_id, case.metric_type,
+                lookback_days=REVIEW_LOOKBACK_DAYS,
             )
 
-            # 3. No current data → extend review_date +3 days
+            # 3. No current data in review window → review_due, admin decides
             if current_result is None:
-                case.review_date = (case.review_date or today) + timedelta(days=3)
-                await db.flush()
-                await db.commit()
-                stats["extended"] += 1
-                logger.info(
-                    "check_review: case=%s no current data, extended to %s",
-                    case.id, case.review_date,
+                logger.warning(
+                    "check_review: case=%s no metric data in %s-day window → review_due",
+                    case.id, REVIEW_LOOKBACK_DAYS,
                 )
+                await transition_stage(
+                    db, case.id, "review_due",
+                    changed_by="system",
+                    notes=(
+                        f"Нет данных метрики за последние {REVIEW_LOOKBACK_DAYS} дней. "
+                        "Требует решения администратора."
+                    ),
+                )
+                await db.commit()
+                stats["needs_review"] += 1
                 continue
 
             current_value, *_ = current_result
