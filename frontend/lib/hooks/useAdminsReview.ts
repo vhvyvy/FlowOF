@@ -54,15 +54,23 @@ export function useAdminsReview() {
 export function useRecalcSnapshots() {
   const qc = useQueryClient()
   return useMutation({
-    mutationFn: async () => {
+    mutationFn: async (adminId?: number) => {
       const res = await api.post<RecalcSnapshotsResponse>(
         '/api/v1/dashboard/admins-review/recalc-snapshots',
+        undefined,
+        adminId != null ? { params: { admin_id: adminId } } : undefined,
       )
       return res.data
     },
-    onSuccess: () => {
+    onSuccess: (_data, adminId) => {
       qc.invalidateQueries({ queryKey: ['admins-review'] })
       qc.invalidateQueries({ queryKey: ['admins-list'] })
+      if (adminId != null) {
+        qc.invalidateQueries({ queryKey: ['admin-detail', adminId] })
+        qc.invalidateQueries({ queryKey: ['admin-cases', adminId] })
+        qc.invalidateQueries({ queryKey: ['admin-ledger', adminId] })
+        qc.invalidateQueries({ queryKey: ['admin-kpi-history', adminId] })
+      }
     },
   })
 }

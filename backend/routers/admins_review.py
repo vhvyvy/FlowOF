@@ -358,6 +358,22 @@ class AdminsReviewResponse(BaseModel):
     detect_result_ratio_threshold: int = 15
 
 
+class AdminDetailAdmin(BaseModel):
+    id: int
+    name: Optional[str]
+    email: str
+    admin_shift_id: Optional[int]
+    shift_name: Optional[str]
+
+
+class AdminDetailResponse(BaseModel):
+    admin: AdminDetailAdmin
+    current_kpi: AdminKpiSummary
+    is_calibration: bool
+    open_cases_count: int
+    detect_result_ratio_threshold: int
+
+
 class KpiConfigOut(BaseModel):
     id: int
     metric_type: str
@@ -437,6 +453,98 @@ async def _detect_result_ratio_threshold(
     return cfg.detect_to_result_ratio_min if cfg else 15
 
 
+def _kpi_summary_from_snapshot(snap: Optional[AdminKpiSnapshot]) -> AdminKpiSummary:
+    if snap is None:
+        return AdminKpiSummary()
+    return AdminKpiSummary(
+        cases_opened=snap.cases_opened,
+        cases_closed_success=snap.cases_closed_success,
+        cases_closed_failed=snap.cases_closed_failed,
+        cases_cancelled=snap.cases_cancelled,
+        guardrail_hits=snap.guardrail_hits,
+        total_points=float(snap.total_points),
+        detect_result_ratio=(
+            float(snap.detect_result_ratio)
+            if snap.detect_result_ratio is not None
+            else None
+        ),
+        is_calibration=snap.is_calibration,
+    )
+
+
+async def _fetch_shift_map(db: AsyncSession, tenant_id: int) -> dict[int, str]:
+    rows = (
+        await db.execute(
+            text("SELECT id, name FROM shifts_catalog WHERE tenant_id = :tid"),
+            {"tid": tenant_id},
+        )
+    ).fetchall()
+    return {r[0]: r[1] for r in rows}
+
+
+async def _fetch_open_counts(
+    db: AsyncSession, tenant_id: int, admin_ids: list[int]
+) -> dict[int, int]:
+    if not admin_ids:
+        return {}
+    rows = (
+        await db.execute(
+            text(
+                """
+                SELECT admin_id, COUNT(*) AS cnt
+                FROM admin_cases
+                WHERE tenant_id = :tid
+                  AND admin_id = ANY(:ids)
+                  AND stage = ANY(:stages)
+                GROUP BY admin_id
+                """
+            ),
+            {"tid": tenant_id, "ids": admin_ids, "stages": list(_OPEN_STAGES)},
+        )
+    ).fetchall()
+    return {r[0]: int(r[1]) for r in rows}
+
+
+async def _snapshots_for_month(
+    db: AsyncSession,
+    tenant_id: int,
+    admin_ids: list[int],
+    year: int,
+    month: int,
+) -> dict[int, AdminKpiSnapshot]:
+    if not admin_ids:
+        return {}
+    rows = (
+        await db.execute(
+            select(AdminKpiSnapshot).where(
+                AdminKpiSnapshot.tenant_id == tenant_id,
+                AdminKpiSnapshot.admin_id.in_(admin_ids),
+                AdminKpiSnapshot.period_year == year,
+                AdminKpiSnapshot.period_month == month,
+            )
+        )
+    ).scalars().all()
+    return {s.admin_id: s for s in rows}
+
+
+def _admin_list_item(
+    admin: User,
+    kpi: AdminKpiSummary,
+    open_cases_count: int,
+    shift_map: dict[int, str],
+) -> AdminListItem:
+    admin_shift_id = getattr(admin, "admin_shift_id", None)
+    return AdminListItem(
+        id=admin.id,
+        name=admin.full_name,
+        email=admin.email,
+        admin_shift_id=admin_shift_id,
+        shift_name=shift_map.get(admin_shift_id) if admin_shift_id else None,
+        current_month_kpi=kpi,
+        open_cases_count=open_cases_count,
+    )
+
+
 # ── GET /admins ───────────────────────────────────────────────────────────────
 
 @router.get("/admins", response_model=AdminsReviewResponse)
@@ -471,75 +579,59 @@ async def list_admins(
         )
 
     admin_ids = [a.id for a in admins]
+    snaps = await _snapshots_for_month(db, tid, admin_ids, year, month)
+    open_counts = await _fetch_open_counts(db, tid, admin_ids)
+    shift_map = await _fetch_shift_map(db, tid)
 
-    # Current month KPI snapshots
-    snaps_rows = (
-        await db.execute(
-            select(AdminKpiSnapshot).where(
-                AdminKpiSnapshot.tenant_id == tid,
-                AdminKpiSnapshot.admin_id.in_(admin_ids),
-                AdminKpiSnapshot.period_year == year,
-                AdminKpiSnapshot.period_month == month,
-            )
+    items = [
+        _admin_list_item(
+            admin,
+            _kpi_summary_from_snapshot(snaps.get(admin.id)),
+            open_counts.get(admin.id, 0),
+            shift_map,
         )
-    ).scalars().all()
-    snaps: dict[int, AdminKpiSnapshot] = {s.admin_id: s for s in snaps_rows}
-
-    # Open case counts per admin
-    open_counts_rows = (
-        await db.execute(
-            text(
-                """
-                SELECT admin_id, COUNT(*) AS cnt
-                FROM admin_cases
-                WHERE tenant_id = :tid
-                  AND admin_id = ANY(:ids)
-                  AND stage = ANY(:stages)
-                GROUP BY admin_id
-                """
-            ),
-            {"tid": tid, "ids": admin_ids, "stages": list(_OPEN_STAGES)},
-        )
-    ).fetchall()
-    open_counts: dict[int, int] = {r[0]: int(r[1]) for r in open_counts_rows}
-
-    # Shift names via shift catalog
-    shift_names_rows = (
-        await db.execute(
-            text("SELECT id, name FROM shifts_catalog WHERE tenant_id = :tid"),
-            {"tid": tid},
-        )
-    ).fetchall()
-    shift_map: dict[int, str] = {r[0]: r[1] for r in shift_names_rows}
-
-    items: list[AdminListItem] = []
-    for admin in admins:
-        snap = snaps.get(admin.id)
-        kpi = AdminKpiSummary(
-            cases_opened=snap.cases_opened if snap else 0,
-            cases_closed_success=snap.cases_closed_success if snap else 0,
-            cases_closed_failed=snap.cases_closed_failed if snap else 0,
-            cases_cancelled=snap.cases_cancelled if snap else 0,
-            guardrail_hits=snap.guardrail_hits if snap else 0,
-            total_points=float(snap.total_points) if snap else 0.0,
-            detect_result_ratio=float(snap.detect_result_ratio) if snap and snap.detect_result_ratio is not None else None,
-            is_calibration=snap.is_calibration if snap else False,
-        )
-        admin_shift_id = getattr(admin, "admin_shift_id", None)
-        items.append(
-            AdminListItem(
-                id=admin.id,
-                name=admin.full_name,
-                email=admin.email,
-                admin_shift_id=admin_shift_id,
-                shift_name=shift_map.get(admin_shift_id) if admin_shift_id else None,
-                current_month_kpi=kpi,
-                open_cases_count=open_counts.get(admin.id, 0),
-            )
-        )
+        for admin in admins
+    ]
 
     return AdminsReviewResponse(
         admins=items,
+        detect_result_ratio_threshold=ratio_threshold,
+    )
+
+
+# ── GET /admins/{admin_id} ────────────────────────────────────────────────────
+
+@router.get("/admins/{admin_id}", response_model=AdminDetailResponse)
+async def get_admin_detail(
+    admin_id: int,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_owner),
+):
+    """Профиль администратора + KPI текущего месяца."""
+    tid = current_user.tenant_id
+    today = date.today()
+    year, month = today.year, today.month
+
+    admin = await _get_tenant_admin_or_404(db, tid, admin_id)
+    ratio_threshold = await _detect_result_ratio_threshold(db, tid)
+    snaps = await _snapshots_for_month(db, tid, [admin_id], year, month)
+    open_counts = await _fetch_open_counts(db, tid, [admin_id])
+    shift_map = await _fetch_shift_map(db, tid)
+
+    kpi = _kpi_summary_from_snapshot(snaps.get(admin_id))
+    admin_shift_id = getattr(admin, "admin_shift_id", None)
+
+    return AdminDetailResponse(
+        admin=AdminDetailAdmin(
+            id=admin.id,
+            name=admin.full_name,
+            email=admin.email,
+            admin_shift_id=admin_shift_id,
+            shift_name=shift_map.get(admin_shift_id) if admin_shift_id else None,
+        ),
+        current_kpi=kpi,
+        is_calibration=kpi.is_calibration,
+        open_cases_count=open_counts.get(admin_id, 0),
         detect_result_ratio_threshold=ratio_threshold,
     )
 
