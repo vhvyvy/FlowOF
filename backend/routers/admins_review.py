@@ -353,6 +353,11 @@ class AdminListItem(BaseModel):
     open_cases_count: int
 
 
+class AdminsReviewResponse(BaseModel):
+    admins: list[AdminListItem]
+    detect_result_ratio_threshold: int = 15
+
+
 class KpiConfigOut(BaseModel):
     id: int
     metric_type: str
@@ -418,9 +423,23 @@ class KpiSnapshotHistoryItem(BaseModel):
         )
 
 
+async def _detect_result_ratio_threshold(
+    db: AsyncSession, tenant_id: int
+) -> int:
+    cfg = (
+        await db.execute(
+            select(KpiConfig).where(
+                KpiConfig.tenant_id == tenant_id,
+                KpiConfig.metric_type == "revenue",
+            )
+        )
+    ).scalar_one_or_none()
+    return cfg.detect_to_result_ratio_min if cfg else 15
+
+
 # ── GET /admins ───────────────────────────────────────────────────────────────
 
-@router.get("/admins", response_model=list[AdminListItem])
+@router.get("/admins", response_model=AdminsReviewResponse)
 async def list_admins(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(require_owner),
@@ -432,6 +451,7 @@ async def list_admins(
     tid = current_user.tenant_id
     today = date.today()
     year, month = today.year, today.month
+    ratio_threshold = await _detect_result_ratio_threshold(db, tid)
 
     # All admins in this tenant
     admins = (
@@ -445,7 +465,10 @@ async def list_admins(
     ).scalars().all()
 
     if not admins:
-        return []
+        return AdminsReviewResponse(
+            admins=[],
+            detect_result_ratio_threshold=ratio_threshold,
+        )
 
     admin_ids = [a.id for a in admins]
 
@@ -515,7 +538,10 @@ async def list_admins(
             )
         )
 
-    return items
+    return AdminsReviewResponse(
+        admins=items,
+        detect_result_ratio_threshold=ratio_threshold,
+    )
 
 
 # ── GET /admins/{admin_id}/cases ──────────────────────────────────────────────

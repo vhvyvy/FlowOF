@@ -50,7 +50,9 @@ interface Shift {
 
 async function fetchAdmins(): Promise<AdminUser[]> {
   const res = await api.get('/api/v1/dashboard/admins-review/admins')
-  return Array.isArray(res.data) ? res.data : (res.data.items ?? [])
+  const data = res.data
+  if (Array.isArray(data)) return data
+  return data.admins ?? []
 }
 
 async function fetchInvites(): Promise<Invite[]> {

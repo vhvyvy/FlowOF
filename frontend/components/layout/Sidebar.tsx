@@ -24,6 +24,7 @@ import {
   Brain,
   ShieldCheck,
   ClipboardCheck,
+  LayoutList,
 } from 'lucide-react'
 import { useState } from 'react'
 import { cn } from '@/lib/utils'
@@ -44,7 +45,20 @@ const NAV_ITEMS = [
   { href: '/dashboard/catalog', label: 'Справочники', icon: BookOpen },
   { href: '/dashboard/chatter-accounts', label: 'Аккаунты', icon: UserCog },
   { href: '/dashboard/admins', label: 'Админы', icon: ShieldCheck },
-  { href: '/dashboard/admins-review/pending', label: 'На оценке', icon: ClipboardCheck, matchPrefix: '/dashboard/admins-review' },
+  {
+    href: '/dashboard/admins-review',
+    label: 'Обзор админов',
+    icon: LayoutList,
+    isActive: (p: string) =>
+      p === '/dashboard/admins-review' || p.startsWith('/dashboard/admins-review/admins/'),
+  },
+  {
+    href: '/dashboard/admins-review/pending',
+    label: 'На оценке',
+    icon: ClipboardCheck,
+    isActive: (p: string) =>
+      p === '/dashboard/admins-review/pending' || p.startsWith('/dashboard/admins-review/cases/'),
+  },
   { href: '/dashboard/ranking', label: 'Рейтинг', icon: Trophy },
   { href: '/dashboard/reports', label: 'Отчёты', icon: LineChart },
   { href: '/dashboard/lab', label: 'Лаборатория', icon: FlaskConical },
@@ -105,11 +119,11 @@ export function Sidebar() {
 
       {/* Navigation */}
       <nav className="flex-1 px-2 py-3 space-y-0.5 overflow-y-auto">
-        {NAV_ITEMS.map(({ href, label, icon: Icon, exact, matchPrefix }) => {
-          const active = exact
-            ? pathname === href
-            : matchPrefix
-              ? pathname.startsWith(matchPrefix)
+        {NAV_ITEMS.map(({ href, label, icon: Icon, exact, isActive }) => {
+          const active = isActive
+            ? isActive(pathname)
+            : exact
+              ? pathname === href
               : pathname.startsWith(href)
           const showPendingBadge =
             !collapsed && href === '/dashboard/admins-review/pending' && pendingCount > 0
