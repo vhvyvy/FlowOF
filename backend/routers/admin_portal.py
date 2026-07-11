@@ -13,6 +13,7 @@ GET    /cases/{case_id}             — детали + снапшоты + ист
 PATCH  /cases/{case_id}/stage       — сменить стадию
 POST   /cases/{case_id}/close       — закрыть кейс
 GET    /chatters                    — список чаттеров агентства + last metrics
+GET    /chatters/{om_user_id}/baseline-preview — предпросмотр baseline (quant)
 POST   /chatters/mappings            — создать маппинг чаттера (admin)
 POST   /cases/{case_id}/activities  — добавить активность (multipart)
 GET    /cases/{case_id}/activities  — лента активностей кейса
@@ -58,7 +59,7 @@ from services import case_activities as svc_activities
 from services.case_activities import CaseActivityNotFound, CaseActivityValidation
 from services import case_ledger as svc_ledger
 from services.admin_kpi_calc import recalc_admin_kpi_snapshot
-from services.case_baseline import read_metric_at_date
+from services.case_baseline import BASELINE_LOOKBACK_DAYS, find_baseline_value, read_metric_at_date
 from services.case_review_service import check_review_due_cases
 from services.kpi_service import get_chatter_kpi
 
@@ -251,6 +252,14 @@ class CreateChatterMappingRequest(BaseModel):
 class CreateChatterMappingResponse(BaseModel):
     om_user_id: str
     display_name: str
+
+
+class BaselinePreviewOut(BaseModel):
+    available: bool
+    lookback_days: int
+    value: Optional[float] = None
+    snapshot_date: Optional[date] = None
+    days_ago: Optional[int] = None
 
 
 class KpiSnapshotOut(BaseModel):
@@ -840,6 +849,31 @@ async def list_chatters(
             )
 
     return items
+
+
+# ── GET /chatters/{om_user_id}/baseline-preview ───────────────────────────────
+
+@router.get("/chatters/{om_user_id}/baseline-preview", response_model=BaselinePreviewOut)
+async def baseline_preview(
+    om_user_id: str,
+    metric_type: MetricTypeLiteral = Query(..., description="Метрика quantitative-кейса"),
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_admin),
+):
+    """Предпросмотр baseline из daily-данных (без записи в БД). Только quantitative-метрики."""
+    tid = current_user.tenant_id
+    result = await find_baseline_value(db, tid, om_user_id, metric_type)
+    if result is None:
+        return BaselinePreviewOut(available=False, lookback_days=BASELINE_LOOKBACK_DAYS)
+    val, snap_date = result
+    days_ago = (date.today() - snap_date).days
+    return BaselinePreviewOut(
+        available=True,
+        lookback_days=BASELINE_LOOKBACK_DAYS,
+        value=float(val),
+        snapshot_date=snap_date,
+        days_ago=days_ago,
+    )
 
 
 # ── POST /chatters/mappings ───────────────────────────────────────────────────

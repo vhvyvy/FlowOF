@@ -3,8 +3,11 @@ Freeze baseline for KPI Admin cases.
 
 Public API
 ----------
+    find_baseline_value(db, tenant_id, om_user_id, metric_type, lookback_days=30)
+        → tuple[Decimal, date] | None   # read-only search, no DB writes
+
     freeze_baseline(db, tenant_id, om_user_id, metric_type, lookback_days=30)
-        → tuple[Decimal, date, str] | None
+        → tuple[Decimal, date, str] | None   # wraps find_baseline_value + logs
 
     read_metric_at_date(db, tenant_id, om_user_id, metric_type, target_date)
         → Decimal | None
@@ -149,6 +152,40 @@ async def read_metric_at_date(
     return await _compute_metric(db, tenant_id, om_user_id, metric_type, target_date, names)
 
 
+async def find_baseline_value(
+    db: AsyncSession,
+    tenant_id: int,
+    om_user_id: str,
+    metric_type: str,
+    *,
+    lookback_days: int = BASELINE_LOOKBACK_DAYS,
+) -> tuple[Decimal, date] | None:
+    """
+    Find the most recent day with metric data, scanning from yesterday up to
+    lookback_days back. Read-only — does not write to the database.
+    """
+    names = await _display_names(db, tenant_id, om_user_id)
+
+    for days_back in range(1, lookback_days + 1):
+        target = date.today() - timedelta(days=days_back)
+        try:
+            val = await _compute_metric(db, tenant_id, om_user_id, metric_type, target, names)
+            if val is not None:
+                return val, target
+        except Exception as exc:
+            logger.warning(
+                "find_baseline_value error tenant=%s uid=%s metric=%s date=%s: %s",
+                tenant_id, om_user_id, metric_type, target, exc,
+            )
+            continue
+
+    logger.warning(
+        "find_baseline_value: no data in %s days — tenant=%s uid=%s metric=%s",
+        lookback_days, tenant_id, om_user_id, metric_type,
+    )
+    return None
+
+
 async def freeze_baseline(
     db: AsyncSession,
     tenant_id: int,
@@ -158,34 +195,16 @@ async def freeze_baseline(
     lookback_days: int = BASELINE_LOOKBACK_DAYS,
 ) -> tuple[Decimal, date, str] | None:
     """
-    Find the most recent day with data, scanning from yesterday up to
-    lookback_days back (default: BASELINE_LOOKBACK_DAYS).
-
-    Returns
-    -------
-    (metric_value, snapshot_date, source) on success, or None if no data found.
+    Find baseline via find_baseline_value and return with source tag for snapshots.
     """
-    names = await _display_names(db, tenant_id, om_user_id)
-
-    for days_back in range(1, lookback_days + 1):
-        target = date.today() - timedelta(days=days_back)
-        try:
-            val = await _compute_metric(db, tenant_id, om_user_id, metric_type, target, names)
-            if val is not None:
-                logger.info(
-                    "freeze_baseline: tenant=%s uid=%s metric=%s → %s @ %s (days_back=%s)",
-                    tenant_id, om_user_id, metric_type, val, target, days_back,
-                )
-                return val, target, "system_from_daily"
-        except Exception as exc:
-            logger.warning(
-                "freeze_baseline error tenant=%s uid=%s metric=%s date=%s: %s",
-                tenant_id, om_user_id, metric_type, target, exc,
-            )
-            continue
-
-    logger.warning(
-        "freeze_baseline: no data in %s days — tenant=%s uid=%s metric=%s",
-        lookback_days, tenant_id, om_user_id, metric_type,
+    result = await find_baseline_value(
+        db, tenant_id, om_user_id, metric_type, lookback_days=lookback_days
     )
-    return None
+    if result is None:
+        return None
+    val, target = result
+    logger.info(
+        "freeze_baseline: tenant=%s uid=%s metric=%s → %s @ %s",
+        tenant_id, om_user_id, metric_type, val, target,
+    )
+    return val, target, "system_from_daily"

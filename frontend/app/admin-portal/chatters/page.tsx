@@ -11,6 +11,10 @@ import {
   mappingErrorMessage,
   useCreateChatterMapping,
 } from '@/lib/hooks/useCreateChatterMapping'
+import {
+  type BaselineMetricType,
+  useBaselinePreview,
+} from '@/lib/hooks/useBaselinePreview'
 import { cn } from '@/lib/utils'
 
 // ── Types ─────────────────────────────────────────────────────────────────────
@@ -66,6 +70,21 @@ function fmtMetric(c: Chatter, metric: MetricType): string {
   return '—'
 }
 
+function fmtBaselineValue(metric: MetricType, v: number): string {
+  if (metric === 'ppv_open_rate') return `${v.toFixed(1)}%`
+  if (metric === 'total_chats')   return String(Math.round(v))
+  if (metric === 'revenue')       return `$${v.toFixed(0)}`
+  return `$${v.toFixed(2)}`
+}
+
+/** Day + month in Russian, e.g. "1 июля" */
+function fmtDayMonth(isoDate: string): string {
+  return new Date(`${isoDate}T12:00:00`).toLocaleDateString('ru-RU', {
+    day: 'numeric',
+    month: 'long',
+  })
+}
+
 // ── Create Case Modal ─────────────────────────────────────────────────────────
 
 interface ModalProps {
@@ -85,8 +104,29 @@ function CreateCaseModal({ chatter, onClose, onSuccess }: ModalProps) {
   const [loading, setLoading]     = useState(false)
   const [error, setError]         = useState<string | null>(null)
 
+  const isQuant = caseType === 'quantitative'
+  const {
+    data: baselinePreview,
+    isLoading: baselineLoading,
+    isFetching: baselineFetching,
+  } = useBaselinePreview(
+    chatter.om_user_id,
+    metric as BaselineMetricType,
+    isQuant,
+  )
+
+  const baselinePending = isQuant && (baselineLoading || baselineFetching)
+  const baselineBlocked = isQuant && baselinePreview?.available === false
+
   const categoryOk = caseType === 'quantitative' || category.trim().length >= 1
-  const canSubmit = diagnosis.trim().length > 0 && holdDays >= 0 && holdDays <= 60 && categoryOk && !loading
+  const canSubmit =
+    diagnosis.trim().length > 0 &&
+    holdDays >= 0 &&
+    holdDays <= 60 &&
+    categoryOk &&
+    !loading &&
+    !baselinePending &&
+    !baselineBlocked
 
   async function submit(e: React.FormEvent) {
     e.preventDefault()
@@ -185,10 +225,29 @@ function CreateCaseModal({ chatter, onClose, onSuccess }: ModalProps) {
                 ))}
               </select>
               {currentVal !== '—' && (
-                <span className="text-sm font-semibold text-amber-300 shrink-0">
+                <span
+                  className="text-sm font-semibold text-amber-300 shrink-0 cursor-help"
+                  title="Месячная агрегация. Baseline берётся из дневных данных."
+                  data-testid="month-metric-badge"
+                >
                   Мес: {currentVal}
                 </span>
               )}
+            </div>
+            <div className="mt-2 min-h-[1.25rem]" data-testid="baseline-preview">
+              {baselinePending ? (
+                <p className="text-xs text-slate-500">Проверяем данные…</p>
+              ) : baselinePreview?.available && baselinePreview.value != null && baselinePreview.snapshot_date ? (
+                <p className="text-xs text-emerald-400">
+                  Baseline: {fmtBaselineValue(metric, baselinePreview.value)} на{' '}
+                  {fmtDayMonth(baselinePreview.snapshot_date)}
+                  {baselinePreview.days_ago != null && ` (${baselinePreview.days_ago} дн. назад)`}
+                </p>
+              ) : baselinePreview && !baselinePreview.available ? (
+                <p className="text-xs text-red-400">
+                  Недостаточно данных за 30 дней. Кейс создать нельзя.
+                </p>
+              ) : null}
             </div>
           </div>
           )}
