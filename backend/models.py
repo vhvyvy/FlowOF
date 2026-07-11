@@ -7,7 +7,7 @@ from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import relationship
 from services.enum_types import (
     CASE_STAGE, CASE_PRIORITY, CASE_RESULT, CASE_TYPE,
-    METRIC_TYPE, SNAPSHOT_TYPE, SNAPSHOT_SOURCE,
+    METRIC_TYPE, SNAPSHOT_TYPE, SNAPSHOT_TYPE_V2, SNAPSHOT_SOURCE,
     LEDGER_EVENT_TYPE, STAGE_CHANGED_BY, KPI_METRIC_TYPE, ACTIVITY_TYPE,
 )
 
@@ -477,10 +477,13 @@ class AdminCase(Base):
     opened_at      = Column(DateTime, nullable=False, default=datetime.utcnow)
     closed_at      = Column(DateTime, nullable=True)
     review_date    = Column(Date, nullable=True)
-    baseline_value = Column(Numeric(14, 4), nullable=True)
-    target_value   = Column(Numeric(14, 4), nullable=True)
-    result_value   = Column(Numeric(14, 4), nullable=True)
-    notes          = Column(Text, nullable=True)
+    baseline_value   = Column(Numeric(14, 4), nullable=True)
+    target_value     = Column(Numeric(14, 4), nullable=True)
+    result_value     = Column(Numeric(14, 4), nullable=True)
+    baseline_version = Column(String(8), nullable=False, default="v1")
+    is_early_month   = Column(Boolean, nullable=False, default=False)
+    is_new_chatter   = Column(Boolean, nullable=False, default=False)
+    notes            = Column(Text, nullable=True)
     created_at     = Column(DateTime, nullable=False, default=datetime.utcnow)
 
     activities = relationship(
@@ -544,14 +547,20 @@ class BaselineSnapshot(Base):
     """Снапшот значения метрики (baseline / target / result) для кейса."""
     __tablename__ = "baseline_snapshots"
 
-    id            = Column(Integer, primary_key=True, autoincrement=True)
-    case_id       = Column(Integer, ForeignKey("admin_cases.id", ondelete="CASCADE"), nullable=False, index=True)
-    snapshot_type = Column(SNAPSHOT_TYPE, nullable=False)
-    metric_type   = Column(METRIC_TYPE, nullable=False)
-    metric_value  = Column(Numeric(14, 4), nullable=False)
-    snapshot_date = Column(Date, nullable=False)
-    source        = Column(SNAPSHOT_SOURCE, nullable=False, default="system_from_daily")
-    created_at    = Column(DateTime, nullable=False, default=datetime.utcnow)
+    id                  = Column(Integer, primary_key=True, autoincrement=True)
+    case_id             = Column(Integer, ForeignKey("admin_cases.id", ondelete="CASCADE"), nullable=False, index=True)
+    snapshot_type       = Column(SNAPSHOT_TYPE, nullable=False)
+    snapshot_type_v2    = Column(SNAPSHOT_TYPE_V2, nullable=True)
+    metric_type         = Column(METRIC_TYPE, nullable=False)
+    metric_value        = Column(Numeric(14, 4), nullable=False)
+    daily_value         = Column(Numeric(14, 4), nullable=True)
+    week_avg_value      = Column(Numeric(14, 4), nullable=True)
+    month_current_value = Column(Numeric(14, 4), nullable=True)
+    prev_month_value    = Column(Numeric(14, 4), nullable=True)
+    snapshot_date       = Column(Date, nullable=False)
+    snapshot_as_of      = Column(Date, nullable=True)
+    source              = Column(SNAPSHOT_SOURCE, nullable=False, default="system_from_daily")
+    created_at          = Column(DateTime, nullable=False, default=datetime.utcnow)
 
 
 class CaseLedger(Base):

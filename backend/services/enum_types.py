@@ -32,6 +32,10 @@ SNAPSHOT_TYPE = PG_ENUM(
     "baseline", "target", "result",
     name="snapshot_type", create_type=False,
 )
+SNAPSHOT_TYPE_V2 = PG_ENUM(
+    "baseline_v2", "review_v2",
+    name="snapshot_type_v2", create_type=False,
+)
 SNAPSHOT_SOURCE = PG_ENUM(
     "system_from_daily", "system_from_monthly", "manual",
     name="snapshot_source", create_type=False,

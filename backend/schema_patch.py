@@ -894,6 +894,46 @@ _PATCHES: list[tuple[str, bool]] = [
            ON admin_cases (tenant_id, case_type, stage)""",
         False,
     ),
+
+    # ═══════════════════════════════════════════════════════════════════════════
+    # Baseline v2 (П.1 schema) — multi-value snapshots
+    # ═══════════════════════════════════════════════════════════════════════════
+    (
+        "ALTER TABLE admin_cases ADD COLUMN IF NOT EXISTS baseline_version VARCHAR(8) NOT NULL DEFAULT 'v1'",
+        False,
+    ),
+    (
+        "ALTER TABLE admin_cases ADD COLUMN IF NOT EXISTS is_early_month BOOLEAN NOT NULL DEFAULT FALSE",
+        False,
+    ),
+    (
+        "ALTER TABLE admin_cases ADD COLUMN IF NOT EXISTS is_new_chatter BOOLEAN NOT NULL DEFAULT FALSE",
+        False,
+    ),
+    (
+        "ALTER TABLE baseline_snapshots ADD COLUMN IF NOT EXISTS snapshot_type_v2 snapshot_type_v2 NULL",
+        False,
+    ),
+    (
+        "ALTER TABLE baseline_snapshots ADD COLUMN IF NOT EXISTS daily_value NUMERIC(14,4) NULL",
+        False,
+    ),
+    (
+        "ALTER TABLE baseline_snapshots ADD COLUMN IF NOT EXISTS week_avg_value NUMERIC(14,4) NULL",
+        False,
+    ),
+    (
+        "ALTER TABLE baseline_snapshots ADD COLUMN IF NOT EXISTS month_current_value NUMERIC(14,4) NULL",
+        False,
+    ),
+    (
+        "ALTER TABLE baseline_snapshots ADD COLUMN IF NOT EXISTS prev_month_value NUMERIC(14,4) NULL",
+        False,
+    ),
+    (
+        "ALTER TABLE baseline_snapshots ADD COLUMN IF NOT EXISTS snapshot_as_of DATE NULL",
+        False,
+    ),
 ]
 
 # Catalog tables that should have UNIQUE(tenant_id, name).
@@ -925,6 +965,7 @@ _ENUM_PATCHES: list[tuple[str, list[str]]] = [
     ("stage_changed_by",  ["admin", "owner", "system"]),
     ("activity_type_enum", ["review", "training", "meeting", "observation", "note", "other"]),
     ("case_type_enum",    ["quantitative", "qualitative"]),
+    ("snapshot_type_v2",  ["baseline_v2", "review_v2"]),
 ]
 
 # ADD VALUE for enums on existing DBs (each value in its own transaction; idempotent).
