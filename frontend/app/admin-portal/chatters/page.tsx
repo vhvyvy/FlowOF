@@ -3,22 +3,28 @@
 import { useState } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { useRouter } from 'next/navigation'
-import { Plus, X, Loader2, AlertCircle } from 'lucide-react'
+import { Plus, X, Loader2, AlertCircle, Link2 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Skeleton } from '@/components/ui/skeleton'
 import api from '@/lib/api'
+import {
+  mappingErrorMessage,
+  useCreateChatterMapping,
+} from '@/lib/hooks/useCreateChatterMapping'
 import { cn } from '@/lib/utils'
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
 interface Chatter {
-  om_user_id: string
+  is_mapped: boolean
+  om_user_id: string | null
   display_name: string
   month_open_rate: number | null
   month_rpc: number | null
   month_apv: number | null
   month_chats: number | null
   month_revenue: number | null
+  revenue_month: number | null
   has_open_case: boolean
   open_case_by_me: boolean
 }
@@ -39,7 +45,16 @@ const METRIC_OPTIONS: { value: MetricType; label: string }[] = [
 
 function chatterLabel(c: Chatter): string {
   const name = c.display_name?.trim()
-  return name || c.om_user_id
+  return name || c.om_user_id || '—'
+}
+
+function fmtRevenue(c: Chatter): string {
+  const v = c.month_revenue ?? c.revenue_month
+  return v != null ? `$${v.toFixed(0)}` : '—'
+}
+
+function rowKey(c: Chatter): string {
+  return c.is_mapped ? `m-${c.om_user_id}` : `o-${c.display_name}`
 }
 
 function fmtMetric(c: Chatter, metric: MetricType): string {
@@ -85,7 +100,7 @@ function CreateCaseModal({ chatter, onClose, onSuccess }: ModalProps) {
     setLoading(true)
     try {
       const body: Record<string, unknown> = {
-        om_user_id:           chatter.om_user_id,
+        om_user_id:           chatter.om_user_id!,
         chatter_display_name: chatterLabel(chatter),
         case_type:            caseType,
         diagnosis_text:       diagnosis,
@@ -292,19 +307,264 @@ function CreateCaseModal({ chatter, onClose, onSuccess }: ModalProps) {
   )
 }
 
+// ── Mapping Modal ─────────────────────────────────────────────────────────────
+
+interface MappingModalProps {
+  initialDisplayName?: string
+  onClose: () => void
+  onSuccess: (displayName: string) => void
+}
+
+function MappingModal({ initialDisplayName = '', onClose, onSuccess }: MappingModalProps) {
+  const createMapping = useCreateChatterMapping()
+  const [omId, setOmId] = useState('')
+  const [displayName, setDisplayName] = useState(initialDisplayName)
+  const [inlineError, setInlineError] = useState<string | null>(null)
+
+  const canSubmit =
+    omId.trim().length >= 1 &&
+    omId.trim().length <= 64 &&
+    displayName.trim().length >= 2 &&
+    !createMapping.isPending
+
+  async function submit(e: React.FormEvent) {
+    e.preventDefault()
+    setInlineError(null)
+    try {
+      const result = await createMapping.mutateAsync({
+        om_user_id: omId.trim(),
+        display_name: displayName.trim(),
+      })
+      onSuccess(result.display_name)
+    } catch (err: unknown) {
+      const msg = mappingErrorMessage(err)
+      if (msg) {
+        setInlineError(msg)
+      } else {
+        setInlineError('Ошибка при сохранении маппинга')
+      }
+    }
+  }
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm">
+      <div
+        className="bg-slate-900 border border-slate-700/60 rounded-2xl shadow-2xl w-full max-w-lg"
+        data-testid="mapping-modal"
+      >
+        <div className="flex items-center justify-between px-6 py-4 border-b border-slate-700/50">
+          <div>
+            <h2 className="text-base font-semibold text-slate-100">
+              Маппинг чаттера ↔ Onlymonster ID
+            </h2>
+            <p className="text-xs text-slate-500 mt-0.5">
+              Введите Onlymonster user_id и имя чаттера как в транзакциях.
+            </p>
+          </div>
+          <button onClick={onClose} className="text-slate-500 hover:text-slate-300 transition-colors">
+            <X className="h-5 w-5" />
+          </button>
+        </div>
+
+        <form onSubmit={submit} className="px-6 py-5 space-y-4">
+          {inlineError && (
+            <div className="flex items-start gap-2 bg-red-500/10 border border-red-500/20 rounded-lg px-3 py-2.5">
+              <AlertCircle className="h-4 w-4 text-red-400 shrink-0 mt-0.5" />
+              <p className="text-sm text-red-400">{inlineError}</p>
+            </div>
+          )}
+
+          <div>
+            <label className="block text-xs font-medium text-slate-400 mb-1.5">
+              Onlymonster user_id (напр. 21036)
+            </label>
+            <input
+              value={omId}
+              onChange={e => setOmId(e.target.value)}
+              maxLength={64}
+              placeholder="21036"
+              className="w-full bg-slate-800 border border-slate-600 rounded-lg px-3 py-2 text-sm text-slate-200 placeholder-slate-500 focus:outline-none focus:ring-1 focus:ring-indigo-500"
+            />
+          </div>
+
+          <div>
+            <label className="block text-xs font-medium text-slate-400 mb-1.5">
+              Имя чаттера (напр. @nick)
+            </label>
+            <input
+              value={displayName}
+              onChange={e => setDisplayName(e.target.value)}
+              maxLength={100}
+              placeholder="@nick"
+              className="w-full bg-slate-800 border border-slate-600 rounded-lg px-3 py-2 text-sm text-slate-200 placeholder-slate-500 focus:outline-none focus:ring-1 focus:ring-indigo-500"
+            />
+          </div>
+
+          <div className="flex gap-3 pt-1">
+            <Button type="button" variant="outline" onClick={onClose} className="flex-1" disabled={createMapping.isPending}>
+              Отмена
+            </Button>
+            <Button
+              type="submit"
+              className="flex-1 bg-indigo-600 hover:bg-indigo-500"
+              disabled={!canSubmit}
+            >
+              {createMapping.isPending ? <Loader2 className="h-4 w-4 animate-spin" /> : 'Добавить'}
+            </Button>
+          </div>
+        </form>
+      </div>
+    </div>
+  )
+}
+
+// ── Chatter table section ─────────────────────────────────────────────────────
+
+function ChatterTableSection({
+  title,
+  rows,
+  onOpenCase,
+  onOpenMapping,
+  emptyHint,
+}: {
+  title: string
+  rows: Chatter[]
+  onOpenCase: (c: Chatter) => void
+  onOpenMapping: (c: Chatter) => void
+  emptyHint?: string
+}) {
+  return (
+    <div className="mb-8">
+      <h2 className="text-sm font-semibold text-slate-300 mb-3">{title}</h2>
+      {rows.length === 0 ? (
+        emptyHint ? (
+          <p className="text-sm text-slate-500 px-1">{emptyHint}</p>
+        ) : null
+      ) : (
+      <div className="bg-slate-800/40 border border-slate-700/50 rounded-xl overflow-hidden">
+        <table className="w-full text-sm">
+          <thead>
+            <tr className="border-b border-slate-700/50">
+              <th className="text-left px-4 py-3 text-xs font-medium text-slate-400 uppercase tracking-wide">Чаттер</th>
+              <th className="text-right px-4 py-3 text-xs font-medium text-slate-400 uppercase tracking-wide">Open Rate (мес)</th>
+              <th className="text-right px-4 py-3 text-xs font-medium text-slate-400 uppercase tracking-wide">RPC (мес)</th>
+              <th className="text-right px-4 py-3 text-xs font-medium text-slate-400 uppercase tracking-wide">APV (мес)</th>
+              <th className="text-right px-4 py-3 text-xs font-medium text-slate-400 uppercase tracking-wide">Чатов (мес)</th>
+              <th className="text-right px-4 py-3 text-xs font-medium text-slate-400 uppercase tracking-wide">Выручка (мес)</th>
+              <th className="text-center px-4 py-3 text-xs font-medium text-slate-400 uppercase tracking-wide">Статус</th>
+              <th className="px-4 py-3" />
+            </tr>
+          </thead>
+          <tbody className="divide-y divide-slate-700/30">
+            {rows.map(c => (
+              <tr key={rowKey(c)} className="hover:bg-slate-800/50 transition-colors">
+                <td className="px-4 py-3">
+                  <div>
+                    <div className="flex items-center gap-2 flex-wrap">
+                      <p className="font-medium text-slate-200">{chatterLabel(c)}</p>
+                      {!c.is_mapped && (
+                        <span className="text-[10px] px-2 py-0.5 rounded-full bg-slate-700/60 text-slate-400 border border-slate-600/50">
+                          Требует маппинга
+                        </span>
+                      )}
+                    </div>
+                    {c.is_mapped && c.om_user_id && (
+                      <p className="text-xs text-slate-500 mt-0.5">{c.om_user_id}</p>
+                    )}
+                  </div>
+                </td>
+                <td className="px-4 py-3 text-right text-slate-300">
+                  {c.month_open_rate != null
+                    ? `${c.month_open_rate.toFixed(1)}%`
+                    : <span className="text-slate-600">—</span>}
+                </td>
+                <td className="px-4 py-3 text-right text-slate-300">
+                  {c.month_rpc != null
+                    ? `$${c.month_rpc.toFixed(2)}`
+                    : <span className="text-slate-600">—</span>}
+                </td>
+                <td className="px-4 py-3 text-right text-slate-300">
+                  {c.month_apv != null
+                    ? `$${c.month_apv.toFixed(2)}`
+                    : <span className="text-slate-600">—</span>}
+                </td>
+                <td className="px-4 py-3 text-right text-slate-300">
+                  {c.month_chats != null && c.month_chats > 0
+                    ? c.month_chats
+                    : <span className="text-slate-600">—</span>}
+                </td>
+                <td className="px-4 py-3 text-right text-slate-300 tabular-nums">
+                  {fmtRevenue(c) === '—'
+                    ? <span className="text-slate-600">—</span>
+                    : fmtRevenue(c)}
+                </td>
+                <td className="px-4 py-3 text-center">
+                  {c.is_mapped && c.open_case_by_me ? (
+                    <span className="text-xs bg-amber-500/15 text-amber-300 px-2 py-0.5 rounded-full">У меня</span>
+                  ) : c.is_mapped && c.has_open_case ? (
+                    <span className="text-xs bg-blue-500/15 text-blue-300 px-2 py-0.5 rounded-full">У другого</span>
+                  ) : null}
+                </td>
+                <td className="px-4 py-3 text-right">
+                  {c.is_mapped ? (
+                    <button
+                      onClick={() => !c.has_open_case && onOpenCase(c)}
+                      disabled={c.has_open_case}
+                      title={c.has_open_case ? 'Уже открыт кейс' : 'Открыть кейс'}
+                      className={cn(
+                        'flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium transition-colors ml-auto',
+                        c.has_open_case
+                          ? 'bg-slate-700/40 text-slate-600 cursor-not-allowed'
+                          : 'bg-amber-600/20 text-amber-300 hover:bg-amber-600/40',
+                      )}
+                    >
+                      <Plus className="h-3.5 w-3.5" />
+                      Кейс
+                    </button>
+                  ) : (
+                    <button
+                      onClick={() => onOpenMapping(c)}
+                      className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium transition-colors ml-auto bg-slate-700/50 text-slate-300 hover:bg-slate-600/60"
+                    >
+                      <Link2 className="h-3.5 w-3.5" />
+                      Смаппить
+                    </button>
+                  )}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+      )}
+    </div>
+  )
+}
+
 // ── Page ──────────────────────────────────────────────────────────────────────
 
 export default function ChattersPage() {
   const router = useRouter()
   const qc = useQueryClient()
   const [modalChatter, setModalChatter] = useState<Chatter | null>(null)
-  const [showAll, setShowAll]           = useState(false)
+  const [mappingChatter, setMappingChatter] = useState<Chatter | null>(null)
+  const [mappingOpen, setMappingOpen] = useState(false)
+  const [showAll, setShowAll] = useState(false)
+  const [toastMsg, setToastMsg] = useState<string | null>(null)
 
   const { data: chatters, isLoading } = useQuery<Chatter[]>({
     queryKey: ['admin-portal-chatters', showAll],
     queryFn: () =>
       api.get<Chatter[]>(`/api/v1/admin-portal/chatters?show_all=${showAll}`).then(r => r.data),
   })
+
+  const mapped = chatters?.filter(c => c.is_mapped ?? !!c.om_user_id) ?? []
+  const orphans = chatters?.filter(c => !(c.is_mapped ?? !!c.om_user_id)) ?? []
+
+  function showToast(msg: string) {
+    setToastMsg(msg)
+    setTimeout(() => setToastMsg(null), 3500)
+  }
 
   function handleSuccess(caseId: number) {
     setModalChatter(null)
@@ -313,13 +573,34 @@ export default function ChattersPage() {
     router.push(`/admin-portal/cases/${caseId}`)
   }
 
+  function openMapping(c?: Chatter) {
+    setMappingChatter(c ?? null)
+    setMappingOpen(true)
+  }
+
+  function handleMappingSuccess(displayName: string) {
+    setMappingOpen(false)
+    setMappingChatter(null)
+    if (displayName) {
+      showToast(`Маппинг сохранён. Чаттер ${displayName} добавлен в активные.`)
+    } else {
+      showToast('Ошибка при сохранении маппинга')
+    }
+  }
+
   return (
-    <div className="p-6 max-w-5xl mx-auto">
+    <div className="p-6 max-w-6xl mx-auto">
+      {toastMsg && (
+        <div className="fixed bottom-6 right-6 z-50 bg-slate-700 border border-slate-600 rounded-xl px-4 py-3 shadow-2xl text-sm text-slate-100 max-w-xs">
+          {toastMsg}
+        </div>
+      )}
+
       <div className="mb-6 flex items-start justify-between">
         <div>
           <h1 className="text-xl font-bold text-slate-100">Чаттеры</h1>
           <p className="text-sm text-slate-400 mt-0.5">
-            Активные чаттеры с месячными KPI-метриками (текущий месяц)
+            Активные смаппированные чаттеры и сироты из транзакций (текущий месяц)
           </p>
         </div>
         <label className="flex items-center gap-2 cursor-pointer select-none">
@@ -341,87 +622,33 @@ export default function ChattersPage() {
 
       {isLoading ? (
         <div className="space-y-2">
-          {[1,2,3,4,5].map(i => <Skeleton key={i} className="h-14 w-full rounded-lg" />)}
+          {[1, 2, 3, 4, 5].map(i => <Skeleton key={i} className="h-14 w-full rounded-lg" />)}
         </div>
       ) : !chatters?.length ? (
         <div className="text-center py-12 text-slate-500">
           <p>
             {showAll
-              ? 'Нет данных о чаттерах. Настройте маппинг Onlymonster.'
-              : 'Нет активных чаттеров за последние 30 дней. Включите «Показать всех».'}
+              ? 'Нет смаппированных чаттеров. Настройте маппинг Onlymonster.'
+              : 'Нет активных чаттеров за текущий месяц.'}
           </p>
         </div>
       ) : (
-        <div className="bg-slate-800/40 border border-slate-700/50 rounded-xl overflow-hidden">
-          <table className="w-full text-sm">
-            <thead>
-              <tr className="border-b border-slate-700/50">
-                <th className="text-left px-4 py-3 text-xs font-medium text-slate-400 uppercase tracking-wide">Чаттер</th>
-                <th className="text-right px-4 py-3 text-xs font-medium text-slate-400 uppercase tracking-wide">Open Rate (мес)</th>
-                <th className="text-right px-4 py-3 text-xs font-medium text-slate-400 uppercase tracking-wide">RPC (мес)</th>
-                <th className="text-right px-4 py-3 text-xs font-medium text-slate-400 uppercase tracking-wide">APV (мес)</th>
-                <th className="text-right px-4 py-3 text-xs font-medium text-slate-400 uppercase tracking-wide">Чатов (мес)</th>
-                <th className="text-center px-4 py-3 text-xs font-medium text-slate-400 uppercase tracking-wide">Статус</th>
-                <th className="px-4 py-3" />
-              </tr>
-            </thead>
-            <tbody className="divide-y divide-slate-700/30">
-              {chatters.map(c => (
-                <tr key={c.om_user_id} className="hover:bg-slate-800/50 transition-colors">
-                  <td className="px-4 py-3">
-                    <div>
-                      <p className="font-medium text-slate-200">{chatterLabel(c)}</p>
-                      <p className="text-xs text-slate-500 mt-0.5">{c.om_user_id}</p>
-                    </div>
-                  </td>
-                  <td className="px-4 py-3 text-right text-slate-300">
-                    {c.month_open_rate != null
-                      ? `${c.month_open_rate.toFixed(1)}%`
-                      : <span className="text-slate-600">—</span>}
-                  </td>
-                  <td className="px-4 py-3 text-right text-slate-300">
-                    {c.month_rpc != null
-                      ? `$${c.month_rpc.toFixed(2)}`
-                      : <span className="text-slate-600">—</span>}
-                  </td>
-                  <td className="px-4 py-3 text-right text-slate-300">
-                    {c.month_apv != null
-                      ? `$${c.month_apv.toFixed(2)}`
-                      : <span className="text-slate-600">—</span>}
-                  </td>
-                  <td className="px-4 py-3 text-right text-slate-300">
-                    {c.month_chats != null
-                      ? c.month_chats
-                      : <span className="text-slate-600">—</span>}
-                  </td>
-                  <td className="px-4 py-3 text-center">
-                    {c.open_case_by_me ? (
-                      <span className="text-xs bg-amber-500/15 text-amber-300 px-2 py-0.5 rounded-full">У меня</span>
-                    ) : c.has_open_case ? (
-                      <span className="text-xs bg-blue-500/15 text-blue-300 px-2 py-0.5 rounded-full">У другого</span>
-                    ) : null}
-                  </td>
-                  <td className="px-4 py-3 text-right">
-                    <button
-                      onClick={() => !c.has_open_case && setModalChatter(c)}
-                      disabled={c.has_open_case}
-                      title={c.has_open_case ? 'Уже открыт кейс' : 'Открыть кейс'}
-                      className={cn(
-                        'flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium transition-colors ml-auto',
-                        c.has_open_case
-                          ? 'bg-slate-700/40 text-slate-600 cursor-not-allowed'
-                          : 'bg-amber-600/20 text-amber-300 hover:bg-amber-600/40',
-                      )}
-                    >
-                      <Plus className="h-3.5 w-3.5" />
-                      Кейс
-                    </button>
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
+        <>
+          <ChatterTableSection
+            title={`Активные чаттеры (${mapped.length})`}
+            rows={mapped}
+            onOpenCase={setModalChatter}
+            onOpenMapping={openMapping}
+          />
+          {!showAll && (
+            <ChatterTableSection
+              title={`Требуют маппинга (${orphans.length})`}
+              rows={orphans}
+              onOpenCase={setModalChatter}
+              onOpenMapping={openMapping}
+            />
+          )}
+        </>
       )}
 
       {modalChatter && (
@@ -429,6 +656,17 @@ export default function ChattersPage() {
           chatter={modalChatter}
           onClose={() => setModalChatter(null)}
           onSuccess={handleSuccess}
+        />
+      )}
+
+      {mappingOpen && (
+        <MappingModal
+          initialDisplayName={mappingChatter?.display_name ?? ''}
+          onClose={() => {
+            setMappingOpen(false)
+            setMappingChatter(null)
+          }}
+          onSuccess={handleMappingSuccess}
         />
       )}
     </div>

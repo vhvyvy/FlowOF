@@ -13,6 +13,7 @@ GET    /cases/{case_id}             — детали + снапшоты + ист
 PATCH  /cases/{case_id}/stage       — сменить стадию
 POST   /cases/{case_id}/close       — закрыть кейс
 GET    /chatters                    — список чаттеров агентства + last metrics
+POST   /chatters/mappings            — создать маппинг чаттера (admin)
 POST   /cases/{case_id}/activities  — добавить активность (multipart)
 GET    /cases/{case_id}/activities  — лента активностей кейса
 DELETE /cases/{case_id}/activities/{activity_id} — удалить (<24ч)
@@ -22,6 +23,7 @@ GET    /me/kpi                      — KPI-снапшот текущего/вы
 """
 from __future__ import annotations
 
+import json
 import logging
 from datetime import date, datetime, timedelta
 from decimal import Decimal
@@ -226,15 +228,29 @@ class CloseRequest(BaseModel):
 
 
 class ChatterItem(BaseModel):
-    om_user_id: str
+    is_mapped: bool = True
+    om_user_id: Optional[str] = None
     display_name: str
     month_open_rate: Optional[float] = None
     month_rpc: Optional[float] = None
     month_apv: Optional[float] = None
     month_chats: Optional[int] = None
     month_revenue: Optional[float] = None
+    revenue_month: Optional[float] = None
     has_open_case: bool = False
     open_case_by_me: bool = False
+
+
+class CreateChatterMappingRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    om_user_id: str = Field(min_length=1, max_length=64)
+    display_name: str = Field(min_length=2, max_length=100)
+
+
+class CreateChatterMappingResponse(BaseModel):
+    om_user_id: str
+    display_name: str
 
 
 class KpiSnapshotOut(BaseModel):
@@ -616,27 +632,99 @@ async def close_case(
 
 # ── GET /chatters ─────────────────────────────────────────────────────────────
 
+def _normalize_chatter_name(name: str) -> str:
+    return name.strip().lower().lstrip("@")
+
+
+def _ensure_at_prefix(name: str) -> str:
+    s = name.strip()
+    return s if s.startswith("@") else f"@{s}"
+
+
+def _display_names_from_mapping_raw(raw_name: str | None) -> list[str]:
+    raw = (raw_name or "").strip()
+    if not raw:
+        return []
+    try:
+        parsed = json.loads(raw)
+        if isinstance(parsed, list):
+            return [str(x).strip() for x in parsed if str(x).strip()]
+    except Exception:
+        pass
+    return [p.strip() for p in raw.split(",") if p.strip()]
+
+
 def _resolve_chatter_display_name(om_id: str, raw_name: str | None) -> str:
     """Unwrap mapping display_names; always return a non-empty label (fallback: om_id)."""
-    import json as _json
-
-    raw = (raw_name or "").strip()
-    display = ""
-    if raw:
-        try:
-            parsed = _json.loads(raw)
-            if isinstance(parsed, list) and parsed:
-                display = str(parsed[0]).strip()
-            else:
-                display = raw.split(",")[0].strip()
-        except Exception:
-            display = raw.split(",")[0].strip()
-    return display or str(om_id)
+    names = _display_names_from_mapping_raw(raw_name)
+    if names:
+        return names[0]
+    return str(om_id)
 
 
-def _mapping_is_admin_account(display_names: str | None) -> bool:
-    """ChatterMapping has no role/is_admin — agency admin OM accounts use [Adm] prefix."""
-    return "[Adm]" in (display_names or "")
+def _mapping_norms_for_tenant(rows: list[tuple[str | None, ...]]) -> set[str]:
+    norms: set[str] = set()
+    for row in rows:
+        for name in _display_names_from_mapping_raw(row[0] if len(row) == 1 else row[1]):
+            norms.add(_normalize_chatter_name(name))
+    return norms
+
+
+async def _fetch_orphan_tx_rows(
+    db: AsyncSession, tenant_id: int, month_start: date
+) -> list[tuple[str, float]]:
+    rows = (
+        await db.execute(
+            text(
+                """
+                WITH tx_chatters AS (
+                  SELECT chatter,
+                         lower(trim(replace(chatter, '@', ''))) AS norm,
+                         SUM(amount) AS revenue_month,
+                         COUNT(*) AS tx_count
+                  FROM transactions
+                  WHERE tenant_id = :tid
+                    AND date >= :month_start
+                    AND amount > 0
+                    AND chatter IS NOT NULL
+                    AND trim(chatter) <> ''
+                  GROUP BY chatter
+                ),
+                tx_canonical AS (
+                  SELECT norm,
+                    (ARRAY_AGG(chatter ORDER BY tx_count DESC, chatter))[1] AS canonical_raw,
+                    SUM(revenue_month) AS revenue_month
+                  FROM tx_chatters
+                  GROUP BY norm
+                ),
+                mapping_norms AS (
+                  SELECT DISTINCT lower(trim(replace(
+                    CASE
+                      WHEN m.display_names LIKE '[%' THEN (m.display_names::jsonb ->> 0)
+                      ELSE split_part(COALESCE(m.display_names, ''), ',', 1)
+                    END,
+                    '@', ''))) AS norm
+                  FROM chatter_onlymonster_mapping m
+                  WHERE m.tenant_id = :tid
+                    AND m.display_names IS NOT NULL
+                    AND trim(m.display_names) <> ''
+                ),
+                orphans AS (
+                  SELECT c.canonical_raw, c.revenue_month
+                  FROM tx_canonical c
+                  WHERE NOT EXISTS (
+                    SELECT 1 FROM mapping_norms mn WHERE mn.norm = c.norm
+                  )
+                )
+                SELECT canonical_raw, revenue_month
+                FROM orphans
+                ORDER BY revenue_month DESC
+                """
+            ),
+            {"tid": tenant_id, "month_start": month_start},
+        )
+    ).fetchall()
+    return [(str(r[0]), float(r[1])) for r in rows]
 
 
 @router.get("/chatters", response_model=list[ChatterItem])
@@ -646,42 +734,30 @@ async def list_chatters(
     current_user: User = Depends(require_admin),
 ):
     """
-    Список активных чаттеров агентства с месячными KPI (текущий месяц).
-    Активность (show_all=false): за текущий календарный месяц —
-      daily total_chats > 0 (то же окно, что get_chatter_kpi year/month).
-    Метрики: те же, что на KPI-вкладке owner'а (kpi_service.get_chatter_kpi).
+    Список чаттеров агентства с месячными KPI (текущий месяц).
 
-    Список строится по daily (вариант A), не по транзакциям get_chatter_kpi.
-    Намеренно не попадают чаттеры только с revenue в KPI, без daily total_chats>0
-    за месяц — напр. om 48721 @Vyach3slav (есть деньги, нет daily; sync vs не чатил — отдельно).
+    show_all=false (default):
+      - смаппированные с daily total_chats > 0 за месяц;
+      - сироты из transactions (amount > 0 за месяц, нет в mapping по norm).
+    show_all=true: только все смаппированные (без фильтра daily, без сирот).
     """
     tid = current_user.tenant_id
     today = date.today()
     year, month = today.year, today.month
 
-    # ── Monthly KPI via the same service as owner KPI tab ────────────────────
     kpi_rows, _, _, _ = await get_chatter_kpi(db, tid, year, month)
-
-    # Index monthly KPI by onlymonster_id
     monthly_by_om: dict[str, Any] = {}
     for row in kpi_rows:
         if row.onlymonster_id:
             monthly_by_om[row.onlymonster_id] = row
 
-    # ── Active mappings: calendar month, daily total_chats > 0 only ─────────
-    # month_start aligns with get_chatter_kpi(year, month) window.
-    # NOTE: on the 1st of each month, chatter_kpi_daily for the new month appears
-    # only after the kpi_daily CRON at 04:00 UTC. Between 00:00–04:00 UTC the list
-    # will be empty until the first daily sync runs.
     month_start = date(year, month, 1)
-
-    admin_name_filter = func.coalesce(ChatterMapping.display_names, "").notlike("%[Adm]%")
 
     if show_all:
         mapping_rows = (
             await db.execute(
                 select(ChatterMapping.onlymonster_id, ChatterMapping.display_names)
-                .where(ChatterMapping.tenant_id == tid, admin_name_filter)
+                .where(ChatterMapping.tenant_id == tid)
                 .order_by(ChatterMapping.onlymonster_id)
             )
         ).fetchall()
@@ -693,7 +769,6 @@ async def list_chatters(
                     SELECT m.onlymonster_id, m.display_names
                     FROM chatter_onlymonster_mapping m
                     WHERE m.tenant_id = :tid
-                      AND COALESCE(m.display_names, '') NOT LIKE '%[Adm]%'
                       AND EXISTS (
                         SELECT 1 FROM chatter_kpi_daily d
                         WHERE d.tenant_id = m.tenant_id
@@ -708,10 +783,6 @@ async def list_chatters(
             )
         ).fetchall()
 
-    if not mapping_rows:
-        return []
-
-    # ── Open cases per om_user_id ─────────────────────────────────────────────
     open_cases_rows = (
         await db.execute(
             text(
@@ -724,29 +795,106 @@ async def list_chatters(
     open_any: set[str] = {r[0] for r in open_cases_rows}
     open_mine: set[str] = {r[0] for r in open_cases_rows if r[1] == current_user.id}
 
-    # ── Build items ───────────────────────────────────────────────────────────
-    items: list[ChatterItem] = []
+    mapped_items: list[ChatterItem] = []
     for om_id, raw_name in mapping_rows:
-        if _mapping_is_admin_account(raw_name):
-            continue
         display = _resolve_chatter_display_name(om_id, raw_name)
-
         kpi = monthly_by_om.get(om_id)
-        items.append(
+        revenue = float(kpi.revenue) if kpi and kpi.revenue is not None else None
+        mapped_items.append(
             ChatterItem(
+                is_mapped=True,
                 om_user_id=om_id,
                 display_name=display,
                 month_open_rate=kpi.ppv_open_rate if kpi else None,
                 month_rpc=kpi.rpc if kpi else None,
                 month_apv=kpi.apv if kpi else None,
                 month_chats=kpi.total_chats if kpi else None,
-                month_revenue=kpi.revenue if kpi else None,
+                month_revenue=revenue,
+                revenue_month=revenue,
                 has_open_case=om_id in open_any,
                 open_case_by_me=om_id in open_mine,
             )
         )
+    mapped_items.sort(key=lambda x: x.display_name.lower())
+
+    items = list(mapped_items)
+
+    if not show_all:
+        orphan_rows = await _fetch_orphan_tx_rows(db, tid, month_start)
+        for canonical_raw, revenue_month in orphan_rows:
+            display = _ensure_at_prefix(canonical_raw)
+            items.append(
+                ChatterItem(
+                    is_mapped=False,
+                    om_user_id=None,
+                    display_name=display,
+                    month_open_rate=None,
+                    month_rpc=None,
+                    month_apv=None,
+                    month_chats=0,
+                    month_revenue=None,
+                    revenue_month=revenue_month,
+                    has_open_case=False,
+                    open_case_by_me=False,
+                )
+            )
 
     return items
+
+
+# ── POST /chatters/mappings ───────────────────────────────────────────────────
+
+@router.post(
+    "/chatters/mappings",
+    response_model=CreateChatterMappingResponse,
+    status_code=status.HTTP_201_CREATED,
+)
+async def create_chatter_mapping(
+    body: CreateChatterMappingRequest,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_admin),
+):
+    """Создать маппинг чаттера. Строгие 409 при конфликте om_user_id или display_name."""
+    tid = current_user.tenant_id
+    om_id = body.om_user_id.strip()
+    display_name = _ensure_at_prefix(body.display_name.strip())
+    new_norm = _normalize_chatter_name(display_name)
+
+    existing_om = (
+        await db.execute(
+            select(ChatterMapping).where(
+                ChatterMapping.tenant_id == tid,
+                ChatterMapping.onlymonster_id == om_id,
+            )
+        )
+    ).scalar_one_or_none()
+    if existing_om:
+        raise HTTPException(
+            status_code=409,
+            detail="Этот Onlymonster ID уже смаппирован",
+        )
+
+    all_mappings = (
+        await db.execute(
+            select(ChatterMapping.display_names).where(ChatterMapping.tenant_id == tid)
+        )
+    ).fetchall()
+    for (raw_name,) in all_mappings:
+        for name in _display_names_from_mapping_raw(raw_name):
+            if _normalize_chatter_name(name) == new_norm:
+                raise HTTPException(
+                    status_code=409,
+                    detail="Это имя уже смаппировано на другой ID",
+                )
+
+    row = ChatterMapping(
+        tenant_id=tid,
+        onlymonster_id=om_id,
+        display_names=json.dumps([display_name], ensure_ascii=False),
+    )
+    db.add(row)
+    await db.commit()
+    return CreateChatterMappingResponse(om_user_id=om_id, display_name=display_name)
 
 
 # ── GET /me/ledger ────────────────────────────────────────────────────────────
