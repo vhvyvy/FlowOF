@@ -23,6 +23,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 logger = logging.getLogger("flowof.case_baseline")
 
+# Days to scan backward from yesterday when freezing baseline at case creation
+BASELINE_LOOKBACK_DAYS = 30
+
 # Metrics stored directly in chatter_kpi_daily
 _DAILY_COLS: frozenset[str] = frozenset({"ppv_open_rate", "apv", "total_chats"})
 
@@ -153,7 +156,8 @@ async def freeze_baseline(
     metric_type: str,
 ) -> tuple[Decimal, date, str] | None:
     """
-    Find the most recent day with data, scanning from yesterday up to 7 days back.
+    Find the most recent day with data, scanning from yesterday up to
+    BASELINE_LOOKBACK_DAYS back.
 
     Returns
     -------
@@ -161,7 +165,7 @@ async def freeze_baseline(
     """
     names = await _display_names(db, tenant_id, om_user_id)
 
-    for days_back in range(1, 8):
+    for days_back in range(1, BASELINE_LOOKBACK_DAYS + 1):
         target = date.today() - timedelta(days=days_back)
         try:
             val = await _compute_metric(db, tenant_id, om_user_id, metric_type, target, names)
@@ -179,7 +183,7 @@ async def freeze_baseline(
             continue
 
     logger.warning(
-        "freeze_baseline: no data in 7 days — tenant=%s uid=%s metric=%s",
-        tenant_id, om_user_id, metric_type,
+        "freeze_baseline: no data in %s days — tenant=%s uid=%s metric=%s",
+        BASELINE_LOOKBACK_DAYS, tenant_id, om_user_id, metric_type,
     )
     return None

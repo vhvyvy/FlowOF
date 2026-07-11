@@ -41,7 +41,7 @@ from dependencies import is_admin, is_owner
 from models import AdminCase, BaselineSnapshot, CaseLedger, CaseStageHistory, KpiConfig
 from schema_patch import seed_default_kpi_config
 from services.case_activities import create_activity
-from services.case_baseline import freeze_baseline
+from services.case_baseline import BASELINE_LOOKBACK_DAYS, freeze_baseline
 from services.case_ledger import record_event
 
 if TYPE_CHECKING:
@@ -341,9 +341,11 @@ async def create_case(
 
     baseline_result = await freeze_baseline(db, tenant_id, om_user_id, metric_type)
     if baseline_result is None:
+        chatter_name = (chatter_display_name or "").strip() or om_user_id
         raise ValueError(
-            f"Недостаточно данных для baseline: "
-            f"за последние 7 дней нет метрики {metric_type!r} у чаттера {om_user_id!r}"
+            f"Недостаточно данных для baseline: за последние {BASELINE_LOOKBACK_DAYS} дней "
+            f"нет ни одной записи метрики {metric_type!r} у чаттера {chatter_name!r}. "
+            f"Возможно, чаттер давно не работал или проблема с синком Onlymonster."
         )
     baseline_value, snapshot_date, snapshot_source = baseline_result
 
