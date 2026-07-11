@@ -198,3 +198,67 @@ async def recalc_admin_kpi_snapshot(
         )
     ).scalar_one()
     return snap
+
+
+async def nightly_recalc_all_tenant_snapshots() -> dict:
+    """
+    Recalc current-month admin_kpi_snapshot for every active admin in every
+    tenant that has at least one is_admin user.  Used by scheduler cron.
+    """
+    import time
+    from datetime import date
+
+    from database import AsyncSessionLocal
+    from models import User
+
+    today = date.today()
+    year, month = today.year, today.month
+    totals = {"tenants": 0, "admins": 0, "errors": []}
+
+    async with AsyncSessionLocal() as db:
+        tenant_ids = list(
+            (
+                await db.execute(
+                    select(User.tenant_id)
+                    .where(User.is_admin == True)  # noqa: E712
+                    .distinct()
+                )
+            ).scalars().all()
+        )
+
+    for tid in tenant_ids:
+        t0 = time.monotonic()
+        async with AsyncSessionLocal() as db:
+            admins = (
+                await db.execute(
+                    select(User).where(
+                        User.tenant_id == tid,
+                        User.is_admin == True,  # noqa: E712
+                        User.active == True,  # noqa: E712
+                    )
+                )
+            ).scalars().all()
+
+        n_done = 0
+        for admin in admins:
+            try:
+                async with AsyncSessionLocal() as db:
+                    await recalc_admin_kpi_snapshot(db, tid, admin.id, year, month)
+                n_done += 1
+            except Exception as exc:
+                logger.exception(
+                    "nightly_kpi_recalc failed tenant=%s admin=%s", tid, admin.id
+                )
+                totals["errors"].append(
+                    {"tenant_id": tid, "admin_id": admin.id, "error": str(exc)}
+                )
+
+        elapsed = time.monotonic() - t0
+        logger.info(
+            "Nightly KPI recalc: tenant=%s, admins=%s, done in %.1fs",
+            tid, n_done, elapsed,
+        )
+        totals["tenants"] += 1
+        totals["admins"] += n_done
+
+    return totals

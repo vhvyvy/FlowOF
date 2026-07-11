@@ -191,6 +191,35 @@ def setup_scheduler() -> Any:
             replace_existing=True,
         )
 
+    # ── Nightly KPI snapshot recalc (optional, ENABLE_ADMIN_KPI_NIGHTLY=1) ───
+    admin_kpi_nightly_enabled = os.getenv(
+        "ENABLE_ADMIN_KPI_NIGHTLY", ""
+    ).strip().lower() in ("1", "true", "yes")
+
+    if admin_kpi_nightly_enabled:
+        async def _nightly_kpi_snapshot_recalc_job() -> None:
+            """04:30 UTC: recalc current-month admin_kpi_snapshot for all admins."""
+            from services.admin_kpi_calc import nightly_recalc_all_tenant_snapshots
+
+            try:
+                stats = await nightly_recalc_all_tenant_snapshots()
+                logger.info(
+                    "nightly_kpi_snapshot_recalc DONE: tenants=%s admins=%s errors=%s",
+                    stats.get("tenants", 0),
+                    stats.get("admins", 0),
+                    len(stats.get("errors", [])),
+                )
+            except Exception as exc:
+                logger.error("nightly_kpi_snapshot_recalc job error: %s", exc, exc_info=True)
+
+        sched.add_job(
+            _nightly_kpi_snapshot_recalc_job,
+            "cron",
+            hour=4, minute=30,
+            id="nightly_kpi_snapshot_recalc",
+            replace_existing=True,
+        )
+
     # ── Agent Watcher jobs (optional, AGENT_WATCHER_ENABLED=1) ────────────────
     watcher_enabled = os.getenv("AGENT_WATCHER_ENABLED", "").strip().lower() in ("1", "true", "yes")
 
@@ -275,12 +304,21 @@ def setup_scheduler() -> Any:
     _scheduler = sched
     kpi_daily_msg   = " + KPI daily 04:00 UTC" if kpi_daily_enabled else ""
     admin_kpi_msg   = " + HOLD review 05:00 UTC" if admin_kpi_enabled else ""
+    admin_kpi_nightly_msg = (
+        " + KPI snapshot recalc 04:30 UTC" if admin_kpi_nightly_enabled else ""
+    )
     watcher_msg     = " + Watcher scan 06:00 + Watcher review 07:00 UTC" if watcher_enabled else ""
-    job_count = 3 + (1 if kpi_daily_enabled else 0) + (1 if admin_kpi_enabled else 0) + (2 if watcher_enabled else 0)
+    job_count = (
+        3
+        + (1 if kpi_daily_enabled else 0)
+        + (1 if admin_kpi_enabled else 0)
+        + (1 if admin_kpi_nightly_enabled else 0)
+        + (2 if watcher_enabled else 0)
+    )
     logger.info(
         "APScheduler started with %d jobs: Notion sync every 24h, MMR daily 03:00 UTC, "
-        "Season close 23:55 UTC%s%s%s",
-        job_count, kpi_daily_msg, admin_kpi_msg, watcher_msg,
+        "Season close 23:55 UTC%s%s%s%s",
+        job_count, kpi_daily_msg, admin_kpi_nightly_msg, admin_kpi_msg, watcher_msg,
     )
     return sched
 

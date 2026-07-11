@@ -465,3 +465,110 @@ class ActivityCreateOut(BaseModel):
 class ActivityListOut(BaseModel):
     items: list[ActivityItemOut]
     total: int
+
+
+# ── Admins review (owner dashboard) ───────────────────────────────────────────
+
+CaseTypeLiteral = Literal["quantitative", "qualitative"]
+
+
+class OwnerAdminBrief(BaseModel):
+    id: int
+    name: str
+
+
+class StageHistoryItem(BaseModel):
+    id: int
+    from_stage: Optional[str]
+    to_stage: str
+    changed_at: datetime
+    changed_by: str
+    notes: Optional[str] = None
+
+    @classmethod
+    def from_orm(cls, h) -> "StageHistoryItem":
+        return cls(
+            id=h.id,
+            from_stage=h.from_stage,
+            to_stage=h.to_stage,
+            changed_at=h.changed_at,
+            changed_by=h.changed_by,
+            notes=h.notes,
+        )
+
+
+class LedgerItem(BaseModel):
+    id: int
+    event_type: str
+    points: float
+    notes: Optional[str] = None
+    created_at: datetime
+
+
+class CaseOut(BaseModel):
+    """Список кейсов админа (GET /admins/{id}/cases)."""
+
+    id: int
+    admin_id: int
+    case_type: CaseTypeLiteral
+    category: Optional[str] = None
+    om_user_id: str
+    metric_type: Optional[str] = None
+    chatter_display_name: Optional[str] = None
+    stage: str
+    priority: str
+    result: Optional[str] = None
+    opened_at: date
+    closed_at: Optional[date] = None
+    review_date: Optional[date] = None
+    hold_days: Optional[int] = None
+    baseline_value: Optional[float] = None
+    result_value: Optional[float] = None
+    notes: Optional[str] = None
+
+
+class OwnerCaseDetail(BaseModel):
+    """Универсальная деталь кейса для овнера (quant + qual)."""
+
+    id: int
+    case_type: CaseTypeLiteral
+    tenant_id: int
+    admin: OwnerAdminBrief
+    om_user_id: str
+    chatter_display_name: str
+    category: Optional[str] = None
+    metric_type: Optional[str] = None
+    stage: str
+    priority: str
+    result: Optional[str] = None
+    opened_at: datetime
+    closed_at: Optional[datetime] = None
+    review_date: Optional[date] = None
+    hold_days: Optional[int] = None
+    baseline_value: Optional[float] = None
+    result_value: Optional[float] = None
+    diagnosis_text: str
+    action_plan: str
+    history: list[StageHistoryItem]
+    ledger: list[LedgerItem]
+    activities_count: int
+    sent_for_review_at: Optional[datetime] = None
+
+
+class RecalcSnapshotsAdminItem(BaseModel):
+    id: int
+    name: str
+    cases_opened: int
+    cases_closed_success: int
+    cases_closed_failed: int
+    cases_cancelled: int
+    guardrail_hits: int
+    total_points: float
+    detect_result_ratio: Optional[float] = None
+    is_calibration: bool
+
+
+class RecalcSnapshotsResponse(BaseModel):
+    recalculated: int
+    admins: list[RecalcSnapshotsAdminItem]
+    cached_at: datetime

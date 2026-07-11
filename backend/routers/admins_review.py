@@ -13,9 +13,10 @@ GET  /admins/{admin_id}/ledger          — ledger конкретного адм
 GET  /admins/{admin_id}/kpi-history     — история снапшотов по месяцам
 GET  /kpi-config                        — конфиг метрик
 PUT  /kpi-config/{metric_type}          — обновить конфиг метрики
-GET  /cases/{case_id}                   — детали качественного кейса (овнер)
+GET  /cases/{case_id}                   — детали кейса (quant + qual)
 GET  /cases/{case_id}/activities        — лента активностей кейса (read-only)
 GET  /pending-qualitative               — качественные кейсы на оценке
+POST /recalc-snapshots                  — пересчёт KPI-снапшотов текущего месяца
 POST /cases/{case_id}/close-qualitative — закрыть качественный кейс (success/failed)
 POST /cases/{case_id}/return-for-revision — вернуть на доработку
 """
@@ -37,13 +38,22 @@ from models import (
     AdminCase, AdminKpiSnapshot, CaseActivity, CaseLedger,
     CaseStageHistory, ChatterMapping, KpiConfig, User,
 )
-from schemas import ActivityListOut
+from schemas import (
+    ActivityListOut,
+    CaseOut,
+    LedgerItem,
+    OwnerAdminBrief,
+    OwnerCaseDetail,
+    RecalcSnapshotsAdminItem,
+    RecalcSnapshotsResponse,
+    StageHistoryItem,
+)
 from schema_patch import seed_default_kpi_config
 from services import admin_cases as svc_cases
 from services import case_activities as svc_activities
 from services import case_ledger as svc_ledger
 from services.case_activities import CaseActivityNotFound, CaseActivityValidation
-from services.admin_kpi_calc import recalc_admin_kpi_snapshot
+from services.admin_kpi_calc import nightly_recalc_all_tenant_snapshots, recalc_admin_kpi_snapshot
 from routers.admin_portal import (
     _activity_list_out,
     _build_activity_filters,
@@ -114,46 +124,6 @@ class PendingQualitativeList(BaseModel):
     total: int
 
 
-class StageHistoryItem(BaseModel):
-    id: int
-    from_stage: Optional[str]
-    to_stage: str
-    changed_at: datetime
-    changed_by: str
-    notes: Optional[str]
-
-    @classmethod
-    def from_orm(cls, h: CaseStageHistory) -> "StageHistoryItem":
-        return cls(
-            id=h.id,
-            from_stage=h.from_stage,
-            to_stage=h.to_stage,
-            changed_at=h.changed_at,
-            changed_by=h.changed_by,
-            notes=h.notes,
-        )
-
-
-class OwnerQualitativeCaseDetail(BaseModel):
-    id: int
-    om_user_id: str
-    chatter_display_name: str
-    category: str
-    diagnosis_text: str
-    action_plan: str
-    priority: str
-    stage: str
-    result: Optional[str]
-    admin: PendingQualitativeAdmin
-    hold_start_date: Optional[date] = None
-    hold_end_date: Optional[date] = None
-    sent_for_review_at: Optional[datetime] = None
-    opened_at: datetime
-    closed_at: Optional[datetime] = None
-    history: list[StageHistoryItem]
-    ledger_points: Optional[float] = None
-
-
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
 def _parse_case_notes(notes: Optional[str]) -> tuple[str, str]:
@@ -209,6 +179,157 @@ async def _latest_ledger_for_case(
     ).scalar_one_or_none()
 
 
+def _derive_hold_days(case: AdminCase) -> Optional[int]:
+    if case.review_date is None:
+        return None
+    opened = case.opened_at.date() if hasattr(case.opened_at, "date") else case.opened_at
+    return (case.review_date - opened).days
+
+
+def _admin_display_name(user: Optional[User]) -> str:
+    if user is None:
+        return ""
+    return (user.full_name or user.email or "").strip()
+
+
+def _case_out_from_row(case: AdminCase, display_names: Optional[str]) -> CaseOut:
+    opened = case.opened_at.date() if hasattr(case.opened_at, "date") else case.opened_at
+    closed = None
+    if case.closed_at is not None:
+        closed = case.closed_at.date() if hasattr(case.closed_at, "date") else case.closed_at
+    case_type = case.case_type or "quantitative"
+    return CaseOut(
+        id=case.id,
+        admin_id=case.admin_id,
+        case_type=case_type,
+        category=case.category if case_type == "qualitative" else None,
+        om_user_id=case.om_user_id,
+        metric_type=case.metric_type if case_type == "quantitative" else None,
+        chatter_display_name=_resolve_chatter_display_name(case.om_user_id, display_names),
+        stage=case.stage,
+        priority=case.priority,
+        result=case.result,
+        opened_at=opened,
+        closed_at=closed,
+        review_date=case.review_date,
+        hold_days=_derive_hold_days(case),
+        baseline_value=float(case.baseline_value) if case.baseline_value is not None else None,
+        result_value=float(case.result_value) if case.result_value is not None else None,
+        notes=case.notes,
+    )
+
+
+async def _build_owner_case_detail(
+    db: AsyncSession, tenant_id: int, case: AdminCase
+) -> OwnerCaseDetail:
+    mapping = (
+        await db.execute(
+            select(ChatterMapping.display_names).where(
+                ChatterMapping.tenant_id == tenant_id,
+                ChatterMapping.onlymonster_id == case.om_user_id,
+            )
+        )
+    ).scalar_one_or_none()
+    admin_user = await db.get(User, case.admin_id)
+    diagnosis, plan = _parse_case_notes(case.notes)
+    sent_at = await _stage_entered_at(db, case.id, "awaiting_review")
+
+    hist_rows = (
+        await db.execute(
+            select(CaseStageHistory)
+            .where(CaseStageHistory.case_id == case.id)
+            .order_by(CaseStageHistory.changed_at.asc())
+        )
+    ).scalars().all()
+
+    ledger_rows = (
+        await db.execute(
+            select(CaseLedger)
+            .where(CaseLedger.case_id == case.id)
+            .order_by(CaseLedger.created_at.asc())
+        )
+    ).scalars().all()
+
+    activities_count = (
+        await db.execute(
+            select(func.count())
+            .select_from(CaseActivity)
+            .where(CaseActivity.case_id == case.id)
+        )
+    ).scalar_one()
+
+    case_type = case.case_type or "quantitative"
+    return OwnerCaseDetail(
+        id=case.id,
+        case_type=case_type,
+        tenant_id=case.tenant_id,
+        admin=OwnerAdminBrief(id=case.admin_id, name=_admin_display_name(admin_user)),
+        om_user_id=case.om_user_id,
+        chatter_display_name=_resolve_chatter_display_name(case.om_user_id, mapping),
+        category=case.category if case_type == "qualitative" else None,
+        metric_type=case.metric_type if case_type == "quantitative" else None,
+        stage=case.stage,
+        priority=case.priority,
+        result=case.result,
+        opened_at=case.opened_at,
+        closed_at=case.closed_at,
+        review_date=case.review_date,
+        hold_days=_derive_hold_days(case),
+        baseline_value=float(case.baseline_value) if case.baseline_value is not None else None,
+        result_value=float(case.result_value) if case.result_value is not None else None,
+        diagnosis_text=diagnosis,
+        action_plan=plan,
+        history=[StageHistoryItem.from_orm(h) for h in hist_rows],
+        ledger=[
+            LedgerItem(
+                id=r.id,
+                event_type=r.event_type,
+                points=float(r.points),
+                notes=r.notes,
+                created_at=r.created_at,
+            )
+            for r in ledger_rows
+        ],
+        activities_count=int(activities_count),
+        sent_for_review_at=sent_at,
+    )
+
+
+def _snap_to_recalc_item(admin: User, snap: AdminKpiSnapshot) -> RecalcSnapshotsAdminItem:
+    return RecalcSnapshotsAdminItem(
+        id=admin.id,
+        name=_admin_display_name(admin),
+        cases_opened=snap.cases_opened,
+        cases_closed_success=snap.cases_closed_success,
+        cases_closed_failed=snap.cases_closed_failed,
+        cases_cancelled=snap.cases_cancelled,
+        guardrail_hits=snap.guardrail_hits,
+        total_points=float(snap.total_points),
+        detect_result_ratio=(
+            float(snap.detect_result_ratio)
+            if snap.detect_result_ratio is not None
+            else None
+        ),
+        is_calibration=snap.is_calibration,
+    )
+
+
+async def _get_tenant_admin_or_404(
+    db: AsyncSession, tenant_id: int, admin_id: int
+) -> User:
+    admin = await db.get(User, admin_id)
+    if (
+        admin is None
+        or admin.tenant_id != tenant_id
+        or not admin.is_admin
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Администратор не найден",
+        )
+    return admin
+
+
 # ── Pydantic schemas ──────────────────────────────────────────────────────────
 
 class AdminKpiSummary(BaseModel):
@@ -230,40 +351,6 @@ class AdminListItem(BaseModel):
     shift_name: Optional[str]
     current_month_kpi: AdminKpiSummary
     open_cases_count: int
-
-
-class CaseOut(BaseModel):
-    id: int
-    admin_id: int
-    om_user_id: str
-    metric_type: str
-    stage: str
-    priority: str
-    result: Optional[str]
-    opened_at: date
-    closed_at: Optional[date]
-    review_date: Optional[date]
-    baseline_value: Optional[float]
-    result_value: Optional[float]
-    notes: Optional[str]
-
-    @classmethod
-    def from_orm(cls, c: AdminCase) -> "CaseOut":
-        return cls(
-            id=c.id,
-            admin_id=c.admin_id,
-            om_user_id=c.om_user_id,
-            metric_type=c.metric_type,
-            stage=c.stage,
-            priority=c.priority,
-            result=c.result,
-            opened_at=c.opened_at.date() if hasattr(c.opened_at, "date") else c.opened_at,
-            closed_at=c.closed_at.date() if c.closed_at and hasattr(c.closed_at, "date") else c.closed_at,
-            review_date=c.review_date,
-            baseline_value=float(c.baseline_value) if c.baseline_value is not None else None,
-            result_value=float(c.result_value) if c.result_value is not None else None,
-            notes=c.notes,
-        )
 
 
 class KpiConfigOut(BaseModel):
@@ -444,9 +531,17 @@ async def admin_cases(
     """Все кейсы конкретного администратора (только чтение)."""
     tid = current_user.tenant_id
 
-    q = select(AdminCase).where(
-        AdminCase.tenant_id == tid,
-        AdminCase.admin_id == admin_id,
+    q = (
+        select(AdminCase, ChatterMapping.display_names)
+        .outerjoin(
+            ChatterMapping,
+            (ChatterMapping.tenant_id == AdminCase.tenant_id)
+            & (ChatterMapping.onlymonster_id == AdminCase.om_user_id),
+        )
+        .where(
+            AdminCase.tenant_id == tid,
+            AdminCase.admin_id == admin_id,
+        )
     )
     if stage:
         q = q.where(AdminCase.stage == stage)
@@ -454,8 +549,8 @@ async def admin_cases(
         q = q.where(AdminCase.stage.in_(list(_OPEN_STAGES)))
     q = q.order_by(AdminCase.opened_at.desc())
 
-    rows = (await db.execute(q)).scalars().all()
-    return [CaseOut.from_orm(c) for c in rows]
+    rows = (await db.execute(q)).all()
+    return [_case_out_from_row(case, display_names) for case, display_names in rows]
 
 
 # ── GET /admins/{admin_id}/ledger ─────────────────────────────────────────────
@@ -624,75 +719,69 @@ async def pending_qualitative(
     return PendingQualitativeList(items=items, total=total)
 
 
-# ── GET /cases/{case_id} (owner qualitative detail) ───────────────────────────
+# ── GET /cases/{case_id} (owner universal detail) ─────────────────────────────
 
-@router.get("/cases/{case_id}", response_model=OwnerQualitativeCaseDetail)
-async def get_owner_qualitative_case(
+@router.get("/cases/{case_id}", response_model=OwnerCaseDetail)
+async def get_owner_case(
     case_id: int,
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(require_owner),
 ):
-    """Детали качественного кейса для оценки овнером."""
+    """Детали кейса для овнера (quantitative и qualitative)."""
     case = await _get_owner_case(db, current_user.tenant_id, case_id)
-    if case.case_type != "qualitative":
-        raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-            detail="Эндпоинт только для качественных кейсов",
-        )
+    return await _build_owner_case_detail(db, current_user.tenant_id, case)
+
+
+# ── POST /recalc-snapshots ────────────────────────────────────────────────────
+
+@router.post("/recalc-snapshots", response_model=RecalcSnapshotsResponse)
+async def recalc_snapshots(
+    admin_id: Optional[int] = Query(None),
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_owner),
+):
+    """Пересчёт KPI-снапшотов текущего месяца для одного или всех админов tenant."""
+    import traceback
 
     tid = current_user.tenant_id
-    mapping = (
-        await db.execute(
-            select(ChatterMapping.display_names).where(
-                ChatterMapping.tenant_id == tid,
-                ChatterMapping.onlymonster_id == case.om_user_id,
+    today = date.today()
+    year, month = today.year, today.month
+
+    if admin_id is not None:
+        await _get_tenant_admin_or_404(db, tid, admin_id)
+        target_ids = [admin_id]
+    else:
+        admins = (
+            await db.execute(
+                select(User).where(
+                    User.tenant_id == tid,
+                    User.is_admin == True,  # noqa: E712
+                    User.active == True,  # noqa: E712
+                )
             )
-        )
-    ).scalar_one_or_none()
-    admin_user = await db.get(User, case.admin_id)
-    admin_name = ""
-    if admin_user:
-        admin_name = (admin_user.full_name or admin_user.email or "").strip()
+        ).scalars().all()
+        target_ids = [a.id for a in admins]
 
-    diagnosis, plan = _parse_case_notes(case.notes)
-    hold_start_dt = await _stage_entered_at(db, case.id, "hold")
-    sent_at = await _stage_entered_at(db, case.id, "awaiting_review")
+    recalculated = 0
+    items: list[RecalcSnapshotsAdminItem] = []
 
-    hist_rows = (
-        await db.execute(
-            select(CaseStageHistory)
-            .where(CaseStageHistory.case_id == case_id)
-            .order_by(CaseStageHistory.changed_at.asc())
-        )
-    ).scalars().all()
+    try:
+        for aid in target_ids:
+            snap = await recalc_admin_kpi_snapshot(db, tid, aid, year, month)
+            admin = await db.get(User, aid)
+            items.append(_snap_to_recalc_item(admin, snap))
+            recalculated += 1
+    except Exception as exc:
+        logger.error("recalc_snapshots failed: %s", traceback.format_exc())
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Ошибка пересчёта KPI: {exc}",
+        ) from exc
 
-    ledger_points: Optional[float] = None
-    if case.stage == "closed" and case.result in ("success", "failed"):
-        event_type = (
-            "qualitative_success" if case.result == "success" else "qualitative_failed"
-        )
-        ledger = await _latest_ledger_for_case(db, case_id, (event_type,))
-        if ledger:
-            ledger_points = float(ledger.points)
-
-    return OwnerQualitativeCaseDetail(
-        id=case.id,
-        om_user_id=case.om_user_id,
-        chatter_display_name=_resolve_chatter_display_name(case.om_user_id, mapping),
-        category=case.category or "",
-        diagnosis_text=diagnosis,
-        action_plan=plan,
-        priority=case.priority,
-        stage=case.stage,
-        result=case.result,
-        admin=PendingQualitativeAdmin(id=case.admin_id, name=admin_name),
-        hold_start_date=hold_start_dt.date() if hold_start_dt else None,
-        hold_end_date=case.review_date,
-        sent_for_review_at=sent_at,
-        opened_at=case.opened_at,
-        closed_at=case.closed_at,
-        history=[StageHistoryItem.from_orm(h) for h in hist_rows],
-        ledger_points=ledger_points,
+    return RecalcSnapshotsResponse(
+        recalculated=recalculated,
+        admins=items,
+        cached_at=datetime.utcnow(),
     )
 
 
