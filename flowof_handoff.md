@@ -51,6 +51,9 @@
 
 - ✅ **Домаппинг чаттеров через кабинет админа:** модалка на `/admin-portal/chatters`, `POST /api/v1/admin-portal/chatters/mappings` (строгий 409, без merge имён). Коммит `c3d9b08`, задеплоено.
 - **Список чаттеров в `/admin-portal/chatters`** теперь показывает всех активных за месяц (смаппированные из daily + сироты из transactions), кнопка домаппинга открыта админам.
+- ✅ **KPI Daily синк:** 10-дневный пробел `chatter_kpi_daily` (2–11 июля 2026) был вызван отсутствием `ENABLE_KPI_DAILY` в Railway Variables. Выставлено `=1`, cron поднялся (`APScheduler started with 6 jobs`, KPI daily 04:00 UTC), backfill за пробел `2026-07-02`→`2026-07-10` выполнен (224 строки, 9 дней ok).
+- ✅ **Baseline при создании кейса:** fallback расширен с 7 до 30 дней (`1abb8ab`). Review-логика продолжает использовать 7 дней (параметризация `lookback_days`, `b70485a`).
+- ✅ **Baseline preview в модалке:** endpoint `GET /admin-portal/chatters/{om}/baseline-preview` показывает baseline до создания кейса; UI модалки блокирует создание quantitative-кейса если данных нет (`269cf0c`).
 - **`hold_days=0` разрешён** (для тестов и краевых случаев). В проде разумный минимум 7–14 дней; ограничение стоит на овнере через `kpi_config` при развитии.
 - **Тестовые qualitative-кейсы 39–43** на dev-БД (`qual_ui_seed_chatter_1`…`4`) — почистить перед демо, если нужно.
 - **CardinalityViolationError** в `schema_patch` на `INSERT INTO chatter_mmr` при переходе сезонов (Весна 2026 → Лето 2026): в логах видно WARNING, миграция не падает целиком, но патч скипается. Разобраться отдельно.
@@ -65,7 +68,7 @@
 | `SECRET_KEY` | JWT |
 | `FRONTEND_URL` | CORS (Vercel URL) |
 | `ENABLE_SCHEDULER` | APScheduler (notion sync, MMR, KPI daily, …) |
-| `ENABLE_KPI_DAILY` | Сбор `chatter_kpi_daily` (04:00 UTC) |
+| `ENABLE_KPI_DAILY` | Сбор `chatter_kpi_daily` (04:00 UTC). **На prod должно быть `=1`** |
 | `ENABLE_ADMIN_KPI` | HOLD-review cron + роутеры admin KPI (05:00 UTC) |
 | `ENABLE_ADMIN_KPI_NIGHTLY` | Ночной пересчёт `admin_kpi_snapshot` (04:30 UTC) |
 | `FILE_STORAGE_ROOT` | **`/data`** на Railway (Volume mount); локально `./local_storage` |
